@@ -1,1 +1,0 @@
-# Video_compress_Encoder_gui
