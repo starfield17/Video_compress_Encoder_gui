@@ -51,6 +51,9 @@ Quick launch from the repo root:
 launch.bat
 ```
 
+On Windows, `launch.bat` now prefers the active Conda environment's
+`python.exe` when started from an activated PowerShell or Conda shell.
+
 Or explicitly:
 
 ```bash
