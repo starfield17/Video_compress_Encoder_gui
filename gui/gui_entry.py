@@ -4,10 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-try:
-    from PySide6.QtWidgets import QApplication
-except ImportError:
-    from PySide2.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 from gui.gui_mainwindow import MainWindow
 
@@ -21,5 +18,4 @@ def run_gui(argv: list[str] | None = None) -> int:
     window = MainWindow(repo_root=Path(__file__).resolve().parent.parent, language=args.lang)
     window.resize(1280, 860)
     window.show()
-    exec_fn = getattr(app, "exec", None) or getattr(app, "exec_", None)
-    return exec_fn()
+    return app.exec()

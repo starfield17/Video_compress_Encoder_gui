@@ -3,6 +3,10 @@
   "keep_preview_temp": true,
   "recent_paths": [],
   "log_level": "info",
-  "language": "en"
+  "language": "en",
+  "last_source_path": "",
+  "last_output_dir": "",
+  "workdir_path": "/home/saki/Video_compress_Encoder_gui/workdir",
+  "ffmpeg_path": "",
+  "ffprobe_path": ""
 }
-

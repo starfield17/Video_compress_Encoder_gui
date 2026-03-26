@@ -6,7 +6,7 @@ This project refactors the original single-file compressor into a modular layout
 - reusable core planning and execution layers
 - preset save/load support
 - manual preview sampling before full encode
-- CLI and PySide GUI entrypoints
+- CLI and PySide6 GUI entrypoints
 - configurable English and Simplified Chinese language packs
 
 ## Layout
@@ -45,8 +45,18 @@ Or explicitly:
 python main.py --gui --lang zh_cn
 ```
 
+The GUI now includes:
+
+- explicit source file and source directory pickers
+- editable output, workdir, ffmpeg, and ffprobe paths
+- preset load/save/delete controls
+- plan summary, preview summary, and encode result summary panels
+- a detailed plan/result table with resolution, duration, bitrate, note, and status columns
+- English and Simplified Chinese language switching
+
 ## Notes
 
-- `ffmpeg` and `ffprobe` must be available on `PATH`, unless explicit paths are passed in the CLI.
+- `ffmpeg` and `ffprobe` must be available on `PATH`, unless explicit paths are set in the CLI or GUI.
 - Presets are stored in `config/presets/`.
 - Preview outputs, logs, and temp files are written into `workdir/`.
+- The GUI is PySide6-only.

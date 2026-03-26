@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-try:
-    from PySide6.QtCore import QThread, Signal
-except ImportError:
-    from PySide2.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal
 
 from core.exec_encode import execute_plan, execute_preview
 from core.models import EncodeOptions, PreviewOptions
@@ -144,4 +141,3 @@ class EncodeWorker(QThread):
             self.completed.emit((plan, results))
         except Exception as exc:
             self.failed.emit(str(exc))
-
