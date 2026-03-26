@@ -41,6 +41,16 @@ Run the GUI with:
 python main.py
 ```
 
+Quick launch from the repo root:
+
+```bash
+./launch.sh
+```
+
+```bat
+launch.bat
+```
+
 Or explicitly:
 
 ```bash
