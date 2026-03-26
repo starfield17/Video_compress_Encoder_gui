@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
@@ -30,6 +31,7 @@ class ScanWorker(QThread):
 class PlanWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
+    log = Signal(str)
 
     def __init__(
         self,
@@ -48,6 +50,10 @@ class PlanWorker(QThread):
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
 
+    def _emit_log(self, message: str) -> None:
+        self.log.emit(message)
+        print(message, file=sys.stdout, flush=True)
+
     def run(self) -> None:
         try:
             plan = build_encode_plan(
@@ -57,6 +63,7 @@ class PlanWorker(QThread):
                 workdir=self.workdir,
                 ffmpeg_path=self.ffmpeg_path,
                 ffprobe_path=self.ffprobe_path,
+                progress_callback=self._emit_log,
             )
             self.completed.emit(plan)
         except Exception as exc:
@@ -66,6 +73,7 @@ class PlanWorker(QThread):
 class PreviewWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
+    log = Signal(str)
 
     def __init__(
         self,
@@ -86,6 +94,10 @@ class PreviewWorker(QThread):
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
 
+    def _emit_log(self, message: str) -> None:
+        self.log.emit(message)
+        print(message, file=sys.stdout, flush=True)
+
     def run(self) -> None:
         try:
             plan = build_encode_plan(
@@ -95,12 +107,18 @@ class PreviewWorker(QThread):
                 workdir=self.workdir,
                 ffmpeg_path=self.ffmpeg_path,
                 ffprobe_path=self.ffprobe_path,
+                progress_callback=self._emit_log,
             )
             item = next((item for item in plan.items if not item.skip_reason), None)
             if item is None:
                 raise RuntimeError("No valid plan item is available for preview.")
             job = build_preview_job(item, self.workdir, self.preview_options)
-            result = execute_preview(job, plan.ffmpeg_path, self.workdir)
+            result = execute_preview(
+                job,
+                plan.ffmpeg_path,
+                self.workdir,
+                log_callback=self._emit_log,
+            )
             self.completed.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -109,6 +127,7 @@ class PreviewWorker(QThread):
 class EncodeWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
+    log = Signal(str)
 
     def __init__(
         self,
@@ -127,6 +146,10 @@ class EncodeWorker(QThread):
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
 
+    def _emit_log(self, message: str) -> None:
+        self.log.emit(message)
+        print(message, file=sys.stdout, flush=True)
+
     def run(self) -> None:
         try:
             plan = build_encode_plan(
@@ -136,8 +159,13 @@ class EncodeWorker(QThread):
                 workdir=self.workdir,
                 ffmpeg_path=self.ffmpeg_path,
                 ffprobe_path=self.ffprobe_path,
+                progress_callback=self._emit_log,
             )
-            results = execute_plan(plan, self.workdir)
+            results = execute_plan(
+                plan,
+                self.workdir,
+                log_callback=self._emit_log,
+            )
             self.completed.emit((plan, results))
         except Exception as exc:
             self.failed.emit(str(exc))

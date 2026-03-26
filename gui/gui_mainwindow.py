@@ -446,6 +446,8 @@ class MainWindow(QMainWindow):
 
     def _append_log(self, message: str) -> None:
         self.log_output.append(message)
+        scrollbar = self.log_output.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def _set_summary(self, lines: list[str]) -> None:
         self.summary_output.setPlainText("\n".join(lines))
@@ -649,6 +651,8 @@ class MainWindow(QMainWindow):
     def _start_worker(self, worker) -> None:
         self.active_worker = worker
         self._set_busy(True)
+        if hasattr(worker, "log"):
+            worker.log.connect(self._append_log)
         worker.finished.connect(lambda: self._set_busy(False))
         worker.finished.connect(lambda: setattr(self, "active_worker", None))
         worker.failed.connect(self._on_worker_failed)
