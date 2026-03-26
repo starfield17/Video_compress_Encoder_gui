@@ -7,6 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from cli.cli_interactive import print_encode_results, print_plan, print_preview_result
+from core.app_paths import config_dir as app_config_dir
+from core.app_paths import ensure_runtime_layout, workdir_dir
 from core.exec_encode import execute_plan, execute_preview
 from core.i18n import get_translator
 from core.models import (
@@ -39,11 +41,11 @@ def _repo_root() -> Path:
 
 
 def _config_dir() -> Path:
-    return _repo_root() / "config"
+    return app_config_dir()
 
 
 def _default_workdir() -> Path:
-    return _repo_root() / "workdir"
+    return workdir_dir()
 
 
 def _load_base_options(args: argparse.Namespace, config_dir: Path) -> EncodeOptions:
@@ -293,6 +295,7 @@ def _run_preset(args: argparse.Namespace, config_dir: Path) -> int:
 
 
 def run_cli(argv: list[str] | None = None) -> int:
+    ensure_runtime_layout()
     parser = _build_parser()
     args = parser.parse_args(argv)
     config_dir = _config_dir()

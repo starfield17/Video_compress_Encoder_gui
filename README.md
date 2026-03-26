@@ -62,3 +62,38 @@ The GUI now includes:
 - Presets are stored in `config/presets/`.
 - Preview outputs, logs, and temp files are written into `workdir/`.
 - The GUI is PySide6-only.
+
+## Packaging
+
+Build with PyInstaller from the repo root:
+
+```bash
+python scripts/build_pyinstaller.py --clean
+```
+
+Common variants:
+
+```bash
+python scripts/build_pyinstaller.py --clean --windowed
+python scripts/build_pyinstaller.py --clean --onefile
+python scripts/build_pyinstaller.py --clean --name video-compressor-gui
+python scripts/build_pyinstaller.py --clean --icon packaging/assets/app.ico
+```
+
+Convenience launchers:
+
+```bat
+scripts\build_windows.bat
+```
+
+```bash
+./scripts/build_linux.sh
+```
+
+Notes:
+
+- The default build uses the spec file at `packaging/video_compressor.spec`.
+- `config/` is bundled automatically.
+- In frozen builds, the app uses a writable runtime layout next to the executable, so `config/` and `workdir/` remain editable after packaging.
+- Optional icons are auto-detected from `packaging/assets/`.
+- Windows version metadata is loaded from `packaging/windows_version_info.txt`.
