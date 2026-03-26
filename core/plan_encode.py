@@ -7,7 +7,13 @@ from typing import Callable, Iterable
 from core.bitrate_policy import choose_ratio, compute_target_video_bitrate
 from core.discover_ffmpeg import discover_ffmpeg_tools
 from core.encoder_caps import list_available_encoders, resolve_encoder
-from core.models import EncodeOptions, EncodePlan, EncodePlanItem, VideoFileItem
+from core.models import (
+    EncodeOptions,
+    EncodePlan,
+    EncodePlanItem,
+    OperationCancelledError,
+    VideoFileItem,
+)
 from core.path_utils import build_output_path, choose_output_root
 from core.probe_media import probe_media_info
 from core.safety_checks import validate_plan_item, validate_workdir
@@ -17,6 +23,14 @@ from core.scan_videos import collect_video_files
 def _emit(progress_callback: Callable[[str], None] | None, message: str) -> None:
     if progress_callback is not None:
         progress_callback(message)
+
+
+def _emit_progress(
+    event_callback: Callable[[dict[str, object]], None] | None,
+    **event: object,
+) -> None:
+    if event_callback is not None:
+        event_callback(event)
 
 
 def _iter_sources(
@@ -46,8 +60,11 @@ def build_encode_plan(
     ffprobe_path: str | None = None,
     files: Iterable[VideoFileItem] | None = None,
     progress_callback: Callable[[str], None] | None = None,
+    progress_event_callback: Callable[[dict[str, object]], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> EncodePlan:
     _emit(progress_callback, "Planning started.")
+    _emit_progress(progress_event_callback, stage="planning", state="started", percent=0.0)
     input_root, file_items = _iter_sources(input_path, options.recursive, files)
     if not file_items:
         raise FileNotFoundError("No processable video files were found.")
@@ -77,9 +94,28 @@ def build_encode_plan(
     _emit(progress_callback, f"Discovered {len(file_items)} input item(s).")
 
     for index, file_item in enumerate(file_items, start=1):
+        if cancel_check is not None and cancel_check():
+            _emit(progress_callback, "Planning cancelled by user.")
+            _emit_progress(
+                progress_event_callback,
+                stage="planning",
+                state="cancelled",
+                percent=((index - 1) / max(len(file_items), 1)) * 100.0,
+            )
+            raise OperationCancelledError("Planning cancelled.")
         _emit(
             progress_callback,
             f"[{index}/{len(file_items)}] Probing source: {file_item.path}",
+        )
+        _emit_progress(
+            progress_event_callback,
+            stage="planning",
+            state="probing",
+            file_path=str(file_item.path),
+            file_name=file_item.path.name,
+            current=index,
+            total=len(file_items),
+            percent=((index - 1) / max(len(file_items), 1)) * 100.0,
         )
         default_output = build_output_path(
             source_path=file_item.path,
@@ -115,6 +151,17 @@ def build_encode_plan(
                 progress_callback,
                 f"[{index}/{len(file_items)}] Planned: {file_item.path.name} -> {default_output}",
             )
+            _emit_progress(
+                progress_event_callback,
+                stage="planning",
+                state="planned",
+                file_path=str(file_item.path),
+                file_name=file_item.path.name,
+                current=index,
+                total=len(file_items),
+                percent=(index / max(len(file_items), 1)) * 100.0,
+                output_path=str(default_output),
+            )
         except Exception as exc:
             item = EncodePlanItem(
                 source_path=file_item.path,
@@ -129,9 +176,21 @@ def build_encode_plan(
                 progress_callback,
                 f"[{index}/{len(file_items)}] Skipped: {file_item.path.name} | {exc}",
             )
+            _emit_progress(
+                progress_event_callback,
+                stage="planning",
+                state="skipped",
+                file_path=str(file_item.path),
+                file_name=file_item.path.name,
+                current=index,
+                total=len(file_items),
+                percent=(index / max(len(file_items), 1)) * 100.0,
+                error=str(exc),
+            )
         items.append(item)
 
     _emit(progress_callback, "Planning finished.")
+    _emit_progress(progress_event_callback, stage="planning", state="finished", percent=100.0)
     return EncodePlan(
         items=items,
         ffmpeg_path=ffmpeg,

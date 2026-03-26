@@ -33,6 +33,10 @@ class PreviewSampleMode(str, Enum):
     CUSTOM = "custom"
 
 
+class OperationCancelledError(RuntimeError):
+    """Raised when a running planning/preview/encode task is cancelled."""
+
+
 @dataclass(slots=True)
 class VideoFileItem:
     path: Path
@@ -146,4 +150,3 @@ class PreviewResult:
     notes: list[str] = field(default_factory=list)
     log_path: Optional[Path] = None
     error_message: Optional[str] = None
-

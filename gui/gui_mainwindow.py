@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QSplitter,
@@ -80,6 +81,7 @@ class MainWindow(QMainWindow):
         self.language = language or self.app_config.get("language", "en")
         self.tr = get_translator(self.language, self.config_dir)
         self.active_worker = None
+        self.log_entries: list[tuple[str, str]] = []
 
         self._build_ui()
         self._load_initial_state()
@@ -291,12 +293,49 @@ class MainWindow(QMainWindow):
         self.plan_button = QPushButton()
         self.preview_button = QPushButton()
         self.encode_button = QPushButton()
+        self.stop_button = QPushButton()
         self.clear_log_button = QPushButton()
+        self.log_filter_label = QLabel()
+        self.log_filter_combo = QComboBox()
+        self.log_filter_combo.addItem("all", "all")
+        self.log_filter_combo.addItem("command", "command")
+        self.log_filter_combo.addItem("process", "process")
+        self.log_filter_combo.addItem("error", "error")
         action_layout.addWidget(self.plan_button)
         action_layout.addWidget(self.preview_button)
         action_layout.addWidget(self.encode_button)
+        action_layout.addWidget(self.stop_button)
         action_layout.addStretch(1)
+        action_layout.addWidget(self.log_filter_label)
+        action_layout.addWidget(self.log_filter_combo)
         action_layout.addWidget(self.clear_log_button)
+
+        progress_box = QGroupBox()
+        progress_layout = QGridLayout(progress_box)
+        self.current_stage_label = QLabel()
+        self.current_stage_value = QLabel("-")
+        self.current_file_label = QLabel()
+        self.current_file_value = QLabel("-")
+        self.current_speed_label = QLabel()
+        self.current_speed_value = QLabel("-")
+        self.current_elapsed_label = QLabel()
+        self.current_elapsed_value = QLabel("-")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(0)
+        self.progress_detail_value = QLabel("-")
+        self.stop_button.setEnabled(False)
+
+        progress_layout.addWidget(self.current_stage_label, 0, 0)
+        progress_layout.addWidget(self.current_stage_value, 0, 1)
+        progress_layout.addWidget(self.current_file_label, 0, 2)
+        progress_layout.addWidget(self.current_file_value, 0, 3)
+        progress_layout.addWidget(self.current_speed_label, 1, 0)
+        progress_layout.addWidget(self.current_speed_value, 1, 1)
+        progress_layout.addWidget(self.current_elapsed_label, 1, 2)
+        progress_layout.addWidget(self.current_elapsed_value, 1, 3)
+        progress_layout.addWidget(self.progress_bar, 2, 0, 1, 3)
+        progress_layout.addWidget(self.progress_detail_value, 2, 3)
 
         summary_box = QGroupBox()
         summary_layout = QVBoxLayout(summary_box)
@@ -325,11 +364,13 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(runtime_box)
         root_layout.addWidget(encode_box)
         root_layout.addWidget(action_box)
+        root_layout.addWidget(progress_box)
         root_layout.addWidget(bottom_splitter, 1)
 
         self.runtime_box = runtime_box
         self.encode_box = encode_box
         self.action_box = action_box
+        self.progress_box = progress_box
         self.summary_box = summary_box
 
         self.source_file_button.clicked.connect(self._browse_source_file)
@@ -345,10 +386,12 @@ class MainWindow(QMainWindow):
         self.plan_button.clicked.connect(self._plan)
         self.preview_button.clicked.connect(self._preview)
         self.encode_button.clicked.connect(self._encode)
-        self.clear_log_button.clicked.connect(self.log_output.clear)
+        self.stop_button.clicked.connect(self._stop_active_task)
+        self.clear_log_button.clicked.connect(self._clear_logs)
         self.language_combo.currentIndexChanged.connect(self._language_changed)
         self.sample_mode_combo.currentIndexChanged.connect(self._sync_dependent_controls)
         self.audio_mode_combo.currentIndexChanged.connect(self._sync_dependent_controls)
+        self.log_filter_combo.currentIndexChanged.connect(self._refresh_log_view)
 
     def _load_initial_state(self) -> None:
         language_index = self.language_combo.findData(self.language)
@@ -376,6 +419,7 @@ class MainWindow(QMainWindow):
         self.runtime_box.setTitle(self.tr.t("gui.group.runtime"))
         self.encode_box.setTitle(self.tr.t("gui.group.encode"))
         self.action_box.setTitle(self.tr.t("gui.group.actions"))
+        self.progress_box.setTitle(self.tr.t("gui.group.progress"))
         self.summary_box.setTitle(self.tr.t("gui.group.summary"))
 
         self.language_label.setText(self.tr.t("gui.label.language"))
@@ -400,6 +444,10 @@ class MainWindow(QMainWindow):
         self.sample_mode_label.setText(self.tr.t("gui.label.sample_mode"))
         self.sample_duration_label.setText(self.tr.t("gui.label.sample_duration"))
         self.sample_start_label.setText(self.tr.t("gui.label.sample_start"))
+        self.current_stage_label.setText(self.tr.t("gui.label.current_stage"))
+        self.current_file_label.setText(self.tr.t("gui.label.current_file"))
+        self.current_speed_label.setText(self.tr.t("gui.label.current_speed"))
+        self.current_elapsed_label.setText(self.tr.t("gui.label.current_elapsed"))
 
         self.source_file_button.setText(self.tr.t("gui.button.browse_file"))
         self.source_dir_button.setText(self.tr.t("gui.button.browse_dir"))
@@ -414,7 +462,13 @@ class MainWindow(QMainWindow):
         self.plan_button.setText(self.tr.t("gui.button.plan"))
         self.preview_button.setText(self.tr.t("gui.button.preview"))
         self.encode_button.setText(self.tr.t("gui.button.encode"))
+        self.stop_button.setText(self.tr.t("gui.button.stop"))
         self.clear_log_button.setText(self.tr.t("gui.button.clear_log"))
+        self.log_filter_label.setText(self.tr.t("gui.label.log_filter"))
+        self.log_filter_combo.setItemText(0, self.tr.t("gui.filter.all"))
+        self.log_filter_combo.setItemText(1, self.tr.t("gui.filter.command"))
+        self.log_filter_combo.setItemText(2, self.tr.t("gui.filter.process"))
+        self.log_filter_combo.setItemText(3, self.tr.t("gui.filter.error"))
 
         self.recursive_check.setText(self.tr.t("gui.checkbox.recursive"))
         self.overwrite_check.setText(self.tr.t("gui.checkbox.overwrite"))
@@ -444,10 +498,32 @@ class MainWindow(QMainWindow):
             ]
         )
 
+    def _classify_log_entry(self, message: str) -> str:
+        if message.startswith("$ "):
+            return "command"
+        lowered = message.lower()
+        if "error" in lowered or "failed" in lowered or "traceback" in lowered or "cancelled" in lowered:
+            return "error"
+        return "process"
+
     def _append_log(self, message: str) -> None:
-        self.log_output.append(message)
+        self.log_entries.append((self._classify_log_entry(message), message))
+        self._refresh_log_view()
+
+    def _refresh_log_view(self) -> None:
+        selected_filter = self.log_filter_combo.currentData() or "all"
+        lines = [
+            message
+            for category, message in self.log_entries
+            if selected_filter == "all" or category == selected_filter
+        ]
+        self.log_output.setPlainText("\n".join(lines))
         scrollbar = self.log_output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+    def _clear_logs(self) -> None:
+        self.log_entries.clear()
+        self.log_output.clear()
 
     def _set_summary(self, lines: list[str]) -> None:
         self.summary_output.setPlainText("\n".join(lines))
@@ -647,20 +723,72 @@ class MainWindow(QMainWindow):
             self.ffprobe_button,
         ]:
             widget.setEnabled(not busy)
+        self.stop_button.setEnabled(busy)
 
     def _start_worker(self, worker) -> None:
         self.active_worker = worker
         self._set_busy(True)
         if hasattr(worker, "log"):
             worker.log.connect(self._append_log)
+        if hasattr(worker, "progress"):
+            worker.progress.connect(self._update_progress)
         worker.finished.connect(lambda: self._set_busy(False))
         worker.finished.connect(lambda: setattr(self, "active_worker", None))
         worker.failed.connect(self._on_worker_failed)
+        if hasattr(worker, "cancelled"):
+            worker.cancelled.connect(self._on_worker_cancelled)
         worker.start()
 
     def _on_worker_failed(self, message: str) -> None:
         self._append_log(f"{self.tr.t('gui.message.error')}: {message}")
         QMessageBox.critical(self, self.tr.t("gui.message.error"), message)
+
+    def _on_worker_cancelled(self, message: str) -> None:
+        self._append_log(message)
+        self._set_summary(
+            [
+                self.tr.t("gui.summary.mode", mode=self.tr.t("gui.button.stop")),
+                self.tr.t("gui.summary.cancelled", message=message),
+            ]
+        )
+        self.current_stage_value.setText(self.tr.t("gui.status.cancelled"))
+        self.progress_detail_value.setText(self.tr.t("gui.status.cancelled"))
+
+    def _stop_active_task(self) -> None:
+        if self.active_worker is None or not hasattr(self.active_worker, "cancel"):
+            return
+        self._append_log(self.tr.t("gui.log.stop_requested"))
+        self.active_worker.cancel()
+        self.stop_button.setEnabled(False)
+
+    def _update_progress(self, event: dict[str, object]) -> None:
+        stage = str(event.get("stage") or event.get("phase") or "-")
+        state = str(event.get("state") or "-")
+        file_name = str(event.get("file_name") or event.get("file_path") or "-")
+        percent = event.get("percent")
+        speed = str(event.get("speed") or "-")
+        elapsed_sec = event.get("elapsed_sec")
+        duration_sec = event.get("duration_sec")
+
+        self.current_stage_value.setText(f"{stage} / {state}")
+        self.current_file_value.setText(file_name)
+        self.current_speed_value.setText(speed if speed else "-")
+        if isinstance(elapsed_sec, (int, float)):
+            elapsed_text = _format_duration(float(elapsed_sec))
+            if isinstance(duration_sec, (int, float)) and float(duration_sec) > 0:
+                elapsed_text = f"{elapsed_text} / {_format_duration(float(duration_sec))}"
+            self.current_elapsed_value.setText(elapsed_text)
+        elif isinstance(duration_sec, (int, float)) and float(duration_sec) > 0:
+            self.current_elapsed_value.setText(_format_duration(float(duration_sec)))
+        else:
+            self.current_elapsed_value.setText("-")
+
+        if isinstance(percent, (int, float)):
+            bounded = max(0.0, min(100.0, float(percent)))
+            self.progress_bar.setValue(int(round(bounded * 10)))
+            self.progress_detail_value.setText(f"{bounded:.1f}%")
+        else:
+            self.progress_detail_value.setText(state)
 
     def _build_context(self) -> tuple[Path, EncodeOptions, Path | None, Path, str | None, str | None]:
         input_path = self._selected_input()
@@ -682,6 +810,8 @@ class MainWindow(QMainWindow):
             return
 
         self._append_log(self.tr.t("gui.log.planning"))
+        self.progress_bar.setValue(0)
+        self.progress_detail_value.setText("0.0%")
         worker = PlanWorker(
             input_path=input_path,
             options=options,
@@ -710,6 +840,8 @@ class MainWindow(QMainWindow):
             custom_start_sec=float(self.sample_start_spin.value()) if self.sample_mode_combo.currentText() == PreviewSampleMode.CUSTOM.value else None,
         )
         self._append_log(self.tr.t("gui.log.previewing"))
+        self.progress_bar.setValue(0)
+        self.progress_detail_value.setText("0.0%")
         worker = PreviewWorker(
             input_path=input_path,
             options=options,
@@ -730,6 +862,8 @@ class MainWindow(QMainWindow):
             return
 
         self._append_log(self.tr.t("gui.log.encoding"))
+        self.progress_bar.setValue(0)
+        self.progress_detail_value.setText("0.0%")
         worker = EncodeWorker(
             input_path=input_path,
             options=options,
@@ -754,6 +888,7 @@ class MainWindow(QMainWindow):
         ]
         self._set_summary(summary)
         self._append_log(self.tr.t("gui.log.plan_ready"))
+        self.current_stage_value.setText(self.tr.t("gui.status.done"))
 
     def _on_preview_ready(self, result) -> None:
         if result.success:
@@ -781,6 +916,7 @@ class MainWindow(QMainWindow):
                 self.tr.t("gui.message.info"),
                 "\n".join(summary[2:7]),
             )
+            self.current_stage_value.setText(self.tr.t("gui.status.done"))
             return
 
         self._append_log(f"{self.tr.t('gui.message.error')}: {result.error_message}")
@@ -801,6 +937,7 @@ class MainWindow(QMainWindow):
         ]
         self._set_summary(summary)
         self._append_log(self.tr.t("gui.log.encode_done"))
+        self.current_stage_value.setText(self.tr.t("gui.status.done"))
 
     def _populate_table(self, plan, results=None) -> None:
         result_map = {str(result.source_path): result for result in results or []}
