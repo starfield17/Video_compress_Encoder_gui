@@ -34,6 +34,8 @@ def print_plan(plan: EncodePlan, tr: Translator) -> None:
         print(f"  {tr.t('cli.target_bitrate')}: {human_kbps(item.target_video_bitrate_bps)}")
         print(f"  {tr.t('cli.encoder')}: {encoder.encoder_name} ({encoder.backend.value})")
         print(f"  {tr.t('cli.output')}: {item.output_path}")
+        for warning in item.warnings:
+            print(f"  {tr.t('cli.note')}: {warning}")
     print(f"{tr.t('cli.ffmpeg')}: {plan.ffmpeg_path}")
     print(f"{tr.t('cli.ffprobe')}: {plan.ffprobe_path}")
     print(f"{tr.t('cli.output_root')}: {plan.output_root}")
@@ -50,6 +52,10 @@ def print_encode_results(results: list[EncodeResult], tr: Translator) -> None:
         else:
             print(f"[{tr.t('cli.result_failed')}] {result.source_path}")
             print(f"  {tr.t('cli.reason')}: {result.error_message}")
+        for copied_path in result.copied_external_subtitle_paths:
+            print(f"  {tr.t('cli.external_subtitle_copied')}: {copied_path}")
+        for warning in result.external_subtitle_warnings:
+            print(f"  {tr.t('cli.external_subtitle_warning')}: {warning}")
         if result.log_path:
             print(f"  {tr.t('cli.log_path')}: {result.log_path}")
 
@@ -73,4 +79,3 @@ def print_preview_result(result: PreviewResult, tr: Translator) -> None:
         print(f"  {tr.t('cli.note')}: {note}")
     if result.log_path:
         print(f"  {tr.t('cli.log_path')}: {result.log_path}")
-

@@ -10,6 +10,7 @@ from core.build_ffmpeg_cmd import (
     build_preview_encode_commands,
     build_preview_extract_command,
 )
+from core.external_subtitles import copy_external_subtitles
 from core.models import (
     EncodePlan,
     EncodeResult,
@@ -255,6 +256,24 @@ def execute_plan(
                         "duration_sec": item.media_info.duration if item.media_info else None,
                     },
                 )
+            if item.options.copy_external_subtitles:
+                copied_paths, warnings = copy_external_subtitles(
+                    item.source_path,
+                    item.output_path,
+                    overwrite=item.options.overwrite,
+                )
+                result.copied_external_subtitle_paths.extend(copied_paths)
+                result.external_subtitle_warnings.extend(warnings)
+                for copied_path in copied_paths:
+                    _emit(
+                        log_callback,
+                        f"[{index}/{len(plan.items)}] Copied external subtitle -> {copied_path}",
+                    )
+                for warning in warnings:
+                    _emit(
+                        log_callback,
+                        f"[{index}/{len(plan.items)}] External subtitle warning: {warning}",
+                    )
             _emit(
                 log_callback,
                 f"[{index}/{len(plan.items)}] Finished {item.source_path.name}",

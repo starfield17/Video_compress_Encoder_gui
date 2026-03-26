@@ -45,6 +45,7 @@ def encode_options_to_preset_data(options: EncodeOptions) -> dict[str, Any]:
         "audio_mode": options.audio_mode.value,
         "audio_bitrate": options.audio_bitrate,
         "copy_subtitles": options.copy_subtitles,
+        "copy_external_subtitles": options.copy_external_subtitles,
         "two_pass": options.two_pass,
         "preset": options.encoder_preset,
         "pix_fmt": options.pix_fmt,
@@ -54,6 +55,10 @@ def encode_options_to_preset_data(options: EncodeOptions) -> dict[str, Any]:
 
 
 def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
+    if "copy_external_subtitles" not in data:
+        data = dict(data)
+        data["copy_external_subtitles"] = False
+
     required = {
         "codec",
         "backend",
@@ -64,6 +69,7 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
         "audio_mode",
         "audio_bitrate",
         "copy_subtitles",
+        "copy_external_subtitles",
         "two_pass",
         "preset",
         "pix_fmt",
@@ -95,6 +101,7 @@ def preset_data_to_encode_options(data: dict[str, Any]) -> EncodeOptions:
         audio_mode=AudioMode(data["audio_mode"]),
         audio_bitrate=str(data["audio_bitrate"]),
         copy_subtitles=bool(data["copy_subtitles"]),
+        copy_external_subtitles=bool(data.get("copy_external_subtitles", False)),
         two_pass=bool(data["two_pass"]),
         encoder_preset=data.get("preset"),
         pix_fmt=str(data["pix_fmt"]),

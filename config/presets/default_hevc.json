@@ -8,10 +8,10 @@
   "audio_mode": "copy",
   "audio_bitrate": "128k",
   "copy_subtitles": false,
+  "copy_external_subtitles": false,
   "two_pass": false,
   "preset": null,
   "pix_fmt": "yuv420p",
   "maxrate_factor": 1.08,
   "bufsize_factor": 2.0
 }
-

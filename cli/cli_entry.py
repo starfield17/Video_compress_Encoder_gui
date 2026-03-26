@@ -82,7 +82,7 @@ def _merge_options(base: EncodeOptions, args: argparse.Namespace) -> EncodeOptio
         if value is not None:
             updates[name] = caster(value)
 
-    bool_names = ["copy_subtitles", "two_pass", "overwrite", "recursive", "dry_run"]
+    bool_names = ["copy_subtitles", "copy_external_subtitles", "two_pass", "overwrite", "recursive", "dry_run"]
     for name in bool_names:
         value = getattr(args, name, None)
         if value is not None:
@@ -117,6 +117,12 @@ def _add_encode_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--audio-mode", dest="audio_mode", choices=["copy", "aac"], help="Audio handling mode")
     parser.add_argument("--audio-bitrate", dest="audio_bitrate", help="Audio bitrate when re-encoding to AAC")
     parser.add_argument("--copy-subtitles", **_bool_action_kwargs(), help="Copy subtitle streams")
+    parser.add_argument(
+        "--copy-external-subtitles",
+        dest="copy_external_subtitles",
+        **_bool_action_kwargs(),
+        help="Copy matching external subtitle files next to the encoded output",
+    )
     parser.add_argument("--two-pass", dest="two_pass", **_bool_action_kwargs(), help="Enable two-pass mode")
     parser.add_argument("--overwrite", **_bool_action_kwargs(), help="Overwrite existing output")
     parser.add_argument("--encoder-preset", dest="encoder_preset", help="Concrete ffmpeg encoder preset")

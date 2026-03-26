@@ -68,6 +68,7 @@ class EncodeOptions:
     audio_mode: AudioMode = AudioMode.COPY
     audio_bitrate: str = "128k"
     copy_subtitles: bool = False
+    copy_external_subtitles: bool = False
     two_pass: bool = False
     encoder_preset: Optional[str] = None
     pix_fmt: str = "yuv420p"
@@ -119,6 +120,8 @@ class EncodeResult:
     log_path: Optional[Path] = None
     error_message: Optional[str] = None
     skipped: bool = False
+    copied_external_subtitle_paths: list[Path] = field(default_factory=list)
+    external_subtitle_warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

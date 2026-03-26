@@ -227,6 +227,7 @@ class MainWindow(QMainWindow):
         self.recursive_check = QCheckBox()
         self.overwrite_check = QCheckBox()
         self.copy_subtitles_check = QCheckBox()
+        self.copy_external_subtitles_check = QCheckBox()
         self.two_pass_check = QCheckBox()
 
         preset_buttons = QHBoxLayout()
@@ -285,6 +286,7 @@ class MainWindow(QMainWindow):
         flags.addWidget(self.recursive_check)
         flags.addWidget(self.overwrite_check)
         flags.addWidget(self.copy_subtitles_check)
+        flags.addWidget(self.copy_external_subtitles_check)
         flags.addWidget(self.two_pass_check)
         encode_layout.addLayout(flags, row, 0, 1, 6)
 
@@ -473,6 +475,7 @@ class MainWindow(QMainWindow):
         self.recursive_check.setText(self.tr.t("gui.checkbox.recursive"))
         self.overwrite_check.setText(self.tr.t("gui.checkbox.overwrite"))
         self.copy_subtitles_check.setText(self.tr.t("gui.checkbox.copy_subtitles"))
+        self.copy_external_subtitles_check.setText(self.tr.t("gui.checkbox.copy_external_subtitles"))
         self.two_pass_check.setText(self.tr.t("gui.checkbox.two_pass"))
 
         self.source_edit.setPlaceholderText(self.tr.t("gui.placeholder.source"))
@@ -635,6 +638,7 @@ class MainWindow(QMainWindow):
             audio_mode=AudioMode(self.audio_mode_combo.currentText()),
             audio_bitrate=self.audio_bitrate_edit.text().strip() or "128k",
             copy_subtitles=self.copy_subtitles_check.isChecked(),
+            copy_external_subtitles=self.copy_external_subtitles_check.isChecked(),
             two_pass=self.two_pass_check.isChecked(),
             encoder_preset=encoder_preset,
             pix_fmt=pix_fmt,
@@ -658,6 +662,7 @@ class MainWindow(QMainWindow):
         self.maxrate_factor_spin.setValue(options.maxrate_factor)
         self.bufsize_factor_spin.setValue(options.bufsize_factor)
         self.copy_subtitles_check.setChecked(options.copy_subtitles)
+        self.copy_external_subtitles_check.setChecked(options.copy_external_subtitles)
         self.two_pass_check.setChecked(options.two_pass)
         self.overwrite_check.setChecked(options.overwrite)
         self.recursive_check.setChecked(options.recursive)

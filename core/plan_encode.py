@@ -14,6 +14,7 @@ from core.models import (
     OperationCancelledError,
     VideoFileItem,
 )
+from core.external_subtitles import discover_external_subtitles
 from core.path_utils import build_output_path, choose_output_root
 from core.probe_media import probe_media_info
 from core.safety_checks import validate_plan_item, validate_workdir
@@ -140,6 +141,12 @@ def build_encode_plan(
                 options=options,
                 target_video_bitrate_bps=target_bitrate,
             )
+            if options.copy_external_subtitles:
+                sidecars = discover_external_subtitles(file_item.path)
+                if sidecars:
+                    item.warnings.append(
+                        f"Will copy {len(sidecars)} external subtitle file(s) next to the output."
+                    )
             validate_plan_item(
                 source_path=file_item.path,
                 output_path=default_output,
