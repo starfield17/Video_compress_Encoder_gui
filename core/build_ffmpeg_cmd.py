@@ -20,13 +20,18 @@ def build_video_args(plan_item: EncodePlanItem) -> list[str]:
         encoder,
         "-b:v",
         str(target_video_bps),
-        "-maxrate",
-        str(int(round(target_video_bps * options.maxrate_factor))),
-        "-bufsize",
-        str(int(round(target_video_bps * options.bufsize_factor))),
         "-pix_fmt",
         options.pix_fmt,
     ]
+
+    # SVT-AV1 in current ffmpeg builds rejects VBV maxrate/bufsize in bitrate mode.
+    if encoder != "libsvtav1":
+        args += [
+            "-maxrate",
+            str(int(round(target_video_bps * options.maxrate_factor))),
+            "-bufsize",
+            str(int(round(target_video_bps * options.bufsize_factor))),
+        ]
 
     if plan_item.options.encoder_preset:
         args += ["-preset", str(plan_item.options.encoder_preset)]
