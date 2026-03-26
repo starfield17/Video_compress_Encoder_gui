@@ -15,8 +15,8 @@ build/
 dist/
 *.so
 
-# Local Anuris debug files
-.anuris_*
+# Local workdir debug files
+workdir/
 
 # Logs and temp files
 *.log

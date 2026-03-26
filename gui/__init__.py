@@ -1,0 +1,2 @@
+"""GUI entrypoints and widgets."""
+

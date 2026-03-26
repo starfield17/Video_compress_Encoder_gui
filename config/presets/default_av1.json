@@ -1,0 +1,17 @@
+{
+  "codec": "av1",
+  "backend": "auto",
+  "ratio": 0.58,
+  "min_video_kbps": 250,
+  "max_video_kbps": 0,
+  "container": "mkv",
+  "audio_mode": "copy",
+  "audio_bitrate": "128k",
+  "copy_subtitles": false,
+  "two_pass": false,
+  "preset": null,
+  "pix_fmt": "yuv420p",
+  "maxrate_factor": 1.08,
+  "bufsize_factor": 2.0
+}
+
