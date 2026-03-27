@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QDialog,
     QSpinBox,
     QStatusBar,
     QTableWidget,
@@ -610,7 +611,7 @@ class MainWindow(QMainWindow):
 
     def _open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self.tr, self.app_config, self)
-        if dialog.exec() != dialog.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         values = dialog.values()
         old_language = self.language
@@ -626,7 +627,7 @@ class MainWindow(QMainWindow):
             str(self.app_config.get("default_preset_name", "")),
             self,
         )
-        if dialog.exec() != dialog.Accepted or not dialog.selected_action:
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selected_action:
             return
 
         action = dialog.selected_action["action"]
