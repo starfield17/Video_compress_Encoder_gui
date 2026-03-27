@@ -17,6 +17,5 @@ def run_gui(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv[:1] + (argv or []))
     window = MainWindow(repo_root=app_root(), language=args.lang)
-    window.resize(1280, 860)
     window.show()
     return app.exec()
