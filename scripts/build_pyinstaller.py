@@ -63,11 +63,14 @@ def _add_data_arg(source: Path, target: str) -> str:
     return f"{source}{separator}{target}"
 
 
-def _pyinstaller_command(args: argparse.Namespace) -> tuple[list[str], str]:
-    icon_path = Path(args.icon).resolve() if args.icon else default_icon_path()
-    version_file = Path(args.version_file).resolve() if args.version_file else default_version_file()
+def _uses_script_build(args: argparse.Namespace) -> bool:
+    return bool(args.onefile or args.windowed or args.name)
 
-    if args.onefile or args.windowed or args.name:
+
+def _pyinstaller_command(args: argparse.Namespace) -> tuple[list[str], str]:
+    if _uses_script_build(args):
+        icon_path = Path(args.icon).resolve() if args.icon else default_icon_path()
+        version_file = Path(args.version_file).resolve() if args.version_file else default_version_file()
         output_name = args.name or "video-compressor"
         cmd = [
             sys.executable,
@@ -107,10 +110,6 @@ def _pyinstaller_command(args: argparse.Namespace) -> tuple[list[str], str]:
         cmd.append("--clean")
     if not args.upx:
         cmd.append("--noupx")
-    if icon_path is not None:
-        cmd.extend(["--icon", str(icon_path)])
-    if version_file is not None:
-        cmd.extend(["--version-file", str(version_file)])
     return cmd, "video-compressor"
 
 
@@ -135,6 +134,15 @@ def main(argv: list[str] | None = None) -> int:
     root = project_root()
     env = os.environ.copy()
     env["PYTHONPATH"] = str(root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+
+    if not _uses_script_build(args):
+        if args.icon:
+            print("Ignoring --icon because spec-mode builds read the icon from packaging/video_compressor.spec")
+        if args.version_file:
+            print(
+                "Ignoring --version-file because spec-mode builds read Windows version metadata "
+                "from packaging/video_compressor.spec"
+            )
 
     cmd, output_name = _pyinstaller_command(args)
     print("Running:", " ".join(cmd))
