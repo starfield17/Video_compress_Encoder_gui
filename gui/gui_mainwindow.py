@@ -2,37 +2,33 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QByteArray, QPoint, Qt, QUrl
+from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
     QGroupBox,
-    QHeaderView,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QDialog,
     QSpinBox,
     QStatusBar,
-    QTableWidget,
-    QTableWidgetItem,
     QTabWidget,
-    QTextEdit,
     QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
-from core.bitrate_policy import human_kbps
 from core.i18n import get_translator
 from core.models import (
     AudioMode,
@@ -42,34 +38,17 @@ from core.models import (
     EncodeOptions,
     PreviewOptions,
     PreviewSampleMode,
+    VideoFileItem,
 )
 from core.preset_store import delete_preset, list_presets, load_app_config, load_preset, save_app_config, save_preset
 from gui.activity_log_window import ActivityLogWindow
-from gui.gui_workers import EncodeWorker, PlanWorker, PreviewWorker
+from gui.gui_workers import PlanWorker, PreviewWorker
 from gui.preview_result_dialog import PreviewResultDialog
 from gui.preset_manager_dialog import PresetManagerDialog
+from gui.queue_manager import QueueManager
+from gui.queue_table import QueueTableModel, create_queue_view, format_duration, format_size
 from gui.queue_window import QueueWindow
 from gui.settings_dialog import SettingsDialog
-
-
-def _format_size(size_bytes: int) -> str:
-    value = float(size_bytes)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if value < 1024.0 or unit == "TiB":
-            return f"{value:.2f} {unit}"
-        value /= 1024.0
-    return f"{size_bytes} B"
-
-
-def _format_duration(seconds: float | None) -> str:
-    if not seconds:
-        return "n/a"
-    total = int(round(seconds))
-    hours, rem = divmod(total, 3600)
-    minutes, secs = divmod(rem, 60)
-    if hours > 0:
-        return f"{hours:d}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:d}:{secs:02d}"
 
 
 class MainWindow(QMainWindow):
@@ -81,22 +60,33 @@ class MainWindow(QMainWindow):
         self.app_config = load_app_config(self.config_dir)
         self.language = language or self.app_config.get("language", "en")
         self.tr = get_translator(self.language, self.config_dir)
-        self.active_worker = None
-        self.last_summary_lines: list[str] = []
-        self.last_table_rows: list[list[str]] = []
-        self._table_row_by_source_path: dict[str, int] = {}
 
+        self.active_worker = None
+        self.queue_busy = False
+        self._header_sync_guard = False
+        self._queue_state = "idle"
+        self._status_stage = "-"
+        self._status_file = "-"
+        self._status_speed = "-"
+        self._status_elapsed = "-"
+        self._status_percent: float | None = None
+
+        self.queue_model = QueueTableModel(self.tr, self)
+        self.queue_manager = QueueManager(self.queue_model, self)
         self.activity_log_window = ActivityLogWindow(self.tr, self)
-        self.queue_window = QueueWindow(self.tr, self)
+        self.queue_window = QueueWindow(self.tr, self.queue_model, self)
 
         self._build_ui()
+        self._connect_signals()
         self._load_initial_state()
         self._apply_translations()
         self._sync_dependent_controls()
+        self._update_queue_metrics(self.queue_model.metrics())
+        self._refresh_action_state()
 
     def _build_ui(self) -> None:
-        self.setMinimumSize(1280, 820)
-        self.resize(1440, 920)
+        self.setMinimumSize(1360, 860)
+        self.resize(1520, 960)
 
         toolbar = QToolBar(self)
         toolbar.setMovable(False)
@@ -104,9 +94,11 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, toolbar)
         self.toolbar = toolbar
 
-        self.open_source_action = QAction(self)
+        self.add_files_action = QAction(self)
+        self.add_folder_action = QAction(self)
         self.plan_action = QAction(self)
         self.start_queue_action = QAction(self)
+        self.pause_after_current_action = QAction(self)
         self.preview_action = QAction(self)
         self.stop_action = QAction(self)
         self.queue_action = QAction(self)
@@ -115,18 +107,24 @@ class MainWindow(QMainWindow):
         self.settings_action = QAction(self)
 
         for action in [
-            self.open_source_action,
+            self.add_files_action,
+            self.add_folder_action,
             self.plan_action,
             self.start_queue_action,
-            self.preview_action,
+            self.pause_after_current_action,
             self.stop_action,
+        ]:
+            toolbar.addAction(action)
+        toolbar.addSeparator()
+        toolbar.addAction(self.preview_action)
+        toolbar.addSeparator()
+        for action in [
             self.queue_action,
             self.activity_log_action,
             self.presets_action,
             self.settings_action,
         ]:
             toolbar.addAction(action)
-        self.stop_action.setEnabled(False)
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -158,7 +156,6 @@ class MainWindow(QMainWindow):
         source_layout.addWidget(self.source_combo, 0, 1, 1, 3)
         source_layout.addWidget(self.source_file_button, 0, 4)
         source_layout.addWidget(self.source_dir_button, 0, 5)
-
         source_layout.addWidget(self.preset_label, 1, 0)
         source_layout.addWidget(self.preset_combo, 1, 1)
         source_layout.addWidget(self.manage_presets_button, 1, 2)
@@ -180,18 +177,45 @@ class MainWindow(QMainWindow):
         jobs_layout.setContentsMargins(12, 12, 12, 12)
         jobs_layout.setSpacing(8)
 
-        self.queue_summary = QTextEdit()
-        self.queue_summary.setReadOnly(True)
-        self.queue_summary.setFixedHeight(96)
+        summary_widget = QWidget()
+        summary_layout = QGridLayout(summary_widget)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setHorizontalSpacing(14)
+        summary_layout.setVerticalSpacing(6)
 
-        self.table = QTableWidget(0, 9)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setAlternatingRowColors(True)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.total_items_title = QLabel()
+        self.total_items_value = QLabel("-")
+        self.states_title = QLabel()
+        self.states_value = QLabel("-")
+        self.total_duration_title = QLabel()
+        self.total_duration_value = QLabel("-")
+        self.saved_space_title = QLabel()
+        self.saved_space_value = QLabel("-")
 
-        jobs_layout.addWidget(self.queue_summary)
-        jobs_layout.addWidget(self.table, 1)
+        summary_layout.addWidget(self.total_items_title, 0, 0)
+        summary_layout.addWidget(self.total_items_value, 0, 1)
+        summary_layout.addWidget(self.states_title, 0, 2)
+        summary_layout.addWidget(self.states_value, 0, 3)
+        summary_layout.addWidget(self.total_duration_title, 1, 0)
+        summary_layout.addWidget(self.total_duration_value, 1, 1)
+        summary_layout.addWidget(self.saved_space_title, 1, 2)
+        summary_layout.addWidget(self.saved_space_value, 1, 3)
+        summary_layout.setColumnStretch(1, 1)
+        summary_layout.setColumnStretch(3, 1)
+
+        self.queue_progress_text = QLabel()
+        self.queue_progress_bar = QProgressBar()
+        self.queue_progress_bar.setRange(0, 1000)
+
+        self.table_view = create_queue_view(self)
+        self.table_view.setModel(self.queue_model)
+        self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_view.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+
+        jobs_layout.addWidget(summary_widget)
+        jobs_layout.addWidget(self.queue_progress_text)
+        jobs_layout.addWidget(self.queue_progress_bar)
+        jobs_layout.addWidget(self.table_view, 1)
 
         root_layout.addWidget(source_box)
         root_layout.addWidget(self.options_tabs)
@@ -206,22 +230,25 @@ class MainWindow(QMainWindow):
         self.status_file_label = QLabel()
         self.status_speed_label = QLabel()
         self.status_elapsed_label = QLabel()
-        self.status_progress_label = QLabel("-")
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 1000)
-        self.progress_bar.setFixedWidth(220)
-        self.progress_bar.setValue(0)
+        self.status_current_progress_label = QLabel()
+        self.current_progress_bar = QProgressBar()
+        self.current_progress_bar.setRange(0, 1000)
+        self.current_progress_bar.setFixedWidth(220)
+        self.current_progress_bar.setValue(0)
 
         status_bar.addWidget(self.status_stage_label, 0)
         status_bar.addWidget(self.status_file_label, 1)
         status_bar.addPermanentWidget(self.status_speed_label)
         status_bar.addPermanentWidget(self.status_elapsed_label)
-        status_bar.addPermanentWidget(self.status_progress_label)
-        status_bar.addPermanentWidget(self.progress_bar)
+        status_bar.addPermanentWidget(self.status_current_progress_label)
+        status_bar.addPermanentWidget(self.current_progress_bar)
 
-        self.open_source_action.triggered.connect(self._browse_source_file)
-        self.plan_action.triggered.connect(self._plan)
-        self.start_queue_action.triggered.connect(self._encode)
+    def _connect_signals(self) -> None:
+        self.add_files_action.triggered.connect(self._add_files_dialog)
+        self.add_folder_action.triggered.connect(self._add_folder_dialog)
+        self.plan_action.triggered.connect(self._plan_current_source)
+        self.start_queue_action.triggered.connect(self._start_queue)
+        self.pause_after_current_action.triggered.connect(self._pause_after_current)
         self.preview_action.triggered.connect(self._preview)
         self.stop_action.triggered.connect(self._stop_active_task)
         self.queue_action.triggered.connect(self._show_queue_window)
@@ -238,6 +265,32 @@ class MainWindow(QMainWindow):
         self.source_combo.editTextChanged.connect(self._persist_runtime_state)
         self.output_edit.editingFinished.connect(self._persist_runtime_state)
         self.preset_combo.currentIndexChanged.connect(self._preset_combo_changed)
+
+        self.queue_model.metricsChanged.connect(self._update_queue_metrics)
+        self.queue_manager.log.connect(self._append_log)
+        self.queue_manager.progress.connect(self._update_progress)
+        self.queue_manager.busyChanged.connect(self._on_queue_busy_changed)
+        self.queue_manager.stateChanged.connect(self._on_queue_state_changed)
+        self.queue_manager.error.connect(self._on_queue_error)
+
+        self.table_view.customContextMenuRequested.connect(lambda pos: self._show_queue_context_menu(self.table_view, pos))
+        self.queue_window.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.queue_window.table_view.customContextMenuRequested.connect(
+            lambda pos: self._show_queue_context_menu(self.queue_window.table_view, pos)
+        )
+        self.table_view.horizontalHeader().customContextMenuRequested.connect(
+            lambda pos: self._show_header_context_menu(self.table_view, pos)
+        )
+        self.queue_window.table_view.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.queue_window.table_view.horizontalHeader().customContextMenuRequested.connect(
+            lambda pos: self._show_header_context_menu(self.queue_window.table_view, pos)
+        )
+
+        for view in [self.table_view, self.queue_window.table_view]:
+            header = view.horizontalHeader()
+            header.sectionMoved.connect(lambda *_args, source_view=view: self._persist_header_state(source_view))
+            header.sectionResized.connect(lambda *_args, source_view=view: self._persist_header_state(source_view))
+            header.sortIndicatorChanged.connect(lambda *_args, source_view=view: self._persist_header_state(source_view))
 
     def _build_basic_tab(self) -> None:
         page = QWidget()
@@ -437,17 +490,20 @@ class MainWindow(QMainWindow):
         else:
             self._apply_options(EncodeOptions())
 
-        self._set_summary([self.tr.t("gui.summary.idle")])
-        self._set_status_snapshot("-", "-", "-", "-", 0.0)
+        self._set_status_snapshot("-", "-", "-", "-", None)
+        self._restore_header_state()
 
     def _apply_translations(self) -> None:
+        self.tr = get_translator(self.language, self.config_dir)
         self.setWindowTitle(self.tr.t("app.title"))
         self.source_box.setTitle(self.tr.t("gui.group.source"))
         self.jobs_box.setTitle(self.tr.t("gui.group.jobs"))
 
-        self.open_source_action.setText(self.tr.t("gui.button.open_source"))
+        self.add_files_action.setText(self.tr.t("gui.button.add_files"))
+        self.add_folder_action.setText(self.tr.t("gui.button.add_folder"))
         self.plan_action.setText(self.tr.t("gui.button.add_to_queue"))
         self.start_queue_action.setText(self.tr.t("gui.button.start_queue"))
+        self.pause_after_current_action.setText(self.tr.t("gui.button.pause_after_current"))
         self.preview_action.setText(self.tr.t("gui.button.preview"))
         self.stop_action.setText(self.tr.t("gui.button.stop"))
         self.queue_action.setText(self.tr.t("gui.button.queue"))
@@ -485,6 +541,11 @@ class MainWindow(QMainWindow):
         self.sample_start_label.setText(self.tr.t("gui.label.sample_start"))
         self.advanced_info.setText(self.tr.t("gui.advanced.placeholder"))
 
+        self.total_items_title.setText(self.tr.t("gui.summary.total_items"))
+        self.states_title.setText(self.tr.t("gui.summary.states"))
+        self.total_duration_title.setText(self.tr.t("gui.summary.total_duration"))
+        self.saved_space_title.setText(self.tr.t("gui.summary.estimated_saved"))
+
         self.source_combo.lineEdit().setPlaceholderText(self.tr.t("gui.placeholder.source"))
         self.output_edit.setPlaceholderText(self.tr.t("gui.placeholder.default_output"))
         self.ratio_edit.setPlaceholderText(self.tr.t("gui.placeholder.auto_ratio"))
@@ -498,32 +559,17 @@ class MainWindow(QMainWindow):
         self.options_tabs.setTabText(self.options_tabs.indexOf(self.preview_tab), self.tr.t("gui.tab.preview"))
         self.options_tabs.setTabText(self.options_tabs.indexOf(self.advanced_tab), self.tr.t("gui.tab.advanced"))
 
-        self.status_stage_label.setText(self.tr.t("gui.statusbar.stage", value="-"))
-        self.status_file_label.setText(self.tr.t("gui.statusbar.file", value="-"))
-        self.status_speed_label.setText(self.tr.t("gui.statusbar.speed", value="-"))
-        self.status_elapsed_label.setText(self.tr.t("gui.statusbar.elapsed", value="-"))
-        self.status_progress_label.setText("-")
-
-        self.table.setHorizontalHeaderLabels(
-            [
-                self.tr.t("gui.table.source"),
-                self.tr.t("gui.table.resolution"),
-                self.tr.t("gui.table.duration"),
-                self.tr.t("gui.table.source_bitrate"),
-                self.tr.t("gui.table.target_bitrate"),
-                self.tr.t("gui.table.encoder"),
-                self.tr.t("gui.table.output"),
-                self.tr.t("gui.table.note"),
-                self.tr.t("gui.table.status"),
-            ]
-        )
-
+        self.queue_model.set_translator(self.tr)
         self.activity_log_window.apply_translations(self.tr)
         self.queue_window.apply_translations(self.tr)
-        if self.last_summary_lines:
-            self._set_summary(self.last_summary_lines)
-        if self.last_table_rows:
-            self.queue_window.set_rows(self.last_table_rows)
+        self._set_status_snapshot(
+            self._status_stage,
+            self._status_file,
+            self._status_speed,
+            self._status_elapsed,
+            self._status_percent,
+        )
+        self._update_queue_metrics(self.queue_model.metrics())
 
     def _set_source_history(self, items: list[str]) -> None:
         current = self.source_combo.currentText().strip()
@@ -537,11 +583,6 @@ class MainWindow(QMainWindow):
         self.activity_log_window.append_message(message)
         self.statusBar().showMessage(message, 5000)
 
-    def _set_summary(self, lines: list[str]) -> None:
-        self.last_summary_lines = lines[:]
-        self.queue_summary.setPlainText("\n".join(lines))
-        self.queue_window.set_summary_lines(lines)
-
     def _set_status_snapshot(
         self,
         stage: str,
@@ -550,20 +591,53 @@ class MainWindow(QMainWindow):
         elapsed: str,
         percent: float | None,
     ) -> None:
+        self._status_stage = stage
+        self._status_file = file_name
+        self._status_speed = speed
+        self._status_elapsed = elapsed
+        self._status_percent = percent
         self.status_stage_label.setText(self.tr.t("gui.statusbar.stage", value=stage))
         self.status_file_label.setText(self.tr.t("gui.statusbar.file", value=file_name))
         self.status_speed_label.setText(self.tr.t("gui.statusbar.speed", value=speed))
         self.status_elapsed_label.setText(self.tr.t("gui.statusbar.elapsed", value=elapsed))
         if percent is None:
-            self.status_progress_label.setText("-")
+            self.status_current_progress_label.setText(self.tr.t("gui.statusbar.current_progress", value="-"))
+            self.current_progress_bar.setValue(0)
         else:
             bounded = max(0.0, min(100.0, percent))
-            self.status_progress_label.setText(f"{bounded:.1f}%")
-            self.progress_bar.setValue(int(round(bounded * 10)))
+            self.status_current_progress_label.setText(self.tr.t("gui.statusbar.current_progress", value=f"{bounded:.1f}%"))
+            self.current_progress_bar.setValue(int(round(bounded * 10)))
+
+    def _update_queue_metrics(self, metrics) -> None:
+        self.total_items_value.setText(str(metrics.total_items))
+        self.states_value.setText(
+            self.tr.t(
+                "gui.summary.queue_states",
+                ready=metrics.ready_items,
+                running=metrics.running_items,
+                failed=metrics.failed_items,
+            )
+        )
+        self.total_duration_value.setText(format_duration(metrics.total_duration_sec))
+        self.saved_space_value.setText(
+            format_size(metrics.estimated_saved_bytes) if metrics.estimated_saved_bytes is not None else self.tr.t("gui.value.unknown")
+        )
+        eta_text = format_duration(metrics.eta_sec) if metrics.eta_sec else self.tr.t("gui.value.unknown")
+        self.queue_progress_text.setText(
+            self.tr.t(
+                "gui.summary.queue_progress",
+                percent=f"{metrics.queue_percent:.1f}",
+                completed=metrics.completed_items,
+                total=metrics.total_items,
+                eta=eta_text,
+            )
+        )
+        self.queue_progress_bar.setValue(int(round(metrics.queue_percent * 10)))
+        self.queue_window.update_metrics(metrics)
+        self._refresh_action_state()
 
     def _language_changed(self, language: str) -> None:
         self.language = language
-        self.tr = get_translator(self.language, self.config_dir)
         self.app_config["language"] = self.language
         self._persist_runtime_state()
         self._apply_translations()
@@ -749,18 +823,7 @@ class MainWindow(QMainWindow):
             self._set_source_history(self.app_config["recent_paths"])
         save_app_config(self.config_dir, self.app_config)
 
-    def _set_busy(self, busy: bool) -> None:
-        for action in [
-            self.open_source_action,
-            self.plan_action,
-            self.start_queue_action,
-            self.preview_action,
-            self.presets_action,
-            self.settings_action,
-        ]:
-            action.setEnabled(not busy)
-        self.stop_action.setEnabled(busy)
-
+    def _set_controls_enabled(self, enabled: bool) -> None:
         for widget in [
             self.source_file_button,
             self.source_dir_button,
@@ -771,20 +834,47 @@ class MainWindow(QMainWindow):
             self.output_edit,
             self.options_tabs,
         ]:
-            widget.setEnabled(not busy)
+            widget.setEnabled(enabled)
 
-    def _start_worker(self, worker) -> None:
+    def _refresh_action_state(self) -> None:
+        plan_preview_busy = self.active_worker is not None
+        queue_busy = self.queue_busy
+        any_busy = plan_preview_busy or queue_busy
+        has_queued_items = bool(self.queue_model.execution_records())
+
+        self.add_files_action.setEnabled(not any_busy)
+        self.add_folder_action.setEnabled(not any_busy)
+        self.plan_action.setEnabled(not any_busy)
+        self.start_queue_action.setEnabled(not any_busy and has_queued_items)
+        self.pause_after_current_action.setEnabled(queue_busy)
+        self.preview_action.setEnabled(not any_busy)
+        self.stop_action.setEnabled(any_busy)
+        self.presets_action.setEnabled(not any_busy)
+        self.settings_action.setEnabled(not any_busy)
+        self._set_controls_enabled(not any_busy)
+        drag_drop_mode = QAbstractItemView.NoDragDrop if queue_busy else QAbstractItemView.InternalMove
+        for view in [self.table_view, self.queue_window.table_view]:
+            view.setDragDropMode(drag_drop_mode)
+            view.setDragEnabled(not queue_busy)
+            view.setAcceptDrops(not queue_busy)
+
+    def _set_worker_busy(self, busy: bool) -> None:
+        if not busy:
+            self.active_worker = None
+        self._refresh_action_state()
+
+    def _start_worker(self, worker, completed_slot) -> None:
         self.active_worker = worker
-        self._set_busy(True)
+        self._refresh_action_state()
         if hasattr(worker, "log"):
             worker.log.connect(self._append_log)
         if hasattr(worker, "progress"):
             worker.progress.connect(self._update_progress)
-        worker.finished.connect(lambda: self._set_busy(False))
-        worker.finished.connect(lambda: setattr(self, "active_worker", None))
+        worker.finished.connect(lambda: self._set_worker_busy(False))
         worker.failed.connect(self._on_worker_failed)
         if hasattr(worker, "cancelled"):
             worker.cancelled.connect(self._on_worker_cancelled)
+        worker.completed.connect(completed_slot)
         worker.start()
 
     def _on_worker_failed(self, message: str) -> None:
@@ -794,37 +884,53 @@ class MainWindow(QMainWindow):
 
     def _on_worker_cancelled(self, message: str) -> None:
         self._append_log(message)
-        self._set_summary(
-            [
-                self.tr.t("gui.summary.mode", mode=self.tr.t("gui.button.stop")),
-                self.tr.t("gui.summary.cancelled", message=message),
-            ]
-        )
         self._set_status_snapshot(self.tr.t("gui.status.cancelled"), "-", "-", "-", None)
 
+    def _on_queue_busy_changed(self, busy: bool) -> None:
+        self.queue_busy = busy
+        self._refresh_action_state()
+
+    def _on_queue_state_changed(self, state: str) -> None:
+        self._queue_state = state
+        if state == "pause_after_current":
+            self._append_log(self.tr.t("gui.log.pause_after_current_requested"))
+        elif state == "paused":
+            self._append_log(self.tr.t("gui.log.queue_paused"))
+        elif state == "cancelled":
+            self._append_log(self.tr.t("gui.log.queue_cancelled"))
+        elif state == "idle":
+            self._append_log(self.tr.t("gui.log.encode_done"))
+
+    def _on_queue_error(self, message: str) -> None:
+        self._append_log(f"{self.tr.t('gui.message.error')}: {message}")
+        QMessageBox.critical(self, self.tr.t("gui.message.error"), message)
+
     def _stop_active_task(self) -> None:
-        if self.active_worker is None or not hasattr(self.active_worker, "cancel"):
+        if self.active_worker is not None and hasattr(self.active_worker, "cancel"):
+            self._append_log(self.tr.t("gui.log.stop_requested"))
+            self.active_worker.cancel()
             return
-        self._append_log(self.tr.t("gui.log.stop_requested"))
-        self.active_worker.cancel()
-        self.stop_action.setEnabled(False)
+        if self.queue_busy:
+            self._append_log(self.tr.t("gui.log.stop_requested"))
+            self.queue_manager.stop()
 
     def _update_progress(self, event: dict[str, object]) -> None:
         stage = str(event.get("stage") or event.get("phase") or "-")
         state = str(event.get("state") or "-")
         file_name = str(event.get("file_name") or event.get("file_path") or "-")
-        file_path = str(event.get("file_path") or "")
-        percent = event.get("percent")
+        percent = event.get("file_progress")
+        if not isinstance(percent, (int, float)):
+            percent = event.get("percent")
         speed = str(event.get("speed") or "-")
         elapsed_sec = event.get("elapsed_sec")
         duration_sec = event.get("duration_sec")
 
         if isinstance(elapsed_sec, (int, float)):
-            elapsed_text = _format_duration(float(elapsed_sec))
+            elapsed_text = format_duration(float(elapsed_sec))
             if isinstance(duration_sec, (int, float)) and float(duration_sec) > 0:
-                elapsed_text = f"{elapsed_text} / {_format_duration(float(duration_sec))}"
+                elapsed_text = f"{elapsed_text} / {format_duration(float(duration_sec))}"
         elif isinstance(duration_sec, (int, float)) and float(duration_sec) > 0:
-            elapsed_text = _format_duration(float(duration_sec))
+            elapsed_text = format_duration(float(duration_sec))
         else:
             elapsed_text = "-"
 
@@ -833,52 +939,6 @@ class MainWindow(QMainWindow):
             bounded_percent = max(0.0, min(100.0, float(percent)))
 
         self._set_status_snapshot(f"{stage} / {state}", file_name, speed if speed else "-", elapsed_text, bounded_percent)
-        self._update_job_row_from_progress(stage=stage, state=state, file_path=file_path, event=event)
-
-    def _update_job_row_from_progress(
-        self,
-        *,
-        stage: str,
-        state: str,
-        file_path: str,
-        event: dict[str, object],
-    ) -> None:
-        if stage != "encode" or not file_path:
-            return
-
-        note: str | None = None
-        status: str | None = None
-        if state == "starting_file":
-            status = self.tr.t("gui.status.running")
-        elif state == "finished_file":
-            status = self.tr.t("gui.status.done")
-        elif state == "failed_file":
-            status = self.tr.t("gui.status.failed")
-            note = str(event.get("message") or "").strip() or None
-        elif state == "skipped":
-            status = self.tr.t("gui.status.skip")
-            note = str(event.get("message") or "").strip() or None
-
-        if status is not None:
-            self._update_job_status(file_path, status, note)
-
-    def _update_job_status(self, source_path: str, status: str, note: str | None = None) -> None:
-        row_index = self._table_row_by_source_path.get(source_path)
-        if row_index is None:
-            return
-
-        status_item = self.table.item(row_index, 8)
-        if status_item is not None:
-            status_item.setText(status)
-            status_item.setToolTip(status)
-
-        if note is not None:
-            note_item = self.table.item(row_index, 7)
-            if note_item is not None:
-                note_item.setText(note)
-                note_item.setToolTip(note)
-
-        self.queue_window.update_job_status(source_path, status, note)
 
     def _build_context(self) -> tuple[Path, EncodeOptions, Path | None, Path, str | None, str | None]:
         input_path = self._selected_input()
@@ -892,7 +952,7 @@ class MainWindow(QMainWindow):
         self._persist_runtime_state()
         return input_path, options, output_dir, workdir, ffmpeg_path, ffprobe_path
 
-    def _plan(self) -> None:
+    def _plan_current_source(self) -> None:
         try:
             input_path, options, output_dir, workdir, ffmpeg_path, ffprobe_path = self._build_context()
         except Exception as exc:
@@ -900,8 +960,7 @@ class MainWindow(QMainWindow):
             return
 
         self._append_log(self.tr.t("gui.log.planning"))
-        self.progress_bar.setValue(0)
-        self.status_progress_label.setText("0.0%")
+        self._set_status_snapshot("planning", "-", "-", "-", 0.0)
         worker = PlanWorker(
             input_path=input_path,
             options=options,
@@ -910,8 +969,46 @@ class MainWindow(QMainWindow):
             ffmpeg_path=ffmpeg_path,
             ffprobe_path=ffprobe_path,
         )
-        worker.completed.connect(self._on_plan_ready)
-        self._start_worker(worker)
+        self._start_worker(worker, lambda plan, workdir=workdir: self._on_plan_ready(plan, workdir))
+
+    def _start_plan_for_files(self, files: list[Path]) -> None:
+        if not files:
+            return
+        options = self._current_options()
+        output_dir = self._selected_output()
+        workdir = self._selected_workdir()
+        ffmpeg_path = self._selected_ffmpeg()
+        ffprobe_path = self._selected_ffprobe()
+        self._persist_runtime_state()
+        file_items = [VideoFileItem(path=path.resolve(), relative_path=Path(path.name)) for path in files]
+        self._append_log(self.tr.t("gui.log.planning"))
+        self._set_status_snapshot("planning", "-", "-", "-", 0.0)
+        worker = PlanWorker(
+            input_path=None,
+            options=options,
+            output_dir=output_dir,
+            workdir=workdir,
+            ffmpeg_path=ffmpeg_path,
+            ffprobe_path=ffprobe_path,
+            files=file_items,
+        )
+        self._start_worker(worker, lambda plan, workdir=workdir: self._on_plan_ready(plan, workdir))
+
+    def _add_files_dialog(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(self, self.tr.t("gui.dialog.select_source_file"))
+        if not paths:
+            return
+        self.source_combo.setEditText(paths[0])
+        self._persist_runtime_state()
+        self._start_plan_for_files([Path(path) for path in paths])
+
+    def _add_folder_dialog(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, self.tr.t("gui.dialog.select_source_dir"))
+        if not path:
+            return
+        self.source_combo.setEditText(path)
+        self._persist_runtime_state()
+        self._plan_current_source()
 
     def _preview(self) -> None:
         try:
@@ -934,8 +1031,7 @@ class MainWindow(QMainWindow):
             ),
         )
         self._append_log(self.tr.t("gui.log.previewing"))
-        self.progress_bar.setValue(0)
-        self.status_progress_label.setText("0.0%")
+        self._set_status_snapshot("preview", input_path.name, "-", "-", 0.0)
         worker = PreviewWorker(
             input_path=input_path,
             options=options,
@@ -945,29 +1041,19 @@ class MainWindow(QMainWindow):
             ffmpeg_path=ffmpeg_path,
             ffprobe_path=ffprobe_path,
         )
-        worker.completed.connect(self._on_preview_ready)
-        self._start_worker(worker)
+        self._start_worker(worker, self._on_preview_ready)
 
-    def _encode(self) -> None:
-        try:
-            input_path, options, output_dir, workdir, ffmpeg_path, ffprobe_path = self._build_context()
-        except Exception as exc:
-            QMessageBox.warning(self, self.tr.t("gui.message.warning"), str(exc))
+    def _start_queue(self) -> None:
+        if not self.queue_manager.start():
+            QMessageBox.information(self, self.tr.t("gui.message.info"), self.tr.t("gui.message.no_queued_items"))
             return
-
         self._append_log(self.tr.t("gui.log.encoding"))
-        self.progress_bar.setValue(0)
-        self.status_progress_label.setText("0.0%")
-        worker = EncodeWorker(
-            input_path=input_path,
-            options=options,
-            output_dir=output_dir,
-            workdir=workdir,
-            ffmpeg_path=ffmpeg_path,
-            ffprobe_path=ffprobe_path,
-        )
-        worker.completed.connect(self._on_encode_ready)
-        self._start_worker(worker)
+        self._set_status_snapshot("queue / starting", "-", "-", "-", 0.0)
+
+    def _pause_after_current(self) -> None:
+        if self.queue_manager.pause_after_current():
+            return
+        QMessageBox.information(self, self.tr.t("gui.message.info"), self.tr.t("gui.message.no_running_queue"))
 
     def _show_queue_window(self) -> None:
         self.queue_window.show()
@@ -979,43 +1065,40 @@ class MainWindow(QMainWindow):
         self.activity_log_window.raise_()
         self.activity_log_window.activateWindow()
 
-    def _on_plan_ready(self, plan) -> None:
-        self._populate_table(plan)
+    def _on_plan_ready(self, plan, workdir: Path) -> None:
+        added = self.queue_manager.add_plan(plan, workdir)
         valid_items = [item for item in plan.items if not item.skip_reason]
         skipped_items = [item for item in plan.items if item.skip_reason]
-        summary = [
-            self.tr.t("gui.summary.mode", mode=self.tr.t("gui.button.add_to_queue")),
-            self.tr.t("gui.summary.plan_count", total=len(plan.items), ready=len(valid_items), skipped=len(skipped_items)),
-            self.tr.t("gui.summary.output_root", path=plan.output_root),
-            self.tr.t("gui.summary.ffmpeg", path=plan.ffmpeg_path),
-            self.tr.t("gui.summary.ffprobe", path=plan.ffprobe_path),
-        ]
-        self._set_summary(summary)
-        self._append_log(self.tr.t("gui.log.plan_ready"))
+        self._append_log(
+            self.tr.t(
+                "gui.log.items_added_to_queue",
+                total=added,
+                ready=len(valid_items),
+                skipped=len(skipped_items),
+            )
+        )
         self._set_status_snapshot(self.tr.t("gui.status.done"), "-", "-", "-", 100.0)
 
     def _on_preview_ready(self, result) -> None:
         if result.success:
             summary = [
-                self.tr.t("gui.summary.mode", mode=self.tr.t("gui.button.preview")),
                 self.tr.t("gui.summary.preview_source", path=result.job.source_path),
                 self.tr.t("gui.summary.preview_window", start=result.job.start_sec, duration=result.job.duration_sec),
                 self.tr.t("gui.summary.preview_source_sample", path=result.job.source_sample_path),
                 self.tr.t("gui.summary.preview_encoded_sample", path=result.job.encoded_sample_path),
                 self.tr.t("gui.summary.preview_ratio", value=f"{result.sample_compression_ratio:.3f}"),
-                self.tr.t("gui.summary.preview_estimated_size", value=_format_size(result.estimated_full_output_size)),
+                self.tr.t("gui.summary.preview_estimated_size", value=format_size(result.estimated_full_output_size)),
                 self.tr.t("gui.summary.log_path", path=result.log_path or ""),
             ]
-            self._set_summary(summary)
             self._append_log(self.tr.t("gui.log.preview_done"))
             self._append_log(
                 self.tr.t(
                     "gui.log.preview_ratio",
                     ratio=f"{result.sample_compression_ratio:.3f}",
-                    size=_format_size(result.estimated_full_output_size),
+                    size=format_size(result.estimated_full_output_size),
                 )
             )
-            dialog = PreviewResultDialog(self.tr, summary[1:], self)
+            dialog = PreviewResultDialog(self.tr, summary, self)
             dialog.exec()
             self._set_status_snapshot(self.tr.t("gui.status.done"), result.job.source_path.name, "-", "-", 100.0)
             return
@@ -1023,73 +1106,105 @@ class MainWindow(QMainWindow):
         self._append_log(f"{self.tr.t('gui.message.error')}: {result.error_message}")
         QMessageBox.critical(self, self.tr.t("gui.message.error"), result.error_message or "Preview failed.")
 
-    def _on_encode_ready(self, payload) -> None:
-        plan, results = payload
-        self._populate_table(plan, results)
-        success_count = sum(1 for result in results if result.success)
-        skipped_count = sum(1 for result in results if result.skipped)
-        failed_count = sum(1 for result in results if not result.success and not result.skipped)
-        summary = [
-            self.tr.t("gui.summary.mode", mode=self.tr.t("gui.button.start_queue")),
-            self.tr.t("gui.summary.encode_count", success=success_count, skipped=skipped_count, failed=failed_count),
-            self.tr.t("gui.summary.output_root", path=plan.output_root),
-            self.tr.t("gui.summary.ffmpeg", path=plan.ffmpeg_path),
-            self.tr.t("gui.summary.ffprobe", path=plan.ffprobe_path),
-        ]
-        self._set_summary(summary)
-        self._append_log(self.tr.t("gui.log.encode_done"))
-        self._set_status_snapshot(self.tr.t("gui.status.done"), "-", "-", "-", 100.0)
+    def _selected_rows_from_view(self, view) -> list[int]:
+        return sorted(index.row() for index in view.selectionModel().selectedRows())
 
-    def _build_table_rows(self, plan, results=None) -> list[list[str]]:
-        result_map = {str(result.source_path): result for result in results or []}
-        rows: list[list[str]] = []
-        for item in plan.items:
-            media = item.media_info
-            encoder = item.encoder_info
-            note = item.skip_reason or "; ".join(item.warnings) or ""
-            status = self.tr.t("gui.status.ready")
-            if item.skip_reason:
-                status = self.tr.t("gui.status.skip")
+    def _show_queue_context_menu(self, view, pos: QPoint) -> None:
+        menu = QMenu(self)
+        rows = self._selected_rows_from_view(view)
+        selected_record = self.queue_model.record_for_row(rows[0]) if rows else None
 
-            result = result_map.get(str(item.source_path))
-            if result:
-                if result.skipped:
-                    status = self.tr.t("gui.status.skip")
-                elif result.success:
-                    status = self.tr.t("gui.status.done")
-                else:
-                    status = self.tr.t("gui.status.failed")
-                    note = result.error_message or note
+        open_source_action = menu.addAction(self.tr.t("gui.menu.open_source_folder"))
+        open_output_action = menu.addAction(self.tr.t("gui.menu.open_output_folder"))
+        copy_source_action = menu.addAction(self.tr.t("gui.menu.copy_source_path"))
+        copy_output_action = menu.addAction(self.tr.t("gui.menu.copy_output_path"))
+        menu.addSeparator()
+        retry_action = menu.addAction(self.tr.t("gui.menu.retry_selected"))
+        remove_action = menu.addAction(self.tr.t("gui.menu.remove_from_queue"))
+        clear_completed_action = menu.addAction(self.tr.t("gui.menu.clear_completed"))
 
-            resolution = (
-                f"{media.width}x{media.height}" if media and media.width and media.height else "n/a"
-            )
-            duration = _format_duration(media.duration if media else None)
-            rows.append(
-                [
-                    str(item.source_path),
-                    resolution,
-                    duration,
-                    human_kbps(media.video_bitrate_bps) if media else "n/a",
-                    human_kbps(item.target_video_bitrate_bps) if item.target_video_bitrate_bps else "n/a",
-                    f"{encoder.encoder_name} ({encoder.backend.value})" if encoder else "n/a",
-                    str(item.output_path),
-                    note,
-                    status,
-                ]
-            )
-        return rows
+        has_selection = bool(rows)
+        open_source_action.setEnabled(has_selection)
+        open_output_action.setEnabled(has_selection)
+        copy_source_action.setEnabled(has_selection)
+        copy_output_action.setEnabled(has_selection)
+        retry_action.setEnabled(has_selection and self.queue_model.can_retry_rows(rows) and not self.queue_busy)
+        remove_action.setEnabled(has_selection and self.queue_model.can_remove_rows(rows) and not self.queue_busy)
+        clear_completed_action.setEnabled(not self.queue_busy)
 
-    def _populate_table(self, plan, results=None) -> None:
-        rows = self._build_table_rows(plan, results)
-        self.last_table_rows = rows
-        self._table_row_by_source_path = {}
-        self.table.setRowCount(len(rows))
-        for row_index, values in enumerate(rows):
-            if values:
-                self._table_row_by_source_path[values[0]] = row_index
-            for col_index, value in enumerate(values):
-                cell = QTableWidgetItem(value)
-                cell.setToolTip(value)
-                self.table.setItem(row_index, col_index, cell)
-        self.queue_window.set_rows(rows)
+        action = menu.exec(view.viewport().mapToGlobal(pos))
+        if action is None:
+            return
+        if action == open_source_action and selected_record is not None:
+            self._open_folder(selected_record.source_path.parent)
+        elif action == open_output_action and selected_record is not None:
+            self._open_folder(selected_record.output_path.parent)
+        elif action == copy_source_action and selected_record is not None:
+            self._copy_to_clipboard(str(selected_record.source_path))
+        elif action == copy_output_action and selected_record is not None:
+            self._copy_to_clipboard(str(selected_record.output_path))
+        elif action == retry_action:
+            retried = self.queue_manager.retry_rows(rows)
+            if retried:
+                self._append_log(self.tr.t("gui.log.retry_selected", count=retried))
+        elif action == remove_action:
+            removed = self.queue_manager.remove_rows(rows)
+            if removed:
+                self._append_log(self.tr.t("gui.log.removed_from_queue", count=removed))
+        elif action == clear_completed_action:
+            removed = self.queue_manager.clear_completed()
+            if removed:
+                self._append_log(self.tr.t("gui.log.cleared_completed", count=removed))
+
+    def _show_header_context_menu(self, view, pos: QPoint) -> None:
+        menu = QMenu(self)
+        header = view.horizontalHeader()
+        for column in range(self.queue_model.columnCount()):
+            label = self.queue_model.headerData(column, Qt.Horizontal, Qt.DisplayRole)
+            action = menu.addAction(str(label))
+            action.setCheckable(True)
+            action.setChecked(not view.isColumnHidden(column))
+            action.setData(column)
+        chosen = menu.exec(header.mapToGlobal(pos))
+        if chosen is None:
+            return
+        column = int(chosen.data())
+        view.setColumnHidden(column, not chosen.isChecked())
+        self._persist_header_state(view)
+
+    def _persist_header_state(self, source_view) -> None:
+        if self._header_sync_guard:
+            return
+        state = source_view.horizontalHeader().saveState()
+        self.app_config["queue_table_header_state"] = bytes(state.toBase64()).decode("ascii")
+        save_app_config(self.config_dir, self.app_config)
+
+        self._header_sync_guard = True
+        try:
+            for view in [self.table_view, self.queue_window.table_view]:
+                if view is source_view:
+                    continue
+                view.horizontalHeader().restoreState(state)
+        finally:
+            self._header_sync_guard = False
+
+    def _restore_header_state(self) -> None:
+        encoded = str(self.app_config.get("queue_table_header_state", "")).strip()
+        if not encoded:
+            return
+        try:
+            raw = QByteArray.fromBase64(encoded.encode("ascii"))
+        except Exception:
+            return
+        self._header_sync_guard = True
+        try:
+            for view in [self.table_view, self.queue_window.table_view]:
+                view.horizontalHeader().restoreState(raw)
+        finally:
+            self._header_sync_guard = False
+
+    def _copy_to_clipboard(self, text: str) -> None:
+        QApplication.clipboard().setText(text)
+
+    def _open_folder(self, path: Path) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))

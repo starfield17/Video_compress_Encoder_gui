@@ -29,7 +29,10 @@ def build_output_path(
     container: ContainerChoice,
 ) -> Path:
     if input_root.is_dir():
-        relative_parent = source_path.parent.relative_to(input_root)
+        try:
+            relative_parent = source_path.parent.relative_to(input_root)
+        except ValueError:
+            relative_parent = Path()
     else:
         relative_parent = Path()
     destination_dir = ensure_dir(output_root / relative_parent)
@@ -66,4 +69,3 @@ def log_file_path(workdir: Path, source_path: Path, stage: str) -> Path:
 def passlog_prefix(workdir: Path, source_path: Path, stage: str) -> Path:
     temp_root = ensure_dir(workdir / "temp")
     return temp_root / f"{_source_token(source_path)}_{stage}.ffpass"
-

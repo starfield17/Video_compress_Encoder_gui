@@ -3,11 +3,12 @@ from __future__ import annotations
 import sys
 import threading
 from pathlib import Path
+from typing import Iterable
 
 from PySide6.QtCore import QThread, Signal
 
 from core.exec_encode import execute_plan, execute_preview
-from core.models import EncodeOptions, OperationCancelledError, PreviewOptions
+from core.models import EncodeOptions, OperationCancelledError, PreviewOptions, VideoFileItem
 from core.plan_encode import build_encode_plan
 from core.preview_sample import build_preview_job
 from core.scan_videos import collect_video_files
@@ -38,12 +39,13 @@ class PlanWorker(QThread):
 
     def __init__(
         self,
-        input_path: Path,
+        input_path: Path | None,
         options: EncodeOptions,
         output_dir: Path | None,
         workdir: Path,
         ffmpeg_path: str | None,
         ffprobe_path: str | None,
+        files: Iterable[VideoFileItem] | None = None,
     ) -> None:
         super().__init__()
         self.input_path = input_path
@@ -52,6 +54,7 @@ class PlanWorker(QThread):
         self.workdir = workdir
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
+        self.files = list(files) if files is not None else None
         self._cancel_event = threading.Event()
 
     def _emit_log(self, message: str) -> None:
@@ -73,6 +76,7 @@ class PlanWorker(QThread):
                 workdir=self.workdir,
                 ffmpeg_path=self.ffmpeg_path,
                 ffprobe_path=self.ffprobe_path,
+                files=self.files,
                 progress_callback=self._emit_log,
                 progress_event_callback=self._emit_progress,
                 cancel_check=self._cancel_event.is_set,

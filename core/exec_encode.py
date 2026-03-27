@@ -134,7 +134,17 @@ def _run_logged_command(
                         progress_context.get("duration_sec") if progress_context else None,
                     )
                     if parsed is not None:
-                        _emit_progress(progress_callback, category="ffmpeg", message=normalized, **(progress_context or {}), **parsed)
+                        event = dict(parsed)
+                        if progress_context:
+                            current_pass_index = progress_context.get("current_pass_index")
+                            total_passes = progress_context.get("total_passes")
+                            if isinstance(current_pass_index, int) and isinstance(total_passes, int) and total_passes > 0:
+                                pass_percent = float(event.get("percent") or 0.0)
+                                file_progress = (((current_pass_index - 1) + (pass_percent / 100.0)) / total_passes) * 100.0
+                                event["pass_percent"] = pass_percent
+                                event["file_progress"] = max(0.0, min(100.0, file_progress))
+                                event["percent"] = event["file_progress"]
+                        _emit_progress(progress_callback, category="ffmpeg", message=normalized, **(progress_context or {}), **event)
                     else:
                         _emit_progress(progress_callback, category="log", message=normalized, **(progress_context or {}))
             return_code = proc.wait()
@@ -155,6 +165,179 @@ def _run_logged_command(
         stdout=stdout_text,
         stderr="",
     )
+
+
+def execute_plan_item(
+    ffmpeg_path: Path,
+    item,
+    workdir: Path,
+    *,
+    queue_index: int = 1,
+    queue_total: int = 1,
+    log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+    process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
+    extra_progress_context: dict[str, object] | None = None,
+) -> EncodeResult:
+    workdir = validate_workdir(workdir)
+    log_path = log_file_path(workdir, item.source_path, "encode")
+    base_context = {
+        "stage": "encode",
+        "file_name": item.source_path.name,
+        "file_path": str(item.source_path),
+        "output_path": str(item.output_path),
+        "current": queue_index,
+        "total": queue_total,
+        "duration_sec": item.media_info.duration if item.media_info else None,
+    }
+    if extra_progress_context:
+        base_context.update(extra_progress_context)
+
+    if item.skip_reason:
+        _emit(
+            log_callback,
+            f"[{queue_index}/{queue_total}] Skipping {item.source_path.name}: {item.skip_reason}",
+        )
+        _emit_progress(
+            progress_callback,
+            state="skipped",
+            percent=100.0,
+            pass_percent=100.0,
+            file_progress=100.0,
+            current_pass_index=0,
+            total_passes=0,
+            message=item.skip_reason,
+            **base_context,
+        )
+        return EncodeResult(
+            source_path=item.source_path,
+            output_path=item.output_path,
+            success=False,
+            skipped=True,
+            error_message=item.skip_reason,
+            log_path=log_path,
+        )
+
+    commands, passlog = build_encode_commands(ffmpeg_path, item, workdir)
+    total_passes = max(len(commands), 1)
+    _emit(
+        log_callback,
+        f"[{queue_index}/{queue_total}] Encoding {item.source_path.name} -> {item.output_path}",
+    )
+    _emit_progress(
+        progress_callback,
+        state="starting_file",
+        percent=0.0,
+        pass_percent=0.0,
+        file_progress=0.0,
+        current_pass_index=1,
+        total_passes=total_passes,
+        **base_context,
+    )
+    result = EncodeResult(
+        source_path=item.source_path,
+        output_path=item.output_path,
+        success=True,
+        commands=commands,
+        log_path=log_path,
+    )
+    current_pass_index = 1
+    try:
+        for pass_index, cmd in enumerate(commands, start=1):
+            current_pass_index = pass_index
+            file_progress = ((pass_index - 1) / total_passes) * 100.0
+            _emit_progress(
+                progress_callback,
+                state="running_pass",
+                percent=file_progress,
+                pass_percent=0.0,
+                file_progress=file_progress,
+                current_pass_index=pass_index,
+                total_passes=total_passes,
+                **base_context,
+            )
+            _run_logged_command(
+                cmd,
+                log_path,
+                log_callback,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                process_callback=process_callback,
+                progress_context={
+                    **base_context,
+                    "current_pass_index": pass_index,
+                    "total_passes": total_passes,
+                },
+            )
+        if item.options.copy_external_subtitles:
+            copied_paths, warnings = copy_external_subtitles(
+                item.source_path,
+                item.output_path,
+                overwrite=item.options.overwrite,
+            )
+            result.copied_external_subtitle_paths.extend(copied_paths)
+            result.external_subtitle_warnings.extend(warnings)
+            for copied_path in copied_paths:
+                _emit(
+                    log_callback,
+                    f"[{queue_index}/{queue_total}] Copied external subtitle -> {copied_path}",
+                )
+            for warning in warnings:
+                _emit(
+                    log_callback,
+                    f"[{queue_index}/{queue_total}] External subtitle warning: {warning}",
+                )
+        _emit(
+            log_callback,
+            f"[{queue_index}/{queue_total}] Finished {item.source_path.name}",
+        )
+        _emit_progress(
+            progress_callback,
+            state="finished_file",
+            percent=100.0,
+            pass_percent=100.0,
+            file_progress=100.0,
+            current_pass_index=total_passes,
+            total_passes=total_passes,
+            **base_context,
+        )
+        return result
+    except OperationCancelledError:
+        _emit_progress(
+            progress_callback,
+            state="cancelled_file",
+            percent=None,
+            current_pass_index=current_pass_index,
+            total_passes=total_passes,
+            **base_context,
+        )
+        raise
+    except subprocess.CalledProcessError as exc:
+        result.success = False
+        result.return_code = exc.returncode
+        result.error_message = exc.stderr or exc.stdout or str(exc)
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"[command failed] returncode={exc.returncode}\n")
+            if exc.stdout:
+                fh.write(exc.stdout + "\n")
+            if exc.stderr:
+                fh.write(exc.stderr + "\n")
+        _emit(
+            log_callback,
+            f"[{queue_index}/{queue_total}] Failed {item.source_path.name} (exit code {exc.returncode})",
+        )
+        _emit_progress(
+            progress_callback,
+            state="failed_file",
+            message=result.error_message or "",
+            current_pass_index=total_passes,
+            total_passes=total_passes,
+            **base_context,
+        )
+        return result
+    finally:
+        _cleanup_passlog(passlog)
 
 
 def _cleanup_passlog(passlog: Path | None) -> None:
@@ -185,139 +368,19 @@ def execute_plan(
             _emit(log_callback, "Encode execution cancelled by user.")
             _emit_progress(progress_callback, stage="encode", state="cancelled")
             raise OperationCancelledError("Encoding cancelled.")
-        log_path = log_file_path(workdir, item.source_path, "encode")
-        if item.skip_reason:
-            _emit(
-                log_callback,
-                f"[{index}/{len(plan.items)}] Skipping {item.source_path.name}: {item.skip_reason}",
+        results.append(
+            execute_plan_item(
+                plan.ffmpeg_path,
+                item,
+                workdir,
+                queue_index=index,
+                queue_total=len(plan.items),
+                log_callback=log_callback,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                process_callback=process_callback,
             )
-            _emit_progress(
-                progress_callback,
-                stage="encode",
-                state="skipped",
-                file_name=item.source_path.name,
-                file_path=str(item.source_path),
-                current=index,
-                total=len(plan.items),
-                percent=(index / max(len(plan.items), 1)) * 100.0,
-                message=item.skip_reason,
-            )
-            results.append(
-                EncodeResult(
-                    source_path=item.source_path,
-                    output_path=item.output_path,
-                    success=False,
-                    skipped=True,
-                    error_message=item.skip_reason,
-                    log_path=log_path,
-                )
-            )
-            continue
-
-        commands, passlog = build_encode_commands(plan.ffmpeg_path, item, workdir)
-        _emit(
-            log_callback,
-            f"[{index}/{len(plan.items)}] Encoding {item.source_path.name} -> {item.output_path}",
         )
-        _emit_progress(
-            progress_callback,
-            stage="encode",
-            state="starting_file",
-            file_name=item.source_path.name,
-            file_path=str(item.source_path),
-            output_path=str(item.output_path),
-            current=index,
-            total=len(plan.items),
-            percent=((index - 1) / max(len(plan.items), 1)) * 100.0,
-        )
-        result = EncodeResult(
-            source_path=item.source_path,
-            output_path=item.output_path,
-            success=True,
-            commands=commands,
-            log_path=log_path,
-        )
-        try:
-            for cmd in commands:
-                _run_logged_command(
-                    cmd,
-                    log_path,
-                    log_callback,
-                    progress_callback=progress_callback,
-                    cancel_check=cancel_check,
-                    process_callback=process_callback,
-                    progress_context={
-                        "stage": "encode",
-                        "file_name": item.source_path.name,
-                        "file_path": str(item.source_path),
-                        "output_path": str(item.output_path),
-                        "current": index,
-                        "total": len(plan.items),
-                        "duration_sec": item.media_info.duration if item.media_info else None,
-                    },
-                )
-            if item.options.copy_external_subtitles:
-                copied_paths, warnings = copy_external_subtitles(
-                    item.source_path,
-                    item.output_path,
-                    overwrite=item.options.overwrite,
-                )
-                result.copied_external_subtitle_paths.extend(copied_paths)
-                result.external_subtitle_warnings.extend(warnings)
-                for copied_path in copied_paths:
-                    _emit(
-                        log_callback,
-                        f"[{index}/{len(plan.items)}] Copied external subtitle -> {copied_path}",
-                    )
-                for warning in warnings:
-                    _emit(
-                        log_callback,
-                        f"[{index}/{len(plan.items)}] External subtitle warning: {warning}",
-                    )
-            _emit(
-                log_callback,
-                f"[{index}/{len(plan.items)}] Finished {item.source_path.name}",
-            )
-            _emit_progress(
-                progress_callback,
-                stage="encode",
-                state="finished_file",
-                file_name=item.source_path.name,
-                file_path=str(item.source_path),
-                output_path=str(item.output_path),
-                current=index,
-                total=len(plan.items),
-                percent=(index / max(len(plan.items), 1)) * 100.0,
-            )
-        except subprocess.CalledProcessError as exc:
-            result.success = False
-            result.return_code = exc.returncode
-            result.error_message = exc.stderr or exc.stdout or str(exc)
-            with log_path.open("a", encoding="utf-8") as fh:
-                fh.write(f"[command failed] returncode={exc.returncode}\n")
-                if exc.stdout:
-                    fh.write(exc.stdout + "\n")
-                if exc.stderr:
-                    fh.write(exc.stderr + "\n")
-            _emit(
-                log_callback,
-                f"[{index}/{len(plan.items)}] Failed {item.source_path.name} (exit code {exc.returncode})",
-            )
-            _emit_progress(
-                progress_callback,
-                stage="encode",
-                state="failed_file",
-                file_name=item.source_path.name,
-                file_path=str(item.source_path),
-                output_path=str(item.output_path),
-                current=index,
-                total=len(plan.items),
-                percent=(index / max(len(plan.items), 1)) * 100.0,
-                message=result.error_message or "",
-            )
-        finally:
-            _cleanup_passlog(passlog)
-        results.append(result)
     _emit(log_callback, "Encode execution finished.")
     _emit_progress(progress_callback, stage="encode", state="finished", percent=100.0)
     return results

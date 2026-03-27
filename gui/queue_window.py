@@ -1,29 +1,21 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import (
-    QAbstractItemView,
-    QHeaderView,
-    QLabel,
-    QMainWindow,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QLabel, QMainWindow, QProgressBar, QVBoxLayout, QWidget
 
 from core.i18n import Translator
+from gui.queue_table import QueueTableModel, create_queue_view, format_duration
 
 
 class QueueWindow(QMainWindow):
-    def __init__(self, tr: Translator, parent=None) -> None:
+    def __init__(self, tr: Translator, model: QueueTableModel, parent=None) -> None:
         super().__init__(parent)
         self.tr = tr
-        self._row_by_source_path: dict[str, int] = {}
+        self.model = model
         self._build_ui()
         self.apply_translations(tr)
 
     def _build_ui(self) -> None:
-        self.resize(1180, 680)
+        self.resize(1280, 760)
         central = QWidget(self)
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -31,58 +23,48 @@ class QueueWindow(QMainWindow):
         layout.setSpacing(8)
 
         self.summary_label = QLabel()
-        self.summary_label.setWordWrap(True)
+        self.queue_progress_label = QLabel()
+        self.queue_progress_bar = QProgressBar()
+        self.queue_progress_bar.setRange(0, 1000)
 
-        self.table = QTableWidget(0, 9)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setAlternatingRowColors(True)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table_view = create_queue_view(self)
+        self.table_view.setModel(self.model)
 
         layout.addWidget(self.summary_label)
-        layout.addWidget(self.table, 1)
+        layout.addWidget(self.queue_progress_label)
+        layout.addWidget(self.queue_progress_bar)
+        layout.addWidget(self.table_view, 1)
 
     def apply_translations(self, tr: Translator) -> None:
         self.tr = tr
         self.setWindowTitle(self.tr.t("gui.window.queue"))
-        self.table.setHorizontalHeaderLabels(
-            [
-                self.tr.t("gui.table.source"),
-                self.tr.t("gui.table.resolution"),
-                self.tr.t("gui.table.duration"),
-                self.tr.t("gui.table.source_bitrate"),
-                self.tr.t("gui.table.target_bitrate"),
-                self.tr.t("gui.table.encoder"),
-                self.tr.t("gui.table.output"),
-                self.tr.t("gui.table.note"),
-                self.tr.t("gui.table.status"),
-            ]
+        self.model.set_translator(tr)
+
+    def update_metrics(self, metrics) -> None:
+        states_text = self.tr.t(
+            "gui.summary.queue_states",
+            ready=metrics.ready_items,
+            running=metrics.running_items,
+            failed=metrics.failed_items,
         )
+        total_duration = format_duration(metrics.total_duration_sec)
+        self.summary_label.setText(
+            self.tr.t(
+                "gui.summary.queue_window",
+                total=metrics.total_items,
+                states=states_text,
+                duration=total_duration,
+            )
+        )
+        eta_text = format_duration(metrics.eta_sec) if metrics.eta_sec else self.tr.t("gui.value.unknown")
+        self.queue_progress_label.setText(
+            self.tr.t(
+                "gui.summary.queue_progress",
+                percent=f"{metrics.queue_percent:.1f}",
+                completed=metrics.completed_items,
+                total=metrics.total_items,
+                eta=eta_text,
+            )
+        )
+        self.queue_progress_bar.setValue(int(round(metrics.queue_percent * 10)))
 
-    def set_summary_lines(self, lines: list[str]) -> None:
-        self.summary_label.setText("\n".join(lines))
-
-    def set_rows(self, rows: list[list[str]]) -> None:
-        self._row_by_source_path = {}
-        self.table.setRowCount(len(rows))
-        for row_index, values in enumerate(rows):
-            if values:
-                self._row_by_source_path[values[0]] = row_index
-            for col_index, value in enumerate(values):
-                cell = QTableWidgetItem(value)
-                cell.setToolTip(value)
-                self.table.setItem(row_index, col_index, cell)
-
-    def update_job_status(self, source_path: str, status: str, note: str | None = None) -> None:
-        row_index = self._row_by_source_path.get(source_path)
-        if row_index is None:
-            return
-        status_item = self.table.item(row_index, 8)
-        if status_item is not None:
-            status_item.setText(status)
-            status_item.setToolTip(status)
-        if note is not None:
-            note_item = self.table.item(row_index, 7)
-            if note_item is not None:
-                note_item.setText(note)
-                note_item.setToolTip(note)
