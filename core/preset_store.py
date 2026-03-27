@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from core.app_paths import workdir_dir
 from core.models import (
     AudioMode,
     BackendChoice,
@@ -24,8 +25,9 @@ def presets_dir(config_dir: Path) -> Path:
 
 
 def app_config_path(config_dir: Path) -> Path:
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir / APP_CONFIG_NAME
+    runtime_workdir = workdir_dir()
+    runtime_workdir.mkdir(parents=True, exist_ok=True)
+    return runtime_workdir / APP_CONFIG_NAME
 
 
 def _preset_path(name: str, config_dir: Path) -> Path:
@@ -139,15 +141,16 @@ def delete_preset(name: str, config_dir: Path) -> None:
 
 def load_app_config(config_dir: Path) -> dict[str, Any]:
     path = app_config_path(config_dir)
-    if not path.exists():
-        return {
-            "default_preset_name": "default_hevc",
-            "keep_preview_temp": True,
-            "recent_paths": [],
-            "log_level": "info",
-            "language": "en",
-        }
-    return json.loads(path.read_text(encoding="utf-8"))
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    return {
+        "default_preset_name": "default_hevc",
+        "keep_preview_temp": True,
+        "recent_paths": [],
+        "log_level": "info",
+        "language": "en",
+    }
 
 
 def save_app_config(config_dir: Path, data: dict[str, Any]) -> Path:
