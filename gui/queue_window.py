@@ -18,6 +18,7 @@ class QueueWindow(QMainWindow):
     def __init__(self, tr: Translator, parent=None) -> None:
         super().__init__(parent)
         self.tr = tr
+        self._row_by_source_path: dict[str, int] = {}
         self._build_ui()
         self.apply_translations(tr)
 
@@ -62,9 +63,26 @@ class QueueWindow(QMainWindow):
         self.summary_label.setText("\n".join(lines))
 
     def set_rows(self, rows: list[list[str]]) -> None:
+        self._row_by_source_path = {}
         self.table.setRowCount(len(rows))
         for row_index, values in enumerate(rows):
+            if values:
+                self._row_by_source_path[values[0]] = row_index
             for col_index, value in enumerate(values):
                 cell = QTableWidgetItem(value)
                 cell.setToolTip(value)
                 self.table.setItem(row_index, col_index, cell)
+
+    def update_job_status(self, source_path: str, status: str, note: str | None = None) -> None:
+        row_index = self._row_by_source_path.get(source_path)
+        if row_index is None:
+            return
+        status_item = self.table.item(row_index, 8)
+        if status_item is not None:
+            status_item.setText(status)
+            status_item.setToolTip(status)
+        if note is not None:
+            note_item = self.table.item(row_index, 7)
+            if note_item is not None:
+                note_item.setText(note)
+                note_item.setToolTip(note)

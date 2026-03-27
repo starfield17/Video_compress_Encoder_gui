@@ -84,6 +84,7 @@ class MainWindow(QMainWindow):
         self.active_worker = None
         self.last_summary_lines: list[str] = []
         self.last_table_rows: list[list[str]] = []
+        self._table_row_by_source_path: dict[str, int] = {}
 
         self.activity_log_window = ActivityLogWindow(self.tr, self)
         self.queue_window = QueueWindow(self.tr, self)
@@ -812,6 +813,7 @@ class MainWindow(QMainWindow):
         stage = str(event.get("stage") or event.get("phase") or "-")
         state = str(event.get("state") or "-")
         file_name = str(event.get("file_name") or event.get("file_path") or "-")
+        file_path = str(event.get("file_path") or "")
         percent = event.get("percent")
         speed = str(event.get("speed") or "-")
         elapsed_sec = event.get("elapsed_sec")
@@ -831,6 +833,52 @@ class MainWindow(QMainWindow):
             bounded_percent = max(0.0, min(100.0, float(percent)))
 
         self._set_status_snapshot(f"{stage} / {state}", file_name, speed if speed else "-", elapsed_text, bounded_percent)
+        self._update_job_row_from_progress(stage=stage, state=state, file_path=file_path, event=event)
+
+    def _update_job_row_from_progress(
+        self,
+        *,
+        stage: str,
+        state: str,
+        file_path: str,
+        event: dict[str, object],
+    ) -> None:
+        if stage != "encode" or not file_path:
+            return
+
+        note: str | None = None
+        status: str | None = None
+        if state == "starting_file":
+            status = self.tr.t("gui.status.running")
+        elif state == "finished_file":
+            status = self.tr.t("gui.status.done")
+        elif state == "failed_file":
+            status = self.tr.t("gui.status.failed")
+            note = str(event.get("message") or "").strip() or None
+        elif state == "skipped":
+            status = self.tr.t("gui.status.skip")
+            note = str(event.get("message") or "").strip() or None
+
+        if status is not None:
+            self._update_job_status(file_path, status, note)
+
+    def _update_job_status(self, source_path: str, status: str, note: str | None = None) -> None:
+        row_index = self._table_row_by_source_path.get(source_path)
+        if row_index is None:
+            return
+
+        status_item = self.table.item(row_index, 8)
+        if status_item is not None:
+            status_item.setText(status)
+            status_item.setToolTip(status)
+
+        if note is not None:
+            note_item = self.table.item(row_index, 7)
+            if note_item is not None:
+                note_item.setText(note)
+                note_item.setToolTip(note)
+
+        self.queue_window.update_job_status(source_path, status, note)
 
     def _build_context(self) -> tuple[Path, EncodeOptions, Path | None, Path, str | None, str | None]:
         input_path = self._selected_input()
@@ -1035,8 +1083,11 @@ class MainWindow(QMainWindow):
     def _populate_table(self, plan, results=None) -> None:
         rows = self._build_table_rows(plan, results)
         self.last_table_rows = rows
+        self._table_row_by_source_path = {}
         self.table.setRowCount(len(rows))
         for row_index, values in enumerate(rows):
+            if values:
+                self._table_row_by_source_path[values[0]] = row_index
             for col_index, value in enumerate(values):
                 cell = QTableWidgetItem(value)
                 cell.setToolTip(value)

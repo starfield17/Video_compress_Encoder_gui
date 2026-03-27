@@ -177,6 +177,7 @@
   "gui.summary.encode_count": "Encode results: success={success}, skipped={skipped}, failed={failed}",
   "gui.summary.cancelled": "Cancelled: {message}",
   "gui.status.ready": "Ready",
+  "gui.status.running": "Running",
   "gui.status.skip": "Skipped",
   "gui.status.done": "Done",
   "gui.status.failed": "Failed",

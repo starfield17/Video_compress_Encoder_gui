@@ -177,6 +177,7 @@
   "gui.summary.encode_count": "编码结果：成功={success}，跳过={skipped}，失败={failed}",
   "gui.summary.cancelled": "已取消：{message}",
   "gui.status.ready": "就绪",
+  "gui.status.running": "进行中",
   "gui.status.skip": "已跳过",
   "gui.status.done": "完成",
   "gui.status.failed": "失败",
