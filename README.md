@@ -26,12 +26,15 @@ workdir/
 ```bash
 python main.py --cli plan workdir/test.mp4
 python main.py --cli preview workdir/test.mp4 --backend cpu --sample-duration 5
+python main.py --cli encode workdir/test.mp4 --backend qsv --overwrite
 python main.py --cli encode workdir/test.mp4 --backend cpu --overwrite
 python main.py --cli encode workdir/test.mp4 --copy-external-subtitles
 python main.py --cli preset list
 ```
 
 Language can be selected with `--lang en` or `--lang zh_cn`.
+Supported backend values are `auto`, `cpu`, `nvenc`, `qsv`, and `amf`.
+When `auto` is selected, the planner prefers `nvenc`, then `qsv`, then `amf`, then `cpu`.
 
 ## GUI
 
@@ -72,6 +75,7 @@ The GUI now includes:
 ## Notes
 
 - `ffmpeg` and `ffprobe` must be available on `PATH`, unless explicit paths are set in the CLI or GUI.
+- Intel QSV requires an FFmpeg build that exposes `hevc_qsv` and/or `av1_qsv`, plus supported Intel graphics hardware/drivers.
 - Presets are stored in `config/presets/`.
 - Preview outputs, logs, and temp files are written into `workdir/`.
 - The GUI is PySide6-only.

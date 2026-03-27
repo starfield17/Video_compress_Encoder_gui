@@ -166,7 +166,7 @@ class MainWindow(QMainWindow):
 
         self.backend_label = QLabel()
         self.backend_combo = QComboBox()
-        self.backend_combo.addItems(["auto", "cpu", "nvenc", "amf"])
+        self.backend_combo.addItems(["auto", "cpu", "nvenc", "qsv", "amf"])
 
         self.ratio_label = QLabel()
         self.ratio_edit = QLineEdit()

@@ -111,7 +111,7 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, include_input: bool = Tr
 
 def _add_encode_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--codec", choices=["hevc", "av1"], help="Target codec")
-    parser.add_argument("--backend", choices=["auto", "cpu", "nvenc", "amf"], help="Encoder backend")
+    parser.add_argument("--backend", choices=["auto", "cpu", "nvenc", "qsv", "amf"], help="Encoder backend")
     parser.add_argument("--ratio", type=float, help="Target video bitrate ratio")
     parser.add_argument("--min-video-kbps", dest="min_video_kbps", type=int, help="Minimum target bitrate")
     parser.add_argument("--max-video-kbps", dest="max_video_kbps", type=int, help="Maximum target bitrate")

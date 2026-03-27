@@ -48,6 +48,10 @@ def resolve_encoder(
         CodecChoice.HEVC: "hevc_nvenc",
         CodecChoice.AV1: "av1_nvenc",
     }
+    qsv_map = {
+        CodecChoice.HEVC: "hevc_qsv",
+        CodecChoice.AV1: "av1_qsv",
+    }
     amf_map = {
         CodecChoice.HEVC: "hevc_amf",
         CodecChoice.AV1: "av1_amf",
@@ -55,11 +59,12 @@ def resolve_encoder(
     backend_maps = {
         BackendChoice.CPU: cpu_map,
         BackendChoice.NVENC: nvenc_map,
+        BackendChoice.QSV: qsv_map,
         BackendChoice.AMF: amf_map,
     }
 
     if backend == BackendChoice.AUTO:
-        for candidate_backend in (BackendChoice.NVENC, BackendChoice.AMF, BackendChoice.CPU):
+        for candidate_backend in (BackendChoice.NVENC, BackendChoice.QSV, BackendChoice.AMF, BackendChoice.CPU):
             encoder_name = backend_maps[candidate_backend][codec]
             if encoder_name in available_encoders:
                 return EncoderInfo(

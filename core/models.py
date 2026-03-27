@@ -15,6 +15,7 @@ class BackendChoice(str, Enum):
     AUTO = "auto"
     CPU = "cpu"
     NVENC = "nvenc"
+    QSV = "qsv"
     AMF = "amf"
 
 
