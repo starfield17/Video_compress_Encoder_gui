@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QPlainTextEdit,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -82,6 +83,9 @@ class MainWindow(QMainWindow):
         self.tr = get_translator(self.language, self.config_dir)
         self.active_worker = None
         self.log_entries: list[tuple[str, str]] = []
+        self._pending_log_entries: list[tuple[str, str]] = []
+        self._current_log_filter = "all"
+        self._log_flush_interval_ms = 75
 
         self._build_ui()
         self._load_initial_state()
@@ -352,8 +356,12 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
-        self.log_output = QTextEdit()
+        self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
+        self.log_output.setMaximumBlockCount(50000)
+        self.log_flush_timer = QTimer(self)
+        self.log_flush_timer.setInterval(self._log_flush_interval_ms)
+        self.log_flush_timer.timeout.connect(self._flush_pending_logs)
 
         bottom_splitter = QSplitter(Qt.Vertical)
         bottom_splitter.addWidget(summary_box)
@@ -510,11 +518,39 @@ class MainWindow(QMainWindow):
         return "process"
 
     def _append_log(self, message: str) -> None:
-        self.log_entries.append((self._classify_log_entry(message), message))
-        self._refresh_log_view()
+        category = self._classify_log_entry(message)
+        self.log_entries.append((category, message))
+        self._pending_log_entries.append((category, message))
+        if not self.log_flush_timer.isActive():
+            self.log_flush_timer.start()
+
+    def _flush_pending_logs(self) -> None:
+        if not self._pending_log_entries:
+            self.log_flush_timer.stop()
+            return
+
+        selected_filter = self.log_filter_combo.currentData() or "all"
+        self._current_log_filter = selected_filter
+        pending_entries = self._pending_log_entries
+        self._pending_log_entries = []
+        lines = [
+            message
+            for category, message in pending_entries
+            if selected_filter == "all" or category == selected_filter
+        ]
+        if lines:
+            self.log_output.appendPlainText("\n".join(lines))
+            scrollbar = self.log_output.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+        if not self._pending_log_entries:
+            self.log_flush_timer.stop()
 
     def _refresh_log_view(self) -> None:
+        self._pending_log_entries = []
+        self.log_flush_timer.stop()
         selected_filter = self.log_filter_combo.currentData() or "all"
+        self._current_log_filter = selected_filter
         lines = [
             message
             for category, message in self.log_entries
@@ -526,6 +562,8 @@ class MainWindow(QMainWindow):
 
     def _clear_logs(self) -> None:
         self.log_entries.clear()
+        self._pending_log_entries.clear()
+        self.log_flush_timer.stop()
         self.log_output.clear()
 
     def _set_summary(self, lines: list[str]) -> None:

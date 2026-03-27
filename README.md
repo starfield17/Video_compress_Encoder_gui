@@ -106,6 +106,8 @@ scripts\build_windows.bat
 Notes:
 
 - The default build uses the spec file at `packaging/video_compressor.spec`.
+- The convenience launcher scripts now build a console app by default, which keeps a persistent terminal window like running `python main.py` directly.
+- If you explicitly want a GUI-only build with no persistent console, use `python scripts/build_pyinstaller.py --clean --windowed`.
 - `config/` is bundled automatically.
 - In frozen builds, the app uses a writable runtime layout next to the executable, so `config/` and `workdir/` remain editable after packaging.
 - Optional icons are auto-detected from `packaging/assets/`.

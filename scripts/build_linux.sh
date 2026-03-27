@@ -8,4 +8,4 @@ cd "${PROJECT_ROOT}"
 PYTHON_BIN="${1:-python3}"
 
 echo "Using Python: ${PYTHON_BIN}"
-"${PYTHON_BIN}" scripts/build_pyinstaller.py --clean --windowed
+"${PYTHON_BIN}" scripts/build_pyinstaller.py --clean
