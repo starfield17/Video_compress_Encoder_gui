@@ -17,7 +17,7 @@ from core.plan_encode import build_encode_plan
 from core.preset_store import app_config_path
 from gui.gui_mainwindow import MainWindow
 from gui.queue_manager import QueueManager
-from gui.queue_table import QueueTableModel
+from gui.queue_table import QueueTableModel, create_queue_view
 from main import main
 
 
@@ -71,6 +71,26 @@ class SmokeTestCase(unittest.TestCase):
             self.assertEqual(window.queue_progress_bar.value(), 0)
         finally:
             window.close()
+
+    def test_responsive_queue_view_fills_viewport_when_space_is_available(self) -> None:
+        model = QueueTableModel(get_translator("en", self.repo_root / "config"))
+        view = create_queue_view()
+        view.setModel(model)
+        view.resize(1700, 420)
+        view.show()
+        try:
+            self.app.processEvents()
+            self.app.processEvents()
+            header = view.horizontalHeader()
+            actual_total = sum(
+                header.sectionSize(column)
+                for column in range(model.columnCount())
+                if not view.isColumnHidden(column)
+            )
+            viewport_width = view.viewport().width()
+            self.assertLessEqual(abs(actual_total - viewport_width), 1)
+        finally:
+            view.close()
 
 
 if __name__ == "__main__":

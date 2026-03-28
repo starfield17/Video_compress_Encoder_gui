@@ -1195,7 +1195,7 @@ class MainWindow(QMainWindow):
 
     def _reflow_queue_views(self) -> None:
         for view in [self.table_view, self.queue_window.table_view]:
-            reflow = getattr(view, "reflow_columns", None)
+            reflow = getattr(view, "schedule_reflow", None)
             if callable(reflow):
                 reflow()
 

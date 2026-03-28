@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import IntEnum
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, Qt, Signal
+from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QHeaderView, QStyle, QTableView
 
@@ -86,24 +86,103 @@ FLEX_COLUMN_SPECS: dict[QueueColumn, tuple[int, int]] = {
 
 
 class ResponsiveQueueTableView(QTableView):
+    _RELEVANT_EVENT_TYPES = {
+        QEvent.Show,
+        QEvent.Hide,
+        QEvent.Resize,
+        QEvent.LayoutRequest,
+    }
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._reflow_scheduled = False
+        self._applying_reflow = False
+        self._watched_model: QObject | None = None
+
+        self.viewport().installEventFilter(self)
+        self.verticalScrollBar().installEventFilter(self)
+        self.horizontalScrollBar().installEventFilter(self)
+
+        header = self.horizontalHeader()
+        header.sectionMoved.connect(self.schedule_reflow)
+        header.sectionResized.connect(self._on_header_section_resized)
+
+    def setModel(self, model: QAbstractTableModel | None) -> None:
+        previous_model = self.model()
+        if previous_model is not None:
+            self._disconnect_model_signals(previous_model)
+        super().setModel(model)
+        if model is not None:
+            self._connect_model_signals(model)
+        self.schedule_reflow()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        self.reflow_columns()
+        self.schedule_reflow()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self.reflow_columns()
+        self.schedule_reflow()
 
     def event(self, event):
         result = super().event(event)
         if event.type() in {QEvent.LayoutRequest, QEvent.Polish}:
-            self.reflow_columns()
+            self.schedule_reflow()
         return result
 
+    def eventFilter(self, watched: QObject, event) -> bool:
+        result = super().eventFilter(watched, event)
+        if watched in {self.viewport(), self.verticalScrollBar(), self.horizontalScrollBar()}:
+            if event.type() in self._RELEVANT_EVENT_TYPES:
+                self.schedule_reflow()
+        return result
+
+    def setColumnHidden(self, column: int, hide: bool) -> None:
+        super().setColumnHidden(column, hide)
+        self.schedule_reflow()
+
+    def schedule_reflow(self) -> None:
+        if self._reflow_scheduled:
+            return
+        self._reflow_scheduled = True
+        QTimer.singleShot(0, self._apply_reflow)
+
     def reflow_columns(self) -> None:
+        self.schedule_reflow()
+
+    def _connect_model_signals(self, model: QAbstractTableModel) -> None:
+        model.modelReset.connect(self.schedule_reflow)
+        model.layoutChanged.connect(self.schedule_reflow)
+        model.rowsInserted.connect(self._on_rows_changed)
+        model.rowsRemoved.connect(self._on_rows_changed)
+        self._watched_model = model
+
+    def _disconnect_model_signals(self, model: QAbstractTableModel) -> None:
+        for signal, slot in [
+            (model.modelReset, self.schedule_reflow),
+            (model.layoutChanged, self.schedule_reflow),
+            (model.rowsInserted, self._on_rows_changed),
+            (model.rowsRemoved, self._on_rows_changed),
+        ]:
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
+        if self._watched_model is model:
+            self._watched_model = None
+
+    def _on_rows_changed(self, *_args) -> None:
+        self.schedule_reflow()
+
+    def _on_header_section_resized(self, _logical_index: int, _old_size: int, _new_size: int) -> None:
+        if self._applying_reflow:
+            return
+        self.schedule_reflow()
+
+    def _apply_reflow(self) -> None:
+        self._reflow_scheduled = False
+        if self._applying_reflow:
+            return
         header = self.horizontalHeader()
         if header is None:
             return
@@ -126,27 +205,55 @@ class ResponsiveQueueTableView(QTableView):
         if not visible_fixed and not visible_flex:
             return
 
-        fixed_total = sum(width for _, width in visible_fixed)
-        flex_min_total = sum(min_width for _, _, min_width in visible_flex)
-        available_for_flex = viewport_width - fixed_total - 8
-        target_flex_total = max(flex_min_total, available_for_flex)
+        self._applying_reflow = True
+        try:
+            visual_flex = sorted(visible_flex, key=lambda item: header.visualIndex(int(item[0])))
+            flex_min_total = sum(min_width for _, _, min_width in visual_flex)
+            fixed_total = sum(width for _, width in visible_fixed)
+            available_for_flex = max(0, viewport_width - fixed_total)
+            target_flex_total = max(flex_min_total, available_for_flex)
+            extra_flex = max(0, target_flex_total - flex_min_total)
 
-        for column, width in visible_fixed:
-            header.resizeSection(int(column), width)
+            for column, width in visible_fixed:
+                header.resizeSection(int(column), width)
 
-        if not visible_flex:
-            return
+            if not visual_flex:
+                return
 
-        total_weight = sum(weight for _, weight, _ in visible_flex)
-        assigned = 0
+            total_weight = sum(weight for _, weight, _ in visual_flex)
+            remaining_extra = extra_flex
+            remaining_weight = total_weight
+            flex_widths: dict[QueueColumn, int] = {}
+            for index, (column, weight, min_width) in enumerate(visual_flex):
+                if index == len(visual_flex) - 1 or remaining_weight <= 0:
+                    width = min_width + remaining_extra
+                else:
+                    share = int(round(remaining_extra * weight / remaining_weight))
+                    share = min(share, remaining_extra)
+                    width = min_width + share
+                    remaining_extra -= share
+                    remaining_weight -= weight
+                flex_widths[column] = width
 
-        for index, (column, weight, min_width) in enumerate(visible_flex):
-            if index == len(visible_flex) - 1:
-                width = max(min_width, target_flex_total - assigned)
-            else:
-                width = max(min_width, int(target_flex_total * weight / total_weight))
-                assigned += width
-            header.resizeSection(int(column), width)
+            for column, _, _ in visual_flex:
+                header.resizeSection(int(column), flex_widths[column])
+
+            actual_total = sum(
+                header.sectionSize(column)
+                for column in range(header.count())
+                if not self.isColumnHidden(column)
+            )
+            slack = viewport_width - actual_total
+            if slack != 0:
+                last_flex_column, _, last_min_width = visual_flex[-1]
+                current_width = header.sectionSize(int(last_flex_column))
+                corrected_width = current_width + slack
+                if corrected_width < last_min_width:
+                    corrected_width = last_min_width
+                if corrected_width != current_width:
+                    header.resizeSection(int(last_flex_column), corrected_width)
+        finally:
+            self._applying_reflow = False
 
 
 class QueueTableModel(QAbstractTableModel):
