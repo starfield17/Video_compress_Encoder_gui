@@ -9,6 +9,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QHeaderView
 
 from core.app_paths import app_root, config_dir
 from core.i18n import get_translator
@@ -17,7 +18,7 @@ from core.plan_encode import build_encode_plan
 from core.preset_store import app_config_path
 from gui.gui_mainwindow import MainWindow
 from gui.queue_manager import QueueManager
-from gui.queue_table import QueueTableModel, create_queue_view
+from gui.queue_table import QueueColumn, QueueTableModel, create_queue_view
 from main import main
 
 
@@ -89,6 +90,35 @@ class SmokeTestCase(unittest.TestCase):
             )
             viewport_width = view.viewport().width()
             self.assertLessEqual(abs(actual_total - viewport_width), 1)
+        finally:
+            view.close()
+
+    def test_flex_columns_are_user_resizable(self) -> None:
+        view = create_queue_view()
+        model = QueueTableModel(get_translator("en", self.repo_root / "config"))
+        view.setModel(model)
+        try:
+            header = view.horizontalHeader()
+            self.assertEqual(header.sectionResizeMode(int(QueueColumn.NAME)), QHeaderView.Interactive)
+            self.assertEqual(header.sectionResizeMode(int(QueueColumn.FOLDER)), QHeaderView.Interactive)
+            self.assertEqual(header.sectionResizeMode(int(QueueColumn.RESOLUTION)), QHeaderView.Fixed)
+        finally:
+            view.close()
+
+    def test_manual_resize_survives_reflow(self) -> None:
+        model = QueueTableModel(get_translator("en", self.repo_root / "config"))
+        view = create_queue_view()
+        view.setModel(model)
+        view.resize(1700, 420)
+        view.show()
+        try:
+            self.app.processEvents()
+            header = view.horizontalHeader()
+            target_width = header.sectionSize(int(QueueColumn.NAME)) + 90
+            header.resizeSection(int(QueueColumn.NAME), target_width)
+            self.app.processEvents()
+            self.app.processEvents()
+            self.assertGreaterEqual(header.sectionSize(int(QueueColumn.NAME)), target_width)
         finally:
             view.close()
 
