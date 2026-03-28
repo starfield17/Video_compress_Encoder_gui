@@ -12,8 +12,10 @@ from PySide6.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -178,30 +180,50 @@ class MainWindow(QMainWindow):
         jobs_layout.setSpacing(8)
 
         summary_widget = QWidget()
-        summary_layout = QGridLayout(summary_widget)
+        summary_layout = QHBoxLayout(summary_widget)
         summary_layout.setContentsMargins(0, 0, 0, 0)
-        summary_layout.setHorizontalSpacing(14)
-        summary_layout.setVerticalSpacing(6)
+        summary_layout.setSpacing(12)
+
+        left_summary = QWidget()
+        left_layout = QGridLayout(left_summary)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setHorizontalSpacing(10)
+        left_layout.setVerticalSpacing(6)
+
+        right_summary = QWidget()
+        right_layout = QGridLayout(right_summary)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setHorizontalSpacing(10)
+        right_layout.setVerticalSpacing(6)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setFrameShadow(QFrame.Sunken)
 
         self.total_items_title = QLabel()
         self.total_items_value = QLabel("-")
-        self.states_title = QLabel()
-        self.states_value = QLabel("-")
         self.total_duration_title = QLabel()
         self.total_duration_value = QLabel("-")
+        self.states_title = QLabel()
+        self.states_value = QLabel("-")
         self.saved_space_title = QLabel()
         self.saved_space_value = QLabel("-")
 
-        summary_layout.addWidget(self.total_items_title, 0, 0)
-        summary_layout.addWidget(self.total_items_value, 0, 1)
-        summary_layout.addWidget(self.states_title, 0, 2)
-        summary_layout.addWidget(self.states_value, 0, 3)
-        summary_layout.addWidget(self.total_duration_title, 1, 0)
-        summary_layout.addWidget(self.total_duration_value, 1, 1)
-        summary_layout.addWidget(self.saved_space_title, 1, 2)
-        summary_layout.addWidget(self.saved_space_value, 1, 3)
-        summary_layout.setColumnStretch(1, 1)
-        summary_layout.setColumnStretch(3, 1)
+        left_layout.addWidget(self.total_items_title, 0, 0)
+        left_layout.addWidget(self.total_items_value, 0, 1)
+        left_layout.addWidget(self.total_duration_title, 1, 0)
+        left_layout.addWidget(self.total_duration_value, 1, 1)
+        left_layout.setColumnStretch(1, 1)
+
+        right_layout.addWidget(self.states_title, 0, 0)
+        right_layout.addWidget(self.states_value, 0, 1)
+        right_layout.addWidget(self.saved_space_title, 1, 0)
+        right_layout.addWidget(self.saved_space_value, 1, 1)
+        right_layout.setColumnStretch(1, 1)
+
+        summary_layout.addWidget(left_summary, 1)
+        summary_layout.addWidget(divider)
+        summary_layout.addWidget(right_summary, 1)
 
         self.queue_progress_text = QLabel()
         self.queue_progress_bar = QProgressBar()
@@ -289,8 +311,6 @@ class MainWindow(QMainWindow):
         for view in [self.table_view, self.queue_window.table_view]:
             header = view.horizontalHeader()
             header.sectionMoved.connect(lambda *_args, source_view=view: self._persist_header_state(source_view))
-            header.sectionResized.connect(lambda *_args, source_view=view: self._persist_header_state(source_view))
-            header.sortIndicatorChanged.connect(lambda *_args, source_view=view: self._persist_header_state(source_view))
 
     def _build_basic_tab(self) -> None:
         page = QWidget()
@@ -1171,6 +1191,13 @@ class MainWindow(QMainWindow):
         column = int(chosen.data())
         view.setColumnHidden(column, not chosen.isChecked())
         self._persist_header_state(view)
+        self._reflow_queue_views()
+
+    def _reflow_queue_views(self) -> None:
+        for view in [self.table_view, self.queue_window.table_view]:
+            reflow = getattr(view, "reflow_columns", None)
+            if callable(reflow):
+                reflow()
 
     def _persist_header_state(self, source_view) -> None:
         if self._header_sync_guard:
@@ -1185,21 +1212,25 @@ class MainWindow(QMainWindow):
                 if view is source_view:
                     continue
                 view.horizontalHeader().restoreState(state)
+            self._reflow_queue_views()
         finally:
             self._header_sync_guard = False
 
     def _restore_header_state(self) -> None:
         encoded = str(self.app_config.get("queue_table_header_state", "")).strip()
         if not encoded:
+            self._reflow_queue_views()
             return
         try:
             raw = QByteArray.fromBase64(encoded.encode("ascii"))
         except Exception:
+            self._reflow_queue_views()
             return
         self._header_sync_guard = True
         try:
             for view in [self.table_view, self.queue_window.table_view]:
                 view.horizontalHeader().restoreState(raw)
+            self._reflow_queue_views()
         finally:
             self._header_sync_guard = False
 

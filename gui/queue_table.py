@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import IntEnum
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
+from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QHeaderView, QStyle, QTableView
 
@@ -65,6 +65,88 @@ class QueueColumn(IntEnum):
 
 
 COLUMN_COUNT = len(QueueColumn)
+
+
+FIXED_COLUMN_WIDTHS: dict[QueueColumn, int] = {
+    QueueColumn.RESOLUTION: 96,
+    QueueColumn.DURATION: 84,
+    QueueColumn.SOURCE_BITRATE: 110,
+    QueueColumn.TARGET_BITRATE: 110,
+    QueueColumn.STATUS: 108,
+    QueueColumn.PROGRESS: 92,
+}
+
+FLEX_COLUMN_SPECS: dict[QueueColumn, tuple[int, int]] = {
+    QueueColumn.NAME: (28, 180),
+    QueueColumn.FOLDER: (20, 160),
+    QueueColumn.ENCODER: (14, 130),
+    QueueColumn.OUTPUT: (20, 150),
+    QueueColumn.TAGS: (18, 120),
+}
+
+
+class ResponsiveQueueTableView(QTableView):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.reflow_columns()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.reflow_columns()
+
+    def event(self, event):
+        result = super().event(event)
+        if event.type() in {QEvent.LayoutRequest, QEvent.Polish}:
+            self.reflow_columns()
+        return result
+
+    def reflow_columns(self) -> None:
+        header = self.horizontalHeader()
+        if header is None:
+            return
+
+        viewport_width = self.viewport().width()
+        if viewport_width <= 0:
+            return
+
+        visible_fixed = [
+            (column, width)
+            for column, width in FIXED_COLUMN_WIDTHS.items()
+            if not self.isColumnHidden(int(column))
+        ]
+        visible_flex = [
+            (column, weight, min_width)
+            for column, (weight, min_width) in FLEX_COLUMN_SPECS.items()
+            if not self.isColumnHidden(int(column))
+        ]
+
+        if not visible_fixed and not visible_flex:
+            return
+
+        fixed_total = sum(width for _, width in visible_fixed)
+        flex_min_total = sum(min_width for _, _, min_width in visible_flex)
+        available_for_flex = viewport_width - fixed_total - 8
+        target_flex_total = max(flex_min_total, available_for_flex)
+
+        for column, width in visible_fixed:
+            header.resizeSection(int(column), width)
+
+        if not visible_flex:
+            return
+
+        total_weight = sum(weight for _, weight, _ in visible_flex)
+        assigned = 0
+
+        for index, (column, weight, min_width) in enumerate(visible_flex):
+            if index == len(visible_flex) - 1:
+                width = max(min_width, target_flex_total - assigned)
+            else:
+                width = max(min_width, int(target_flex_total * weight / total_weight))
+                assigned += width
+            header.resizeSection(int(column), width)
 
 
 class QueueTableModel(QAbstractTableModel):
@@ -412,7 +494,7 @@ class QueueTableModel(QAbstractTableModel):
 
 
 def create_queue_view(parent=None) -> QTableView:
-    view = QTableView(parent)
+    view = ResponsiveQueueTableView(parent)
     view.setSelectionBehavior(QAbstractItemView.SelectRows)
     view.setSelectionMode(QAbstractItemView.ExtendedSelection)
     view.setAlternatingRowColors(True)
@@ -426,30 +508,17 @@ def create_queue_view(parent=None) -> QTableView:
     view.setDropIndicatorShown(True)
     view.setDragDropMode(QAbstractItemView.InternalMove)
     view.setDefaultDropAction(Qt.MoveAction)
+
     header = view.horizontalHeader()
     header.setStretchLastSection(False)
     header.setSectionsMovable(True)
     header.setSectionsClickable(True)
     header.setHighlightSections(False)
-    header.setSectionResizeMode(QueueColumn.NAME, QHeaderView.Interactive)
-    header.setSectionResizeMode(QueueColumn.FOLDER, QHeaderView.Interactive)
-    header.setSectionResizeMode(QueueColumn.RESOLUTION, QHeaderView.ResizeToContents)
-    header.setSectionResizeMode(QueueColumn.DURATION, QHeaderView.ResizeToContents)
-    header.setSectionResizeMode(QueueColumn.SOURCE_BITRATE, QHeaderView.ResizeToContents)
-    header.setSectionResizeMode(QueueColumn.TARGET_BITRATE, QHeaderView.ResizeToContents)
-    header.setSectionResizeMode(QueueColumn.ENCODER, QHeaderView.Interactive)
-    header.setSectionResizeMode(QueueColumn.OUTPUT, QHeaderView.Interactive)
-    header.setSectionResizeMode(QueueColumn.TAGS, QHeaderView.Interactive)
-    header.setSectionResizeMode(QueueColumn.STATUS, QHeaderView.ResizeToContents)
-    header.setSectionResizeMode(QueueColumn.PROGRESS, QHeaderView.ResizeToContents)
-    default_widths = {
-        QueueColumn.NAME: 260,
-        QueueColumn.FOLDER: 240,
-        QueueColumn.ENCODER: 170,
-        QueueColumn.OUTPUT: 220,
-        QueueColumn.TAGS: 160,
-    }
-    for column, width in default_widths.items():
-        view.setColumnWidth(int(column), width)
+    header.setMinimumSectionSize(48)
+
+    for column in QueueColumn:
+        header.setSectionResizeMode(int(column), QHeaderView.Fixed)
+
     view.verticalHeader().setVisible(False)
+    view.reflow_columns()
     return view
