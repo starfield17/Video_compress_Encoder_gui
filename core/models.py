@@ -65,11 +65,11 @@ class EncodeOptions:
     ratio: Optional[float] = None
     min_video_kbps: int = 250
     max_video_kbps: int = 0
-    container: ContainerChoice = ContainerChoice.MKV
+    container: ContainerChoice = ContainerChoice.MP4
     audio_mode: AudioMode = AudioMode.COPY
     audio_bitrate: str = "128k"
-    copy_subtitles: bool = False
-    copy_external_subtitles: bool = False
+    copy_subtitles: bool = True
+    copy_external_subtitles: bool = True
     two_pass: bool = False
     encoder_preset: Optional[str] = None
     pix_fmt: str = "yuv420p"
