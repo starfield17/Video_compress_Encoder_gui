@@ -107,6 +107,10 @@ class SettingsDialog(QDialog):
         self.workdir_button.setText(self.tr.t("gui.button.browse_dir"))
         self.ffmpeg_button.setText(self.tr.t("gui.button.browse_exe"))
         self.ffprobe_button.setText(self.tr.t("gui.button.browse_exe"))
+        self.ffmpeg_edit.setPlaceholderText(self.tr.t("gui.placeholder.ffmpeg"))
+        self.ffprobe_edit.setPlaceholderText(self.tr.t("gui.placeholder.ffprobe"))
+        self.ffmpeg_edit.setToolTip(self.tr.t("gui.placeholder.ffmpeg"))
+        self.ffprobe_edit.setToolTip(self.tr.t("gui.placeholder.ffprobe"))
 
     def values(self) -> dict[str, object]:
         return {
