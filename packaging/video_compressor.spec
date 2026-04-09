@@ -27,6 +27,9 @@ def _default_icon() -> str | None:
 datas = [
     (str(project_root / "config"), "config"),
 ]
+ffmpeg_root = project_root / "FFmpeg"
+if ffmpeg_root.exists():
+    datas.append((str(ffmpeg_root), "FFmpeg"))
 hiddenimports = collect_submodules("cli") + collect_submodules("core") + collect_submodules("gui")
 
 

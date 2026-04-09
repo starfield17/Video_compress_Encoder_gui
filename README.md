@@ -17,6 +17,7 @@ main.py
 core/
 cli/
 gui/
+FFmpeg/
 config/
 workdir/
 ```
@@ -74,7 +75,8 @@ The GUI now includes:
 
 ## Notes
 
-- `ffmpeg` and `ffprobe` must be available on `PATH`, unless explicit paths are set in the CLI or GUI.
+- Explicit GUI/CLI `ffmpeg` / `ffprobe` paths take priority; otherwise the app checks the project-root `FFmpeg/` directory before falling back to system-installed tools.
+- Supported bundled layouts are `FFmpeg/ffmpeg(.exe)` + `FFmpeg/ffprobe(.exe)` and `FFmpeg/bin/ffmpeg(.exe)` + `FFmpeg/bin/ffprobe(.exe)`.
 - Intel QSV requires an FFmpeg build that exposes `hevc_qsv` and/or `av1_qsv`, plus supported Intel graphics hardware/drivers.
 - Presets are stored in `config/presets/`.
 - Preview outputs, logs, and temp files are written into `workdir/`.
@@ -113,6 +115,7 @@ Notes:
 - The convenience launcher scripts now build a console app by default, which keeps a persistent terminal window like running `python main.py` directly.
 - If you explicitly want a GUI-only build with no persistent console, use `python scripts/build_pyinstaller.py --clean --windowed`.
 - `config/` is bundled automatically.
+- If the project root contains an `FFmpeg/` directory, it is bundled automatically for release builds.
 - In frozen builds, the app uses a writable runtime layout next to the executable, so `config/` and `workdir/` remain editable after packaging.
 - Optional icons are auto-detected from `packaging/assets/`.
 - Windows version metadata is loaded from `packaging/windows_version_info.txt`.

@@ -28,6 +28,10 @@ def assets_dir() -> Path:
     return packaging_dir() / "assets"
 
 
+def ffmpeg_dir() -> Path:
+    return project_root() / "FFmpeg"
+
+
 def default_icon_path() -> Path | None:
     candidates = []
     if sys.platform.startswith("win"):
@@ -85,6 +89,8 @@ def _pyinstaller_command(args: argparse.Namespace) -> tuple[list[str], str]:
             "--add-data",
             _add_data_arg(project_root() / "config", "config"),
         ]
+        if ffmpeg_dir().exists():
+            cmd.extend(["--add-data", _add_data_arg(ffmpeg_dir(), "FFmpeg")])
         if args.clean:
             cmd.append("--clean")
         if args.windowed:
