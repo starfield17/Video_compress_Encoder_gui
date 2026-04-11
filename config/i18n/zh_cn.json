@@ -215,5 +215,15 @@
   "gui.status.skip": "已跳过",
   "gui.status.done": "完成",
   "gui.status.failed": "失败",
-  "gui.status.cancelled": "已取消"
+  "gui.status.cancelled": "已取消",
+  "gui.checkbox.parallel_enabled": "启用并行转码",
+  "gui.label.parallel_backends": "并行后端",
+  "gui.message.parallel_requires_backends": "并行模式至少需要选择一个后端。",
+  "gui.message.parallel_two_pass_not_supported": "并行模式不支持双遍编码。",
+  "gui.message.parallel_preset_not_supported": "并行模式不支持手动编码器预设。",
+  "gui.message.parallel_preview_not_supported": "预览功能不支持并行模式。",
+  "cli.parallel_requires_backends": "并行模式至少需要选择一个后端。",
+  "cli.parallel_two_pass_not_supported": "并行模式不支持双遍编码。",
+  "cli.parallel_preset_not_supported": "并行模式不支持手动编码器预设。",
+  "cli.parallel_preview_not_supported": "预览功能不支持并行模式。"
 }

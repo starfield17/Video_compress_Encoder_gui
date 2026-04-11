@@ -20,6 +20,7 @@ from core.models import (
     PreviewOptions,
     PreviewSampleMode,
 )
+from core.parallel_queue_exec import execute_plan_parallel
 from core.plan_encode import build_encode_plan
 from core.preset_store import (
     delete_preset,
@@ -90,6 +91,12 @@ def _merge_options(base: EncodeOptions, args: argparse.Namespace) -> EncodeOptio
         if value is not None:
             updates[name] = bool(value)
 
+    parallel_enabled = getattr(args, "parallel", None)
+    if parallel_enabled is not None:
+        updates["parallel_enabled"] = bool(parallel_enabled)
+    if hasattr(args, "parallel_backends"):
+        updates["parallel_backends"] = _parse_parallel_backends(getattr(args, "parallel_backends", None))
+
     return replace(base, **updates)
 
 
@@ -112,6 +119,8 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, include_input: bool = Tr
 def _add_encode_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--codec", choices=["hevc", "av1"], help="Target codec")
     parser.add_argument("--backend", choices=["auto", "cpu", "nvenc", "qsv", "amf"], help="Encoder backend")
+    parser.add_argument("--parallel", action="store_true", help="Enable queue-level parallel transcoding")
+    parser.add_argument("--parallel-backends", dest="parallel_backends", help="Comma-separated explicit backends")
     parser.add_argument("--ratio", type=float, help="Target video bitrate ratio")
     parser.add_argument("--min-video-kbps", dest="min_video_kbps", type=int, help="Minimum target bitrate")
     parser.add_argument("--max-video-kbps", dest="max_video_kbps", type=int, help="Maximum target bitrate")
@@ -132,6 +141,38 @@ def _add_encode_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--maxrate-factor", dest="maxrate_factor", type=float, help="maxrate factor")
     parser.add_argument("--bufsize-factor", dest="bufsize_factor", type=float, help="bufsize factor")
     parser.add_argument("--dry-run", action="store_true", help="Build the plan and stop")
+
+
+def _parse_parallel_backends(raw: str | None) -> tuple[BackendChoice, ...]:
+    if raw is None:
+        return ()
+    seen: set[BackendChoice] = set()
+    parsed: list[BackendChoice] = []
+    for chunk in raw.split(","):
+        value = chunk.strip().lower()
+        if not value:
+            continue
+        backend = BackendChoice(value)
+        if backend == BackendChoice.AUTO:
+            raise ValueError("auto is not allowed for parallel backends")
+        if backend in seen:
+            continue
+        seen.add(backend)
+        parsed.append(backend)
+    return tuple(parsed)
+
+
+def _validate_parallel_options(options: EncodeOptions, tr, *, allow_parallel: bool = True) -> None:
+    if not options.parallel_enabled:
+        return
+    if not allow_parallel:
+        raise ValueError(tr.t("cli.parallel_preview_not_supported"))
+    if not options.parallel_backends:
+        raise ValueError(tr.t("cli.parallel_requires_backends"))
+    if options.two_pass:
+        raise ValueError(tr.t("cli.parallel_two_pass_not_supported"))
+    if options.encoder_preset:
+        raise ValueError(tr.t("cli.parallel_preset_not_supported"))
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -192,6 +233,7 @@ def _first_valid_plan_item(plan):
 def _run_plan(args: argparse.Namespace, config_dir: Path) -> int:
     tr = _translator_for_args(args, config_dir)
     options = _options_from_args(args, config_dir)
+    _validate_parallel_options(options, tr)
     plan = build_encode_plan(
         input_path=Path(args.input),
         options=options,
@@ -207,6 +249,7 @@ def _run_plan(args: argparse.Namespace, config_dir: Path) -> int:
 def _run_encode(args: argparse.Namespace, config_dir: Path) -> int:
     tr = _translator_for_args(args, config_dir)
     options = _options_from_args(args, config_dir)
+    _validate_parallel_options(options, tr)
     plan = build_encode_plan(
         input_path=Path(args.input),
         options=options,
@@ -218,7 +261,15 @@ def _run_encode(args: argparse.Namespace, config_dir: Path) -> int:
     print_plan(plan, tr)
     if options.dry_run:
         return 0
-    results = execute_plan(plan, Path(args.workdir).expanduser().resolve() if args.workdir else _default_workdir())
+    workdir = Path(args.workdir).expanduser().resolve() if args.workdir else _default_workdir()
+    if options.parallel_enabled and options.parallel_backends:
+        results = execute_plan_parallel(
+            plan,
+            workdir,
+            backends=options.parallel_backends,
+        )
+    else:
+        results = execute_plan(plan, workdir)
     print_encode_results(results, tr)
     return 0 if all(result.success or result.skipped for result in results) else 2
 
@@ -231,6 +282,7 @@ def _run_preview(args: argparse.Namespace, config_dir: Path) -> int:
         return 2
 
     options = _options_from_args(args, config_dir)
+    _validate_parallel_options(options, tr, allow_parallel=False)
     plan = build_encode_plan(
         input_path=input_path,
         options=options,
@@ -287,6 +339,7 @@ def _run_preset(args: argparse.Namespace, config_dir: Path) -> int:
 
     if args.preset_command == "save":
         options = _options_from_args(args, config_dir)
+        _validate_parallel_options(options, tr)
         path = save_preset(args.name, options, config_dir)
         print(tr.t("cli.preset_saved", name=args.name, path=path))
         return 0

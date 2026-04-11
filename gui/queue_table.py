@@ -13,6 +13,7 @@ from gui.queue_state import (
     QueueItemRecord,
     QueueItemStatus,
     QueueMetrics,
+    assign_runtime_backend,
     build_tags,
     build_tooltip,
     compute_metrics,
@@ -355,6 +356,8 @@ class QueueTableModel(QAbstractTableModel):
             if column == QueueColumn.TARGET_BITRATE:
                 return human_kbps(record.plan_item.target_video_bitrate_bps) if record.plan_item.target_video_bitrate_bps else "n/a"
             if column == QueueColumn.ENCODER:
+                if record.assigned_encoder and record.assigned_backend:
+                    return f"{record.assigned_encoder} ({record.assigned_backend})"
                 encoder = record.plan_item.encoder_info
                 return f"{encoder.encoder_name} ({encoder.backend.value})" if encoder else "n/a"
             if column == QueueColumn.OUTPUT:
@@ -576,6 +579,14 @@ class QueueTableModel(QAbstractTableModel):
         if row is None or record is None:
             return
         state = str(event.get("state") or "")
+        backend = event.get("queue_backend")
+        encoder = event.get("queue_encoder")
+        if isinstance(backend, str) or isinstance(encoder, str):
+            assign_runtime_backend(
+                record,
+                backend if isinstance(backend, str) else record.assigned_backend,
+                encoder if isinstance(encoder, str) else record.assigned_encoder,
+            )
         if state in {"starting_file", "running_pass"} and record.status != QueueItemStatus.RUNNING:
             record.status = QueueItemStatus.RUNNING
         current_pass_index = event.get("current_pass_index")
@@ -609,6 +620,13 @@ class QueueTableModel(QAbstractTableModel):
         if row is None or record is None:
             return
         mark_finished(record, result)
+        self._emit_rows_changed([row])
+
+    def assign_backend(self, item_id: str, backend: str, encoder: str) -> None:
+        row, record = self.record_for_id(item_id)
+        if row is None or record is None:
+            return
+        assign_runtime_backend(record, backend, encoder)
         self._emit_rows_changed([row])
 
     def can_remove_rows(self, rows: list[int]) -> bool:

@@ -62,6 +62,8 @@ class MediaInfo:
 class EncodeOptions:
     codec: CodecChoice = CodecChoice.HEVC
     backend: BackendChoice = BackendChoice.AUTO
+    parallel_enabled: bool = False
+    parallel_backends: tuple[BackendChoice, ...] = ()
     ratio: Optional[float] = None
     min_video_kbps: int = 250
     max_video_kbps: int = 0

@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from PySide6.QtCore import QObject, QThread, Signal
 
 from core.exec_encode import execute_plan_item
-from core.models import EncodeResult, OperationCancelledError
+from core.models import EncodePlan, EncodeResult, OperationCancelledError
+from core.parallel_queue_exec import execute_plan_parallel, normalize_parallel_backends
 from gui.queue_state import QueueItemRecord, create_queue_records
 from gui.queue_table import QueueTableModel
 
@@ -21,7 +22,7 @@ class QueueExecutionItem:
 class QueueExecuteWorker(QThread):
     log = Signal(str)
     progress = Signal(object)
-    item_started = Signal(str)
+    item_started = Signal(str, str, str)
     item_finished = Signal(str, object)
     paused = Signal()
     cancelled = Signal(str)
@@ -33,7 +34,7 @@ class QueueExecuteWorker(QThread):
         self.items = items
         self._cancel_event = threading.Event()
         self._pause_after_current_event = threading.Event()
-        self._current_process = None
+        self._current_processes: dict[str, object] = {}
 
     def _emit_log(self, message: str) -> None:
         self.log.emit(message)
@@ -41,26 +42,80 @@ class QueueExecuteWorker(QThread):
     def _emit_progress(self, event: dict[str, object]) -> None:
         self.progress.emit(event)
 
-    def _set_current_process(self, proc) -> None:
-        self._current_process = proc
+    def _set_current_process(self, slot: str, proc) -> None:
+        if proc is None:
+            self._current_processes.pop(slot, None)
+            return
+        self._current_processes[slot] = proc
 
     def cancel(self) -> None:
         self._cancel_event.set()
-        if self._current_process is not None:
+        for proc in list(self._current_processes.values()):
             try:
-                self._current_process.terminate()
+                proc.terminate()
             except Exception:
                 pass
 
     def pause_after_current(self) -> None:
         self._pause_after_current_event.set()
 
+    def _parallel_config(self) -> tuple[bool, tuple]:
+        if not self.items:
+            return False, ()
+        first = self.items[0].record.plan_item.options
+        enabled = first.parallel_enabled
+        backends = normalize_parallel_backends(first.parallel_backends)
+        for item in self.items[1:]:
+            options = item.record.plan_item.options
+            if options.parallel_enabled != enabled:
+                raise ValueError("Queued items use mixed parallel settings.")
+            if normalize_parallel_backends(options.parallel_backends) != backends:
+                raise ValueError("Queued items use different parallel backend selections.")
+        return enabled, backends
+
+    def _build_plan(self) -> EncodePlan:
+        first_record = self.items[0].record
+        return EncodePlan(
+            items=[copy.deepcopy(item.record.plan_item) for item in self.items],
+            ffmpeg_path=first_record.job_snapshot.ffmpeg_path,
+            ffprobe_path=first_record.job_snapshot.ffprobe_path,
+            input_root=first_record.source_path.parent,
+            output_root=first_record.job_snapshot.output_root,
+        )
+
     def run(self) -> None:
         try:
+            parallel_enabled, parallel_backends = self._parallel_config()
+            if parallel_enabled and parallel_backends:
+                plan = self._build_plan()
+                index_to_item_id = [item.item_id for item in self.items]
+                results = execute_plan_parallel(
+                    plan,
+                    self.items[0].record.job_snapshot.workdir,
+                    backends=parallel_backends,
+                    log_callback=self._emit_log,
+                    progress_callback=self._emit_progress,
+                    cancel_check=self._cancel_event.is_set,
+                    pause_check=self._pause_after_current_event.is_set,
+                    process_callback=self._set_current_process,
+                    item_contexts=[{"queue_item_id": item.item_id} for item in self.items],
+                    item_started_callback=lambda index, backend, encoder: self.item_started.emit(
+                        index_to_item_id[index], backend, encoder
+                    ),
+                    item_result_callback=lambda index, result: self.item_finished.emit(index_to_item_id[index], result),
+                )
+                if self._pause_after_current_event.is_set() and len(results) < len(self.items):
+                    self.paused.emit()
+                    return
+                self.queue_finished.emit()
+                return
             for index, item in enumerate(self.items, start=1):
                 if self._cancel_event.is_set():
                     raise OperationCancelledError("Encoding cancelled.")
-                self.item_started.emit(item.item_id)
+                encoder = item.record.plan_item.encoder_info
+                backend_name = encoder.backend.value if encoder else item.record.plan_item.options.backend.value
+                encoder_name = encoder.encoder_name if encoder else "n/a"
+                self.item_started.emit(item.item_id, backend_name, encoder_name)
                 result = execute_plan_item(
                     item.record.job_snapshot.ffmpeg_path,
                     copy.deepcopy(item.record.plan_item),
@@ -70,7 +125,7 @@ class QueueExecuteWorker(QThread):
                     log_callback=self._emit_log,
                     progress_callback=self._emit_progress,
                     cancel_check=self._cancel_event.is_set,
-                    process_callback=self._set_current_process,
+                    process_callback=lambda proc: self._set_current_process("serial", proc),
                     extra_progress_context={"queue_item_id": item.item_id},
                 )
                 self.item_finished.emit(item.item_id, result)
@@ -95,7 +150,7 @@ class QueueManager(QObject):
         super().__init__(parent)
         self.model = model
         self._worker: QueueExecuteWorker | None = None
-        self._active_item_id: str | None = None
+        self._active_item_ids: set[str] = set()
         self._pause_after_current_requested = False
 
     def is_busy(self) -> bool:
@@ -154,8 +209,9 @@ class QueueManager(QObject):
     def clear_completed(self) -> int:
         return self.model.clear_completed()
 
-    def _on_item_started(self, item_id: str) -> None:
-        self._active_item_id = item_id
+    def _on_item_started(self, item_id: str, backend: str, encoder: str) -> None:
+        self._active_item_ids.add(item_id)
+        self.model.assign_backend(item_id, backend, encoder)
         self.model.mark_running(item_id)
 
     def _on_worker_progress(self, event: dict[str, object]) -> None:
@@ -163,7 +219,7 @@ class QueueManager(QObject):
         self.progress.emit(event)
 
     def _on_item_finished(self, item_id: str, result: EncodeResult) -> None:
-        self._active_item_id = None
+        self._active_item_ids.discard(item_id)
         self.model.apply_result(item_id, result)
         for warning in result.external_subtitle_warnings:
             self.log.emit(warning)
@@ -173,16 +229,16 @@ class QueueManager(QObject):
         self.stateChanged.emit("paused")
 
     def _on_worker_cancelled(self, message: str) -> None:
-        if self._active_item_id:
-            self.model.mark_cancelled(self._active_item_id, message)
-            self._active_item_id = None
+        for item_id in list(self._active_item_ids):
+            self.model.mark_cancelled(item_id, message)
+            self._active_item_ids.discard(item_id)
         self.busyChanged.emit(False)
         self.stateChanged.emit("cancelled")
 
     def _on_worker_failed(self, message: str) -> None:
-        if self._active_item_id:
-            self.model.mark_failed(self._active_item_id, message)
-            self._active_item_id = None
+        for item_id in list(self._active_item_ids):
+            self.model.mark_failed(item_id, message)
+            self._active_item_ids.discard(item_id)
         self.busyChanged.emit(False)
         self.stateChanged.emit("failed")
         self.error.emit(message)
@@ -193,4 +249,5 @@ class QueueManager(QObject):
 
     def _on_worker_thread_finished(self) -> None:
         self._worker = None
+        self._active_item_ids.clear()
         self._pause_after_current_requested = False

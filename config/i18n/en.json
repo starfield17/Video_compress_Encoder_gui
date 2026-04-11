@@ -215,5 +215,15 @@
   "gui.status.skip": "Skipped",
   "gui.status.done": "Done",
   "gui.status.failed": "Failed",
-  "gui.status.cancelled": "Cancelled"
+  "gui.status.cancelled": "Cancelled",
+  "gui.checkbox.parallel_enabled": "Enable parallel transcoding",
+  "gui.label.parallel_backends": "Parallel backends",
+  "gui.message.parallel_requires_backends": "Parallel mode requires at least one backend.",
+  "gui.message.parallel_two_pass_not_supported": "Parallel mode does not support two-pass encoding.",
+  "gui.message.parallel_preset_not_supported": "Parallel mode does not support a manual encoder preset.",
+  "gui.message.parallel_preview_not_supported": "Preview does not support parallel mode.",
+  "cli.parallel_requires_backends": "Parallel mode requires at least one backend.",
+  "cli.parallel_two_pass_not_supported": "Parallel mode does not support two-pass encoding.",
+  "cli.parallel_preset_not_supported": "Parallel mode does not support a manual encoder preset.",
+  "cli.parallel_preview_not_supported": "Preview does not support parallel mode."
 }

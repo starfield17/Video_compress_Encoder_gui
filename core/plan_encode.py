@@ -82,7 +82,7 @@ def build_encode_plan(
         progress_callback,
         f"Resolved encoder: {encoder_info.encoder_name} ({encoder_info.backend.value})",
     )
-    if options.encoder_preset is None:
+    if options.encoder_preset is None and not options.parallel_enabled:
         options = replace(options, encoder_preset=encoder_info.default_preset)
         if encoder_info.default_preset:
             _emit(progress_callback, f"Using default encoder preset: {encoder_info.default_preset}")

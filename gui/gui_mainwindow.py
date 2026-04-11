@@ -284,6 +284,7 @@ class MainWindow(QMainWindow):
         self.manage_presets_button.clicked.connect(self._open_preset_manager)
         self.sample_mode_combo.currentIndexChanged.connect(self._sync_dependent_controls)
         self.audio_mode_combo.currentIndexChanged.connect(self._sync_dependent_controls)
+        self.parallel_check.toggled.connect(self._sync_dependent_controls)
         self.source_combo.editTextChanged.connect(self._persist_runtime_state)
         self.output_edit.editingFinished.connect(self._persist_runtime_state)
         self.preset_combo.currentIndexChanged.connect(self._preset_combo_changed)
@@ -336,6 +337,12 @@ class MainWindow(QMainWindow):
 
         self.overwrite_check = QCheckBox()
         self.recursive_check = QCheckBox()
+        self.parallel_check = QCheckBox()
+        self.parallel_backends_label = QLabel()
+        self.parallel_nvenc_check = QCheckBox("NVENC")
+        self.parallel_qsv_check = QCheckBox("QSV")
+        self.parallel_amf_check = QCheckBox("AMF")
+        self.parallel_cpu_check = QCheckBox("CPU")
 
         layout.addWidget(self.codec_label, 0, 0)
         layout.addWidget(self.codec_combo, 0, 1)
@@ -347,6 +354,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.ratio_edit, 1, 1)
         layout.addWidget(self.overwrite_check, 2, 0, 1, 2)
         layout.addWidget(self.recursive_check, 2, 2, 1, 2)
+        layout.addWidget(self.parallel_check, 3, 0, 1, 2)
+        layout.addWidget(self.parallel_backends_label, 4, 0)
+        layout.addWidget(self.parallel_nvenc_check, 4, 1)
+        layout.addWidget(self.parallel_qsv_check, 4, 2)
+        layout.addWidget(self.parallel_amf_check, 4, 3)
+        layout.addWidget(self.parallel_cpu_check, 4, 4)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
         layout.setColumnStretch(5, 1)
@@ -545,6 +558,8 @@ class MainWindow(QMainWindow):
         self.ratio_label.setText(self.tr.t("gui.label.ratio"))
         self.overwrite_check.setText(self.tr.t("gui.checkbox.overwrite"))
         self.recursive_check.setText(self.tr.t("gui.checkbox.recursive"))
+        self.parallel_check.setText(self.tr.t("gui.checkbox.parallel_enabled"))
+        self.parallel_backends_label.setText(self.tr.t("gui.label.parallel_backends"))
         self.encoder_preset_label.setText(self.tr.t("gui.label.encoder_preset"))
         self.pix_fmt_label.setText(self.tr.t("gui.label.pix_fmt"))
         self.min_bitrate_label.setText(self.tr.t("gui.label.min_video_kbps"))
@@ -735,7 +750,9 @@ class MainWindow(QMainWindow):
                 self.preset_combo.setCurrentText(name)
                 self._append_log(self.tr.t("gui.log.preset_loaded", name=name))
             elif action == "save":
-                path = save_preset(name, self._current_options(), self.config_dir)
+                options = self._current_options()
+                self._validate_parallel_options_for_gui(options)
+                path = save_preset(name, options, self.config_dir)
                 self.app_config["default_preset_name"] = name
                 self._refresh_presets()
                 self.preset_combo.setCurrentText(name)
@@ -761,6 +778,8 @@ class MainWindow(QMainWindow):
         return EncodeOptions(
             codec=CodecChoice(self.codec_combo.currentText()),
             backend=BackendChoice(self.backend_combo.currentText()),
+            parallel_enabled=self.parallel_check.isChecked(),
+            parallel_backends=tuple(self._selected_parallel_backends()),
             ratio=float(ratio_text) if ratio_text else None,
             min_video_kbps=int(self.min_bitrate_spin.value()),
             max_video_kbps=int(self.max_bitrate_spin.value()),
@@ -781,6 +800,12 @@ class MainWindow(QMainWindow):
     def _apply_options(self, options: EncodeOptions) -> None:
         self.codec_combo.setCurrentText(options.codec.value)
         self.backend_combo.setCurrentText(options.backend.value)
+        self.parallel_check.setChecked(options.parallel_enabled)
+        selected = set(options.parallel_backends)
+        self.parallel_nvenc_check.setChecked(BackendChoice.NVENC in selected)
+        self.parallel_qsv_check.setChecked(BackendChoice.QSV in selected)
+        self.parallel_amf_check.setChecked(BackendChoice.AMF in selected)
+        self.parallel_cpu_check.setChecked(BackendChoice.CPU in selected)
         self.ratio_edit.setText("" if options.ratio is None else str(options.ratio))
         self.container_combo.setCurrentText(options.container.value)
         self.audio_mode_combo.setCurrentText(options.audio_mode.value)
@@ -822,6 +847,40 @@ class MainWindow(QMainWindow):
         custom_sample = self.sample_mode_combo.currentText() == PreviewSampleMode.CUSTOM.value
         self.sample_start_spin.setEnabled(custom_sample)
         self.audio_bitrate_edit.setEnabled(self.audio_mode_combo.currentText() == AudioMode.AAC.value)
+        parallel_enabled = self.parallel_check.isChecked()
+        self.backend_combo.setEnabled(not parallel_enabled)
+        for widget in [
+            self.parallel_nvenc_check,
+            self.parallel_qsv_check,
+            self.parallel_amf_check,
+            self.parallel_cpu_check,
+        ]:
+            widget.setEnabled(parallel_enabled)
+
+    def _selected_parallel_backends(self) -> list[BackendChoice]:
+        selected: list[BackendChoice] = []
+        mapping = [
+            (self.parallel_nvenc_check, BackendChoice.NVENC),
+            (self.parallel_qsv_check, BackendChoice.QSV),
+            (self.parallel_amf_check, BackendChoice.AMF),
+            (self.parallel_cpu_check, BackendChoice.CPU),
+        ]
+        for checkbox, backend in mapping:
+            if checkbox.isChecked():
+                selected.append(backend)
+        return selected
+
+    def _validate_parallel_options_for_gui(self, options: EncodeOptions, *, allow_parallel: bool = True) -> None:
+        if not options.parallel_enabled:
+            return
+        if not allow_parallel:
+            raise ValueError(self.tr.t("gui.message.parallel_preview_not_supported"))
+        if not options.parallel_backends:
+            raise ValueError(self.tr.t("gui.message.parallel_requires_backends"))
+        if options.two_pass:
+            raise ValueError(self.tr.t("gui.message.parallel_two_pass_not_supported"))
+        if options.encoder_preset:
+            raise ValueError(self.tr.t("gui.message.parallel_preset_not_supported"))
 
     def _persist_runtime_state(self) -> None:
         source_text = self.source_combo.currentText().strip()
@@ -965,6 +1024,7 @@ class MainWindow(QMainWindow):
         if input_path is None:
             raise ValueError(self.tr.t("gui.message.select_source"))
         options = self._current_options()
+        self._validate_parallel_options_for_gui(options)
         output_dir = self._selected_output()
         workdir = self._selected_workdir()
         ffmpeg_path = self._selected_ffmpeg()
@@ -995,6 +1055,11 @@ class MainWindow(QMainWindow):
         if not files:
             return
         options = self._current_options()
+        try:
+            self._validate_parallel_options_for_gui(options)
+        except Exception as exc:
+            QMessageBox.warning(self, self.tr.t("gui.message.warning"), str(exc))
+            return
         output_dir = self._selected_output()
         workdir = self._selected_workdir()
         ffmpeg_path = self._selected_ffmpeg()
@@ -1050,6 +1115,11 @@ class MainWindow(QMainWindow):
                 else None
             ),
         )
+        try:
+            self._validate_parallel_options_for_gui(options, allow_parallel=False)
+        except Exception as exc:
+            QMessageBox.warning(self, self.tr.t("gui.message.warning"), str(exc))
+            return
         self._append_log(self.tr.t("gui.log.previewing"))
         self._set_status_snapshot("preview", input_path.name, "-", "-", 0.0)
         worker = PreviewWorker(

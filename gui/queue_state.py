@@ -58,6 +58,8 @@ class QueueItemRecord:
     elapsed_sec: float | None = None
     started_at: float | None = None
     finished_at: float | None = None
+    assigned_backend: str | None = None
+    assigned_encoder: str | None = None
     result: EncodeResult | None = None
 
     @property
@@ -312,6 +314,8 @@ def reset_for_retry(record: QueueItemRecord) -> None:
     record.elapsed_sec = None
     record.started_at = None
     record.finished_at = None
+    record.assigned_backend = None
+    record.assigned_encoder = None
     record.result = None
 
 
@@ -333,6 +337,11 @@ def mark_finished(record: QueueItemRecord, result: EncodeResult) -> None:
         return
     record.status = QueueItemStatus.FAILED
     record.error_summary = short_error(result.error_message)
+
+
+def assign_runtime_backend(record: QueueItemRecord, backend: str | None, encoder: str | None) -> None:
+    record.assigned_backend = backend
+    record.assigned_encoder = encoder
 
 
 def mark_cancelled(record: QueueItemRecord, message: str | None = None) -> None:

@@ -40,6 +40,8 @@ def encode_options_to_preset_data(options: EncodeOptions) -> dict[str, Any]:
     return {
         "codec": options.codec.value,
         "backend": options.backend.value,
+        "parallel_enabled": options.parallel_enabled,
+        "parallel_backends": [backend.value for backend in options.parallel_backends],
         "ratio": options.ratio,
         "min_video_kbps": options.min_video_kbps,
         "max_video_kbps": options.max_video_kbps,
@@ -57,9 +59,13 @@ def encode_options_to_preset_data(options: EncodeOptions) -> dict[str, Any]:
 
 
 def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
+    data = dict(data)
     if "copy_external_subtitles" not in data:
-        data = dict(data)
         data["copy_external_subtitles"] = False
+    if "parallel_enabled" not in data:
+        data["parallel_enabled"] = False
+    if "parallel_backends" not in data:
+        data["parallel_backends"] = []
 
     required = {
         "codec",
@@ -84,6 +90,8 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
 
     CodecChoice(data["codec"])
     BackendChoice(data["backend"])
+    for backend in data["parallel_backends"]:
+        BackendChoice(backend)
     ContainerChoice(data["container"])
     AudioMode(data["audio_mode"])
     if data["ratio"] is not None and float(data["ratio"]) <= 0:
@@ -96,6 +104,8 @@ def preset_data_to_encode_options(data: dict[str, Any]) -> EncodeOptions:
     return EncodeOptions(
         codec=CodecChoice(data["codec"]),
         backend=BackendChoice(data["backend"]),
+        parallel_enabled=bool(data.get("parallel_enabled", False)),
+        parallel_backends=tuple(BackendChoice(item) for item in data.get("parallel_backends", [])),
         ratio=None if data["ratio"] is None else float(data["ratio"]),
         min_video_kbps=int(data["min_video_kbps"]),
         max_video_kbps=int(data["max_video_kbps"]),
