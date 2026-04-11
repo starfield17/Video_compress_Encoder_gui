@@ -1,7 +1,7 @@
 {
   "codec": "hevc",
   "backend": "auto",
-  "ratio": 0.72,
+  "ratio": 0.76,
   "min_video_kbps": 250,
   "max_video_kbps": 0,
   "container": "mp4",
@@ -12,6 +12,6 @@
   "two_pass": false,
   "preset": null,
   "pix_fmt": "yuv420p",
-  "maxrate_factor": 1.08,
-  "bufsize_factor": 2.0
+  "maxrate_factor": 1.25,
+  "bufsize_factor": 4.0
 }
