@@ -14,8 +14,14 @@ env/
 build/
 dist/
 *.so
+
 #codex files
 .codex*
+
+#local ffmpeg files
+FFmpeg/*.dll
+FFmpeg/*.exe
+
 # Local workdir debug files
 workdir/
 
