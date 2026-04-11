@@ -101,6 +101,8 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
 
 def preset_data_to_encode_options(data: dict[str, Any]) -> EncodeOptions:
     validate_preset_schema(data)
+    preset_value = data.get("preset")
+    normalized_preset = str(preset_value).strip() if preset_value is not None else ""
     return EncodeOptions(
         codec=CodecChoice(data["codec"]),
         backend=BackendChoice(data["backend"]),
@@ -115,7 +117,7 @@ def preset_data_to_encode_options(data: dict[str, Any]) -> EncodeOptions:
         copy_subtitles=bool(data["copy_subtitles"]),
         copy_external_subtitles=bool(data.get("copy_external_subtitles", False)),
         two_pass=bool(data["two_pass"]),
-        encoder_preset=data.get("preset"),
+        encoder_preset=normalized_preset or None,
         pix_fmt=str(data["pix_fmt"]),
         maxrate_factor=float(data["maxrate_factor"]),
         bufsize_factor=float(data["bufsize_factor"]),

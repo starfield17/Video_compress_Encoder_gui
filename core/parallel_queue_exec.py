@@ -97,7 +97,7 @@ def execute_plan_parallel(
     normalized = validate_parallel_options(backends, plan)
     available_encoders = list_available_encoders(plan.ffmpeg_path)
     encoders = {
-        backend: resolve_encoder(plan.items[0].options.codec, backend, available_encoders)
+        backend: resolve_encoder(plan.items[0].options.codec, backend, available_encoders, plan.ffmpeg_path)
         for backend in normalized
     }
     pending = deque(enumerate(plan.items))

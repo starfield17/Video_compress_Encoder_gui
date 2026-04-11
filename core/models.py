@@ -75,8 +75,8 @@ class EncodeOptions:
     two_pass: bool = False
     encoder_preset: Optional[str] = None
     pix_fmt: str = "yuv420p"
-    maxrate_factor: float = 1.08
-    bufsize_factor: float = 2.0
+    maxrate_factor: float = 1.25
+    bufsize_factor: float = 4.0
     overwrite: bool = False
     recursive: bool = False
     dry_run: bool = False

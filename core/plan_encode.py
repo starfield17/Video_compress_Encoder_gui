@@ -6,7 +6,7 @@ from typing import Callable, Iterable
 
 from core.bitrate_policy import choose_ratio, compute_target_video_bitrate
 from core.discover_ffmpeg import discover_ffmpeg_tools
-from core.encoder_caps import list_available_encoders, resolve_encoder
+from core.encoder_caps import is_valid_preset, list_available_encoders, preset_choices_for_encoder, resolve_encoder
 from core.models import (
     EncodeOptions,
     EncodePlan,
@@ -77,15 +77,24 @@ def build_encode_plan(
     _emit(progress_callback, f"Using ffprobe: {ffprobe}")
     available_encoders = list_available_encoders(ffmpeg)
     _emit(progress_callback, f"Detected {len(available_encoders)} available encoders.")
-    encoder_info = resolve_encoder(options.codec, options.backend, available_encoders)
+    encoder_info = resolve_encoder(options.codec, options.backend, available_encoders, ffmpeg)
     _emit(
         progress_callback,
         f"Resolved encoder: {encoder_info.encoder_name} ({encoder_info.backend.value})",
     )
     if options.encoder_preset is None and not options.parallel_enabled:
-        options = replace(options, encoder_preset=encoder_info.default_preset)
-        if encoder_info.default_preset:
-            _emit(progress_callback, f"Using default encoder preset: {encoder_info.default_preset}")
+        default_preset = encoder_info.default_preset
+        if default_preset:
+            choices = preset_choices_for_encoder(ffmpeg, encoder_info.encoder_name)
+            if choices and not is_valid_preset(ffmpeg, encoder_info.encoder_name, default_preset):
+                _emit(
+                    progress_callback,
+                    f"Default encoder preset {default_preset!r} is not valid for {encoder_info.encoder_name}; falling back to encoder defaults.",
+                )
+                default_preset = None
+        options = replace(options, encoder_preset=default_preset)
+        if default_preset:
+            _emit(progress_callback, f"Using default encoder preset: {default_preset}")
 
     output_root = choose_output_root(input_root, output_dir, options.codec)
     _emit(progress_callback, f"Output root: {output_root}")

@@ -58,9 +58,9 @@ def _encoder(backend: BackendChoice) -> EncoderInfo:
         BackendChoice.AMF: "hevc_amf",
     }
     defaults = {
-        BackendChoice.CPU: "medium",
-        BackendChoice.NVENC: "p5",
-        BackendChoice.QSV: None,
+        BackendChoice.CPU: "slow",
+        BackendChoice.NVENC: "p6",
+        BackendChoice.QSV: "slow",
         BackendChoice.AMF: None,
     }
     return EncoderInfo(
@@ -150,7 +150,7 @@ class ParallelSchedulerTestCase(unittest.TestCase):
 
             with (
                 patch("core.parallel_queue_exec.list_available_encoders", return_value={"hevc_nvenc", "hevc_qsv"}),
-                patch("core.parallel_queue_exec.resolve_encoder", side_effect=lambda codec, backend, available: _encoder(backend)),
+                patch("core.parallel_queue_exec.resolve_encoder", side_effect=lambda codec, backend, available, ffmpeg_path=None: _encoder(backend)),
                 patch("core.parallel_queue_exec.execute_plan_item", side_effect=fake_execute),
             ):
                 results = execute_plan_parallel(
@@ -181,7 +181,7 @@ class ParallelSchedulerTestCase(unittest.TestCase):
 
             with (
                 patch("core.parallel_queue_exec.list_available_encoders", return_value={"hevc_nvenc", "hevc_qsv"}),
-                patch("core.parallel_queue_exec.resolve_encoder", side_effect=lambda codec, backend, available: _encoder(backend)),
+                patch("core.parallel_queue_exec.resolve_encoder", side_effect=lambda codec, backend, available, ffmpeg_path=None: _encoder(backend)),
                 patch("core.parallel_queue_exec.execute_plan_item", side_effect=fake_execute),
             ):
                 with self.assertRaisesRegex(RuntimeError, "boom"):

@@ -4,8 +4,8 @@ from core.models import CodecChoice
 
 
 DEFAULT_RATIO = {
-    CodecChoice.HEVC: 0.72,
-    CodecChoice.AV1: 0.58,
+    CodecChoice.HEVC: 0.76,
+    CodecChoice.AV1: 0.64,
 }
 
 DEFAULT_MIN_VIDEO_KBPS = 250

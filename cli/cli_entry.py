@@ -9,6 +9,8 @@ from pathlib import Path
 from cli.cli_interactive import print_encode_results, print_plan, print_preview_result
 from core.app_paths import config_dir as app_config_dir
 from core.app_paths import ensure_runtime_layout, workdir_dir
+from core.discover_ffmpeg import discover_ffmpeg_tools
+from core.encoder_caps import list_available_encoders, preset_choices_for_encoder, resolve_encoder
 from core.exec_encode import execute_plan, execute_preview
 from core.i18n import get_translator
 from core.models import (
@@ -175,6 +177,37 @@ def _validate_parallel_options(options: EncodeOptions, tr, *, allow_parallel: bo
         raise ValueError(tr.t("cli.parallel_preset_not_supported"))
 
 
+def _resolve_encoder_info(options: EncodeOptions, args: argparse.Namespace):
+    ffmpeg_path, _ffprobe_path = discover_ffmpeg_tools(args.ffmpeg, args.ffprobe)
+    available_encoders = list_available_encoders(ffmpeg_path)
+    encoder_info = resolve_encoder(options.codec, options.backend, available_encoders, ffmpeg_path)
+    return ffmpeg_path, encoder_info
+
+
+def _invalid_preset_message(preset: str, encoder_name: str, choices: list[str]) -> str:
+    choice_text = ", ".join(choices)
+    return f"Invalid encoder preset '{preset}' for {encoder_name}. Valid presets: {choice_text}"
+
+
+def _unverifiable_preset_message(preset: str, encoder_name: str) -> str:
+    return (
+        f"Cannot reliably validate encoder preset '{preset}' for {encoder_name}. "
+        "Use the encoder default preset instead."
+    )
+
+
+def _validate_encoder_preset(options: EncodeOptions, args: argparse.Namespace) -> None:
+    preset = options.encoder_preset
+    if preset is None:
+        return
+    ffmpeg_path, encoder_info = _resolve_encoder_info(options, args)
+    choices = preset_choices_for_encoder(ffmpeg_path, encoder_info.encoder_name)
+    if not choices:
+        raise ValueError(_unverifiable_preset_message(preset, encoder_info.encoder_name))
+    if preset not in choices:
+        raise ValueError(_invalid_preset_message(preset, encoder_info.encoder_name, choices))
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Video compressor CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -234,6 +267,7 @@ def _run_plan(args: argparse.Namespace, config_dir: Path) -> int:
     tr = _translator_for_args(args, config_dir)
     options = _options_from_args(args, config_dir)
     _validate_parallel_options(options, tr)
+    _validate_encoder_preset(options, args)
     plan = build_encode_plan(
         input_path=Path(args.input),
         options=options,
@@ -250,6 +284,7 @@ def _run_encode(args: argparse.Namespace, config_dir: Path) -> int:
     tr = _translator_for_args(args, config_dir)
     options = _options_from_args(args, config_dir)
     _validate_parallel_options(options, tr)
+    _validate_encoder_preset(options, args)
     plan = build_encode_plan(
         input_path=Path(args.input),
         options=options,
@@ -283,6 +318,7 @@ def _run_preview(args: argparse.Namespace, config_dir: Path) -> int:
 
     options = _options_from_args(args, config_dir)
     _validate_parallel_options(options, tr, allow_parallel=False)
+    _validate_encoder_preset(options, args)
     plan = build_encode_plan(
         input_path=input_path,
         options=options,
@@ -340,6 +376,7 @@ def _run_preset(args: argparse.Namespace, config_dir: Path) -> int:
     if args.preset_command == "save":
         options = _options_from_args(args, config_dir)
         _validate_parallel_options(options, tr)
+        _validate_encoder_preset(options, args)
         path = save_preset(args.name, options, config_dir)
         print(tr.t("cli.preset_saved", name=args.name, path=path))
         return 0

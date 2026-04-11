@@ -42,6 +42,8 @@ from core.models import (
     PreviewSampleMode,
     VideoFileItem,
 )
+from core.discover_ffmpeg import discover_ffmpeg_tools
+from core.encoder_caps import list_available_encoders, preset_choices_for_encoder, resolve_encoder
 from core.preset_store import delete_preset, list_presets, load_app_config, load_preset, save_app_config, save_preset
 from gui.activity_log_window import ActivityLogWindow
 from gui.gui_workers import PlanWorker, PreviewWorker
@@ -54,6 +56,8 @@ from gui.settings_dialog import SettingsDialog
 
 
 class MainWindow(QMainWindow):
+    _PRESET_UNSET = object()
+
     def __init__(self, repo_root: Path, language: str | None = None) -> None:
         super().__init__()
         self.repo_root = repo_root
@@ -285,6 +289,8 @@ class MainWindow(QMainWindow):
         self.sample_mode_combo.currentIndexChanged.connect(self._sync_dependent_controls)
         self.audio_mode_combo.currentIndexChanged.connect(self._sync_dependent_controls)
         self.parallel_check.toggled.connect(self._sync_dependent_controls)
+        self.codec_combo.currentIndexChanged.connect(self._refresh_encoder_preset_choices)
+        self.backend_combo.currentIndexChanged.connect(self._refresh_encoder_preset_choices)
         self.source_combo.editTextChanged.connect(self._persist_runtime_state)
         self.output_edit.editingFinished.connect(self._persist_runtime_state)
         self.preset_combo.currentIndexChanged.connect(self._preset_combo_changed)
@@ -375,7 +381,7 @@ class MainWindow(QMainWindow):
         layout.setVerticalSpacing(10)
 
         self.encoder_preset_label = QLabel()
-        self.encoder_preset_edit = QLineEdit()
+        self.encoder_preset_combo = QComboBox()
 
         self.pix_fmt_label = QLabel()
         self.pix_fmt_edit = QLineEdit()
@@ -407,7 +413,7 @@ class MainWindow(QMainWindow):
         self.two_pass_check = QCheckBox()
 
         layout.addWidget(self.encoder_preset_label, 0, 0)
-        layout.addWidget(self.encoder_preset_edit, 0, 1)
+        layout.addWidget(self.encoder_preset_combo, 0, 1)
         layout.addWidget(self.pix_fmt_label, 0, 2)
         layout.addWidget(self.pix_fmt_edit, 0, 3)
         layout.addWidget(self.min_bitrate_label, 1, 0)
@@ -584,7 +590,6 @@ class MainWindow(QMainWindow):
         self.source_combo.lineEdit().setPlaceholderText(self.tr.t("gui.placeholder.source"))
         self.output_edit.setPlaceholderText(self.tr.t("gui.placeholder.default_output"))
         self.ratio_edit.setPlaceholderText(self.tr.t("gui.placeholder.auto_ratio"))
-        self.encoder_preset_edit.setPlaceholderText(self.tr.t("gui.placeholder.encoder_preset"))
         self.pix_fmt_edit.setPlaceholderText("yuv420p")
         self.audio_bitrate_edit.setPlaceholderText("128k")
 
@@ -605,6 +610,7 @@ class MainWindow(QMainWindow):
             self._status_percent,
         )
         self._update_queue_metrics(self.queue_model.metrics())
+        self._refresh_encoder_preset_choices()
 
     def _set_source_history(self, items: list[str]) -> None:
         current = self.source_combo.currentText().strip()
@@ -773,7 +779,8 @@ class MainWindow(QMainWindow):
 
     def _current_options(self) -> EncodeOptions:
         ratio_text = self.ratio_edit.text().strip()
-        encoder_preset = self.encoder_preset_edit.text().strip() or None
+        preset_value = self.encoder_preset_combo.currentData()
+        encoder_preset = str(preset_value) if isinstance(preset_value, str) and preset_value else None
         pix_fmt = self.pix_fmt_edit.text().strip() or "yuv420p"
         return EncodeOptions(
             codec=CodecChoice(self.codec_combo.currentText()),
@@ -810,7 +817,6 @@ class MainWindow(QMainWindow):
         self.container_combo.setCurrentText(options.container.value)
         self.audio_mode_combo.setCurrentText(options.audio_mode.value)
         self.audio_bitrate_edit.setText(options.audio_bitrate)
-        self.encoder_preset_edit.setText(options.encoder_preset or "")
         self.pix_fmt_edit.setText(options.pix_fmt)
         self.min_bitrate_spin.setValue(options.min_video_kbps)
         self.max_bitrate_spin.setValue(options.max_video_kbps)
@@ -821,6 +827,7 @@ class MainWindow(QMainWindow):
         self.two_pass_check.setChecked(options.two_pass)
         self.overwrite_check.setChecked(options.overwrite)
         self.recursive_check.setChecked(options.recursive)
+        self._refresh_encoder_preset_choices(preset=options.encoder_preset, log_invalid=options.encoder_preset is not None)
         self._sync_dependent_controls()
 
     def _selected_input(self) -> Path | None:
@@ -856,6 +863,70 @@ class MainWindow(QMainWindow):
             self.parallel_cpu_check,
         ]:
             widget.setEnabled(parallel_enabled)
+
+    def _default_preset_text(self) -> str:
+        return self.tr.t("gui.value.encoder_preset_default")
+
+    def _current_encoder_preset(self) -> str | None:
+        value = self.encoder_preset_combo.currentData()
+        return value if isinstance(value, str) and value else None
+
+    def _resolve_encoder_for_preset_choices(self):
+        try:
+            ffmpeg_path, _ffprobe_path = discover_ffmpeg_tools(self._selected_ffmpeg(), self._selected_ffprobe())
+            available_encoders = list_available_encoders(ffmpeg_path)
+            encoder_info = resolve_encoder(
+                CodecChoice(self.codec_combo.currentText()),
+                BackendChoice(self.backend_combo.currentText()),
+                available_encoders,
+                ffmpeg_path,
+            )
+            return ffmpeg_path, encoder_info
+        except Exception:
+            return None
+
+    def _set_encoder_preset_items(self, choices: list[str]) -> None:
+        self.encoder_preset_combo.blockSignals(True)
+        self.encoder_preset_combo.clear()
+        self.encoder_preset_combo.addItem(self._default_preset_text(), None)
+        for choice in choices:
+            self.encoder_preset_combo.addItem(choice, choice)
+        self.encoder_preset_combo.blockSignals(False)
+
+    def _select_encoder_preset(self, preset: str | None, *, log_invalid: bool) -> None:
+        if preset is None:
+            self.encoder_preset_combo.setCurrentIndex(0)
+            return
+        index = self.encoder_preset_combo.findData(preset)
+        if index >= 0:
+            self.encoder_preset_combo.setCurrentIndex(index)
+            return
+        self.encoder_preset_combo.setCurrentIndex(0)
+        if log_invalid:
+            self._append_log(self.tr.t("gui.log.encoder_preset_reset"))
+
+    def _refresh_encoder_preset_choices(self, *_args, preset=_PRESET_UNSET, log_invalid: bool = False) -> None:
+        desired_preset = self._current_encoder_preset() if preset is self._PRESET_UNSET else preset
+        if self.backend_combo.currentText() == BackendChoice.AUTO.value:
+            self._set_encoder_preset_items([])
+            self.encoder_preset_combo.setEnabled(False)
+            self.encoder_preset_combo.setToolTip(self.tr.t("gui.tooltip.encoder_preset_auto"))
+            self._select_encoder_preset(None, log_invalid=False)
+            return
+        resolved = self._resolve_encoder_for_preset_choices()
+        if resolved is None:
+            self._set_encoder_preset_items([])
+            self.encoder_preset_combo.setEnabled(False)
+            self.encoder_preset_combo.setToolTip(self.tr.t("gui.tooltip.encoder_preset_unavailable"))
+            self._select_encoder_preset(None, log_invalid=log_invalid and desired_preset is not None)
+            return
+        ffmpeg_path, encoder_info = resolved
+        choices = preset_choices_for_encoder(ffmpeg_path, encoder_info.encoder_name)
+        self._set_encoder_preset_items(choices)
+        self.encoder_preset_combo.setEnabled(bool(choices))
+        tooltip_key = "gui.tooltip.encoder_preset_unavailable" if not choices else ""
+        self.encoder_preset_combo.setToolTip(self.tr.t(tooltip_key) if tooltip_key else "")
+        self._select_encoder_preset(desired_preset, log_invalid=log_invalid)
 
     def _selected_parallel_backends(self) -> list[BackendChoice]:
         selected: list[BackendChoice] = []
