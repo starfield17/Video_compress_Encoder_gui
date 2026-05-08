@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from threading import RLock
+from typing import Any, Callable
 
 from core.app_paths import workdir_dir
 from core.models import (
@@ -16,6 +17,7 @@ from core.models import (
 
 
 APP_CONFIG_NAME = "app_config.json"
+_APP_CONFIG_LOCK = RLock()
 
 
 def presets_dir(config_dir: Path) -> Path:
@@ -151,11 +153,7 @@ def delete_preset(name: str, config_dir: Path) -> None:
     path.unlink()
 
 
-def load_app_config(config_dir: Path) -> dict[str, Any]:
-    path = app_config_path(config_dir)
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-
+def _default_app_config() -> dict[str, Any]:
     return {
         "default_preset_name": "default_hevc",
         "keep_preview_temp": True,
@@ -165,7 +163,37 @@ def load_app_config(config_dir: Path) -> dict[str, Any]:
     }
 
 
-def save_app_config(config_dir: Path, data: dict[str, Any]) -> Path:
+def _load_app_config_unlocked(config_dir: Path) -> dict[str, Any]:
+    path = app_config_path(config_dir)
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    return _default_app_config()
+
+
+def _save_app_config_unlocked(config_dir: Path, data: dict[str, Any]) -> Path:
     path = app_config_path(config_dir)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return path
+
+
+def load_app_config(config_dir: Path) -> dict[str, Any]:
+    with _APP_CONFIG_LOCK:
+        return _load_app_config_unlocked(config_dir)
+
+
+def save_app_config(config_dir: Path, data: dict[str, Any]) -> Path:
+    with _APP_CONFIG_LOCK:
+        return _save_app_config_unlocked(config_dir, data)
+
+
+def update_app_config(
+    config_dir: Path,
+    updater: Callable[[dict[str, Any]], dict[str, Any] | None],
+) -> Path:
+    with _APP_CONFIG_LOCK:
+        data = _load_app_config_unlocked(config_dir)
+        updated = updater(data)
+        if updated is not None:
+            data = updated
+        return _save_app_config_unlocked(config_dir, data)

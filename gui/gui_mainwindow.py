@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QPoint, Qt, QUrl
+from PySide6.QtCore import QByteArray, QPoint, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -44,9 +44,9 @@ from core.models import (
 )
 from core.discover_ffmpeg import discover_ffmpeg_tools
 from core.encoder_caps import list_available_encoders, preset_choices_for_encoder, resolve_encoder
-from core.preset_store import delete_preset, list_presets, load_app_config, load_preset, save_app_config, save_preset
+from core.preset_store import delete_preset, list_presets, load_app_config, load_preset, save_preset, update_app_config
 from gui.activity_log_window import ActivityLogWindow
-from gui.gui_workers import PlanWorker, PreviewWorker
+from gui.gui_workers import EncoderCapabilityDetectWorker, PlanWorker, PreviewWorker
 from gui.preview_result_dialog import PreviewResultDialog
 from gui.preset_manager_dialog import PresetManagerDialog
 from gui.queue_manager import QueueManager
@@ -68,6 +68,9 @@ class MainWindow(QMainWindow):
         self.tr = get_translator(self.language, self.config_dir)
 
         self.active_worker = None
+        self.encoder_detection_worker = None
+        self._startup_encoder_detection_started = False
+        self._pending_encoder_detection_force_refresh = False
         self.queue_busy = False
         self._header_sync_guard = False
         self._queue_state = "idle"
@@ -89,6 +92,13 @@ class MainWindow(QMainWindow):
         self._sync_dependent_controls()
         self._update_queue_metrics(self.queue_model.metrics())
         self._refresh_action_state()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._startup_encoder_detection_started:
+            return
+        self._startup_encoder_detection_started = True
+        QTimer.singleShot(0, lambda: self._start_encoder_capability_detection(force_refresh=False))
 
     def _build_ui(self) -> None:
         self.setMinimumSize(1360, 860)
@@ -624,6 +634,65 @@ class MainWindow(QMainWindow):
         self.activity_log_window.append_message(message)
         self.statusBar().showMessage(message, 5000)
 
+    def _encoder_capability_summary(self, capabilities: dict) -> str:
+        codecs = capabilities.get("codecs", {})
+        if not isinstance(codecs, dict):
+            return self.tr.t("gui.value.unknown")
+
+        parts: list[str] = []
+        for codec in (CodecChoice.HEVC, CodecChoice.AV1):
+            items = codecs.get(codec.value, [])
+            labels: list[str] = []
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    backend = str(item.get("backend", "")).strip()
+                    encoder = str(item.get("encoder", "")).strip()
+                    if backend and encoder:
+                        labels.append(f"{encoder} ({backend})")
+            parts.append(f"{codec.value}: {', '.join(labels) if labels else self.tr.t('gui.label.none')}")
+        return "; ".join(parts)
+
+    def _start_encoder_capability_detection(self, *, force_refresh: bool) -> None:
+        if self.encoder_detection_worker is not None:
+            if force_refresh:
+                self._pending_encoder_detection_force_refresh = True
+            self._append_log(self.tr.t("gui.log.encoder_detection_running"))
+            return
+
+        self._append_log(self.tr.t("gui.log.encoder_detection_started"))
+        worker = EncoderCapabilityDetectWorker(
+            self.config_dir,
+            self._selected_ffmpeg(),
+            force_refresh=force_refresh,
+        )
+        self.encoder_detection_worker = worker
+        worker.log.connect(self._append_log)
+        worker.completed.connect(self._on_encoder_capability_detection_completed)
+        worker.failed.connect(self._on_encoder_capability_detection_failed)
+        worker.finished.connect(self._on_encoder_capability_detection_finished)
+        worker.start()
+
+    def _on_encoder_capability_detection_completed(self, capabilities: dict) -> None:
+        self.app_config["encoder_capabilities"] = capabilities
+        self._append_log(
+            self.tr.t(
+                "gui.log.encoder_detection_done",
+                summary=self._encoder_capability_summary(capabilities),
+            )
+        )
+        self._refresh_encoder_preset_choices()
+
+    def _on_encoder_capability_detection_failed(self, message: str) -> None:
+        self._append_log(self.tr.t("gui.log.encoder_detection_failed", error=message))
+
+    def _on_encoder_capability_detection_finished(self) -> None:
+        self.encoder_detection_worker = None
+        if self._pending_encoder_detection_force_refresh:
+            self._pending_encoder_detection_force_refresh = False
+            QTimer.singleShot(0, lambda: self._start_encoder_capability_detection(force_refresh=True))
+
     def _set_status_snapshot(
         self,
         stage: str,
@@ -731,10 +800,14 @@ class MainWindow(QMainWindow):
             return
         values = dialog.values()
         old_language = self.language
+        old_ffmpeg_path = str(self.app_config.get("ffmpeg_path", "")).strip()
         self.app_config.update(values)
         self._persist_runtime_state()
         if values["language"] != old_language:
             self._language_changed(str(values["language"]))
+        new_ffmpeg_path = str(values.get("ffmpeg_path", "")).strip()
+        if dialog.redetect_requested or new_ffmpeg_path != old_ffmpeg_path:
+            self._start_encoder_capability_detection(force_refresh=True)
 
     def _open_preset_manager(self) -> None:
         dialog = PresetManagerDialog(
@@ -953,6 +1026,15 @@ class MainWindow(QMainWindow):
         if options.encoder_preset:
             raise ValueError(self.tr.t("gui.message.parallel_preset_not_supported"))
 
+    def _save_app_config_preserving_capabilities(self) -> None:
+        snapshot = {key: value for key, value in self.app_config.items() if key != "encoder_capabilities"}
+
+        def merge(data: dict) -> dict:
+            data.update(snapshot)
+            return data
+
+        update_app_config(self.config_dir, merge)
+
     def _persist_runtime_state(self) -> None:
         source_text = self.source_combo.currentText().strip()
         output_text = self.output_edit.text().strip()
@@ -971,7 +1053,7 @@ class MainWindow(QMainWindow):
             recent_paths.insert(0, source_text)
             self.app_config["recent_paths"] = recent_paths[:10]
             self._set_source_history(self.app_config["recent_paths"])
-        save_app_config(self.config_dir, self.app_config)
+        self._save_app_config_preserving_capabilities()
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         for widget in [
@@ -1119,6 +1201,7 @@ class MainWindow(QMainWindow):
             workdir=workdir,
             ffmpeg_path=ffmpeg_path,
             ffprobe_path=ffprobe_path,
+            config_dir=self.config_dir,
         )
         self._start_worker(worker, lambda plan, workdir=workdir: self._on_plan_ready(plan, workdir))
 
@@ -1146,6 +1229,7 @@ class MainWindow(QMainWindow):
             workdir=workdir,
             ffmpeg_path=ffmpeg_path,
             ffprobe_path=ffprobe_path,
+            config_dir=self.config_dir,
             files=file_items,
         )
         self._start_worker(worker, lambda plan, workdir=workdir: self._on_plan_ready(plan, workdir))
@@ -1201,6 +1285,7 @@ class MainWindow(QMainWindow):
             workdir=workdir,
             ffmpeg_path=ffmpeg_path,
             ffprobe_path=ffprobe_path,
+            config_dir=self.config_dir,
         )
         self._start_worker(worker, self._on_preview_ready)
 
@@ -1345,7 +1430,7 @@ class MainWindow(QMainWindow):
             return
         state = source_view.horizontalHeader().saveState()
         self.app_config["queue_table_header_state"] = bytes(state.toBase64()).decode("ascii")
-        save_app_config(self.config_dir, self.app_config)
+        self._save_app_config_preserving_capabilities()
 
         self._header_sync_guard = True
         try:

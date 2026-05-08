@@ -21,6 +21,7 @@ class SettingsDialog(QDialog):
     def __init__(self, tr: Translator, settings: dict[str, object], parent=None) -> None:
         super().__init__(parent)
         self.tr = tr
+        self.redetect_requested = False
         self._build_ui()
         self._load_settings(settings)
         self.apply_translations(tr)
@@ -54,6 +55,7 @@ class SettingsDialog(QDialog):
         self.log_level_combo.addItems(["info", "debug"])
 
         self.keep_preview_temp_check = QCheckBox()
+        self.redetect_button = QPushButton()
 
         layout.addWidget(self.language_label, 0, 0)
         layout.addWidget(self.language_combo, 0, 1, 1, 2)
@@ -74,13 +76,15 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.log_level_combo, 4, 1, 1, 2)
 
         layout.addWidget(self.keep_preview_temp_check, 5, 0, 1, 3)
+        layout.addWidget(self.redetect_button, 6, 0, 1, 3)
 
         self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        layout.addWidget(self.button_box, 6, 0, 1, 3)
+        layout.addWidget(self.button_box, 7, 0, 1, 3)
 
         self.workdir_button.clicked.connect(self._browse_workdir)
         self.ffmpeg_button.clicked.connect(self._browse_ffmpeg)
         self.ffprobe_button.clicked.connect(self._browse_ffprobe)
+        self.redetect_button.clicked.connect(self._request_redetect)
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
 
@@ -107,6 +111,7 @@ class SettingsDialog(QDialog):
         self.workdir_button.setText(self.tr.t("gui.button.browse_dir"))
         self.ffmpeg_button.setText(self.tr.t("gui.button.browse_exe"))
         self.ffprobe_button.setText(self.tr.t("gui.button.browse_exe"))
+        self.redetect_button.setText(self.tr.t("gui.button.redetect_encoders"))
         self.ffmpeg_edit.setPlaceholderText(self.tr.t("gui.placeholder.ffmpeg"))
         self.ffprobe_edit.setPlaceholderText(self.tr.t("gui.placeholder.ffprobe"))
         self.ffmpeg_edit.setToolTip(self.tr.t("gui.placeholder.ffmpeg"))
@@ -136,3 +141,7 @@ class SettingsDialog(QDialog):
         path, _ = QFileDialog.getOpenFileName(self, self.tr.t("gui.dialog.select_ffprobe"))
         if path:
             self.ffprobe_edit.setText(path)
+
+    def _request_redetect(self) -> None:
+        self.redetect_requested = True
+        self.accept()

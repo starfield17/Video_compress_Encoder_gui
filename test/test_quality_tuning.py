@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from cli.cli_entry import run_cli
+from cli.cli_entry import _build_parser, _normalize_auto_backend_preset, run_cli
 from core.bitrate_policy import DEFAULT_RATIO
 from core.build_ffmpeg_cmd import build_video_args
 from core.encoder_caps import default_preset_for_encoder, is_valid_preset, preset_choices_for_encoder
@@ -54,6 +54,15 @@ def _encoder_info(encoder_name: str, backend: BackendChoice, default_preset: str
         supports_two_pass=encoder_name == "libx265",
         default_preset=default_preset,
     )
+
+
+def _capabilities_for(codec: CodecChoice, entries: list[tuple[BackendChoice, str]]) -> dict:
+    return {
+        "codecs": {
+            codec.value: [{"backend": backend.value, "encoder": encoder_name} for backend, encoder_name in entries],
+            (CodecChoice.AV1 if codec == CodecChoice.HEVC else CodecChoice.HEVC).value: [],
+        }
+    }
 
 
 def _plan_item(encoder_name: str, backend: BackendChoice, options: EncodeOptions | None = None) -> EncodePlanItem:
@@ -118,7 +127,10 @@ class PlanningAndCommandTestCase(unittest.TestCase):
             encoder_info = _encoder_info("hevc_nvenc", BackendChoice.NVENC, "p6")
             with (
                 patch("core.plan_encode.discover_ffmpeg_tools", return_value=(temp_root / "ffmpeg", temp_root / "ffprobe")),
-                patch("core.plan_encode.list_available_encoders", return_value={"hevc_nvenc"}),
+                patch(
+                    "core.plan_encode.ensure_encoder_capabilities",
+                    return_value=_capabilities_for(CodecChoice.HEVC, [(BackendChoice.NVENC, "hevc_nvenc")]),
+                ),
                 patch("core.plan_encode.resolve_encoder", return_value=encoder_info),
                 patch("core.plan_encode.preset_choices_for_encoder", return_value=["p5", "p6"]),
                 patch("core.plan_encode.is_valid_preset", return_value=True),
@@ -143,7 +155,10 @@ class PlanningAndCommandTestCase(unittest.TestCase):
             encoder_info = _encoder_info("hevc_nvenc", BackendChoice.NVENC, "p6")
             with (
                 patch("core.plan_encode.discover_ffmpeg_tools", return_value=(temp_root / "ffmpeg", temp_root / "ffprobe")),
-                patch("core.plan_encode.list_available_encoders", return_value={"hevc_nvenc"}),
+                patch(
+                    "core.plan_encode.ensure_encoder_capabilities",
+                    return_value=_capabilities_for(CodecChoice.HEVC, [(BackendChoice.NVENC, "hevc_nvenc")]),
+                ),
                 patch("core.plan_encode.resolve_encoder", return_value=encoder_info),
                 patch("core.plan_encode.preset_choices_for_encoder", return_value=["p5"]),
                 patch("core.plan_encode.is_valid_preset", return_value=False),
@@ -295,19 +310,21 @@ class CliPresetValidationTestCase(unittest.TestCase):
         self.assertIn("hevc_nvenc", stderr.getvalue())
         self.assertIn("p5, p6", stderr.getvalue())
 
-    def test_cli_auto_backend_resolves_encoder_before_validation(self) -> None:
+    def test_cli_rejects_explicit_preset_with_auto_backend(self) -> None:
         stderr = io.StringIO()
-        with (
-            contextlib.redirect_stderr(stderr),
-            patch("cli.cli_entry.discover_ffmpeg_tools", return_value=(Path("/tmp/ffmpeg"), Path("/tmp/ffprobe"))),
-            patch("cli.cli_entry.list_available_encoders", return_value={"hevc_nvenc"}),
-            patch("cli.cli_entry.resolve_encoder", return_value=_encoder_info("hevc_nvenc", BackendChoice.NVENC, "p6")) as resolve_mock,
-            patch("cli.cli_entry.preset_choices_for_encoder", return_value=["p5", "p6"]),
-        ):
+        with contextlib.redirect_stderr(stderr):
             exit_code = run_cli(["plan", "input.mp4", "--backend", "auto", "--encoder-preset", "slow"])
         self.assertEqual(exit_code, 2)
-        self.assertEqual(resolve_mock.call_args.args[1], BackendChoice.AUTO)
-        self.assertIn("hevc_nvenc", stderr.getvalue())
+        self.assertIn("--encoder-preset cannot be used with --backend auto", stderr.getvalue())
+
+    def test_cli_ignores_inherited_preset_with_auto_backend(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["plan", "input.mp4"])
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            options = _normalize_auto_backend_preset(EncodeOptions(encoder_preset="p6"), args)
+        self.assertIsNone(options.encoder_preset)
+        self.assertIn("inherited encoder preset ignored", stderr.getvalue())
 
 
 if __name__ == "__main__":

@@ -102,8 +102,24 @@ def _merge_options(base: EncodeOptions, args: argparse.Namespace) -> EncodeOptio
     return replace(base, **updates)
 
 
+def _normalize_auto_backend_preset(options: EncodeOptions, args: argparse.Namespace) -> EncodeOptions:
+    if options.backend != BackendChoice.AUTO or options.encoder_preset is None:
+        return options
+    if getattr(args, "encoder_preset", None) is not None:
+        raise ValueError(
+            "--encoder-preset cannot be used with --backend auto. "
+            "Choose a concrete backend, or omit --encoder-preset."
+        )
+    print(
+        "Warning: inherited encoder preset ignored because backend is auto.",
+        file=sys.stderr,
+    )
+    return replace(options, encoder_preset=None)
+
+
 def _options_from_args(args: argparse.Namespace, config_dir: Path) -> EncodeOptions:
-    return _merge_options(_load_base_options(args, config_dir), args)
+    return _normalize_auto_backend_preset(_merge_options(_load_base_options(args, config_dir), args), args)
+
 
 
 def _add_runtime_flags(parser: argparse.ArgumentParser, include_input: bool = True) -> None:
@@ -275,6 +291,7 @@ def _run_plan(args: argparse.Namespace, config_dir: Path) -> int:
         workdir=Path(args.workdir).expanduser().resolve() if args.workdir else _default_workdir(),
         ffmpeg_path=args.ffmpeg,
         ffprobe_path=args.ffprobe,
+        config_dir=config_dir,
     )
     print_plan(plan, tr)
     return 0
@@ -292,6 +309,7 @@ def _run_encode(args: argparse.Namespace, config_dir: Path) -> int:
         workdir=Path(args.workdir).expanduser().resolve() if args.workdir else _default_workdir(),
         ffmpeg_path=args.ffmpeg,
         ffprobe_path=args.ffprobe,
+        config_dir=config_dir,
     )
     print_plan(plan, tr)
     if options.dry_run:
@@ -326,6 +344,7 @@ def _run_preview(args: argparse.Namespace, config_dir: Path) -> int:
         workdir=Path(args.workdir).expanduser().resolve() if args.workdir else _default_workdir(),
         ffmpeg_path=args.ffmpeg,
         ffprobe_path=args.ffprobe,
+        config_dir=config_dir,
     )
     item = _first_valid_plan_item(plan)
     if item is None:

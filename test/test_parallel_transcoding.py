@@ -72,6 +72,15 @@ def _encoder(backend: BackendChoice) -> EncoderInfo:
     )
 
 
+def _capabilities(entries: list[tuple[BackendChoice, str]]) -> dict:
+    return {
+        "codecs": {
+            "hevc": [{"backend": backend.value, "encoder": encoder_name} for backend, encoder_name in entries],
+            "av1": [],
+        }
+    }
+
+
 def _plan(tmp: Path, count: int = 4, options: EncodeOptions | None = None) -> EncodePlan:
     current = options or EncodeOptions(overwrite=True)
     items: list[EncodePlanItem] = []
@@ -149,8 +158,16 @@ class ParallelSchedulerTestCase(unittest.TestCase):
                 )
 
             with (
-                patch("core.parallel_queue_exec.list_available_encoders", return_value={"hevc_nvenc", "hevc_qsv"}),
-                patch("core.parallel_queue_exec.resolve_encoder", side_effect=lambda codec, backend, available, ffmpeg_path=None: _encoder(backend)),
+                patch(
+                    "core.parallel_queue_exec.ensure_encoder_capabilities",
+                    return_value=_capabilities(
+                        [(BackendChoice.NVENC, "hevc_nvenc"), (BackendChoice.QSV, "hevc_qsv")]
+                    ),
+                ),
+                patch(
+                    "core.parallel_queue_exec.resolve_encoder",
+                    side_effect=lambda codec, backend, available, ffmpeg_path=None, runtime_capabilities=None: _encoder(backend),
+                ),
                 patch("core.parallel_queue_exec.execute_plan_item", side_effect=fake_execute),
             ):
                 results = execute_plan_parallel(
@@ -180,8 +197,16 @@ class ParallelSchedulerTestCase(unittest.TestCase):
                 )
 
             with (
-                patch("core.parallel_queue_exec.list_available_encoders", return_value={"hevc_nvenc", "hevc_qsv"}),
-                patch("core.parallel_queue_exec.resolve_encoder", side_effect=lambda codec, backend, available, ffmpeg_path=None: _encoder(backend)),
+                patch(
+                    "core.parallel_queue_exec.ensure_encoder_capabilities",
+                    return_value=_capabilities(
+                        [(BackendChoice.NVENC, "hevc_nvenc"), (BackendChoice.QSV, "hevc_qsv")]
+                    ),
+                ),
+                patch(
+                    "core.parallel_queue_exec.resolve_encoder",
+                    side_effect=lambda codec, backend, available, ffmpeg_path=None, runtime_capabilities=None: _encoder(backend),
+                ),
                 patch("core.parallel_queue_exec.execute_plan_item", side_effect=fake_execute),
             ):
                 with self.assertRaisesRegex(RuntimeError, "boom"):
@@ -228,7 +253,17 @@ class ParallelCliTestCase(unittest.TestCase):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             exit_code = run_cli(
-                ["encode", "input.mp4", "--parallel", "--parallel-backends", "nvenc,qsv", "--encoder-preset", "slow"]
+                [
+                    "encode",
+                    "input.mp4",
+                    "--backend",
+                    "nvenc",
+                    "--parallel",
+                    "--parallel-backends",
+                    "nvenc,qsv",
+                    "--encoder-preset",
+                    "slow",
+                ]
             )
         self.assertEqual(exit_code, 2)
         self.assertIn("does not support a manual encoder preset", stderr.getvalue())

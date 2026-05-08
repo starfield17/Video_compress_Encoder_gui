@@ -8,6 +8,28 @@ from pathlib import Path
 from core.models import BackendChoice, CodecChoice, EncoderInfo
 
 
+AUTO_BACKEND_PRIORITY: tuple[BackendChoice, ...] = (
+    BackendChoice.NVENC,
+    BackendChoice.QSV,
+    BackendChoice.AMF,
+    BackendChoice.CPU,
+)
+
+ENCODER_CANDIDATES: dict[CodecChoice, dict[BackendChoice, str]] = {
+    CodecChoice.HEVC: {
+        BackendChoice.NVENC: "hevc_nvenc",
+        BackendChoice.QSV: "hevc_qsv",
+        BackendChoice.AMF: "hevc_amf",
+        BackendChoice.CPU: "libx265",
+    },
+    CodecChoice.AV1: {
+        BackendChoice.NVENC: "av1_nvenc",
+        BackendChoice.QSV: "av1_qsv",
+        BackendChoice.AMF: "av1_amf",
+        BackendChoice.CPU: "libsvtav1",
+    },
+}
+
 FALLBACK_PRESET_CHOICES: dict[str, tuple[str, ...]] = {
     "libx265": (
         "ultrafast",
@@ -132,51 +154,12 @@ def default_preset_for_encoder(encoder_name: str, ffmpeg_path: Path | None = Non
     return None
 
 
-def resolve_encoder(
+def _encoder_info(
     codec: CodecChoice,
     backend: BackendChoice,
-    available_encoders: set[str],
-    ffmpeg_path: Path | None = None,
+    encoder_name: str,
+    ffmpeg_path: Path | None,
 ) -> EncoderInfo:
-    cpu_map = {
-        CodecChoice.HEVC: "libx265",
-        CodecChoice.AV1: "libsvtav1",
-    }
-    nvenc_map = {
-        CodecChoice.HEVC: "hevc_nvenc",
-        CodecChoice.AV1: "av1_nvenc",
-    }
-    qsv_map = {
-        CodecChoice.HEVC: "hevc_qsv",
-        CodecChoice.AV1: "av1_qsv",
-    }
-    amf_map = {
-        CodecChoice.HEVC: "hevc_amf",
-        CodecChoice.AV1: "av1_amf",
-    }
-    backend_maps = {
-        BackendChoice.CPU: cpu_map,
-        BackendChoice.NVENC: nvenc_map,
-        BackendChoice.QSV: qsv_map,
-        BackendChoice.AMF: amf_map,
-    }
-
-    if backend == BackendChoice.AUTO:
-        for candidate_backend in (BackendChoice.NVENC, BackendChoice.QSV, BackendChoice.AMF, BackendChoice.CPU):
-            encoder_name = backend_maps[candidate_backend][codec]
-            if encoder_name in available_encoders:
-                return EncoderInfo(
-                    codec=codec,
-                    backend=candidate_backend,
-                    encoder_name=encoder_name,
-                    supports_two_pass=encoder_name == "libx265",
-                    default_preset=default_preset_for_encoder(encoder_name, ffmpeg_path),
-                )
-        raise RuntimeError(f"No available {codec.value} encoder was found in the current FFmpeg build.")
-
-    encoder_name = backend_maps[backend][codec]
-    if encoder_name not in available_encoders:
-        raise RuntimeError(f"Requested encoder {encoder_name} is not available in the current FFmpeg build.")
     return EncoderInfo(
         codec=codec,
         backend=backend,
@@ -184,3 +167,66 @@ def resolve_encoder(
         supports_two_pass=encoder_name == "libx265",
         default_preset=default_preset_for_encoder(encoder_name, ffmpeg_path),
     )
+
+
+def _runtime_candidates_for_codec(
+    codec: CodecChoice,
+    runtime_capabilities: dict | None,
+) -> dict[BackendChoice, str] | None:
+    if runtime_capabilities is None:
+        return None
+    codecs = runtime_capabilities.get("codecs")
+    if not isinstance(codecs, dict):
+        return {}
+    items = codecs.get(codec.value)
+    if not isinstance(items, list):
+        return {}
+
+    expected = ENCODER_CANDIDATES[codec]
+    candidates: dict[BackendChoice, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            backend = BackendChoice(str(item.get("backend", "")))
+        except ValueError:
+            continue
+        encoder_name = str(item.get("encoder", "")).strip()
+        if expected.get(backend) == encoder_name:
+            candidates[backend] = encoder_name
+    return candidates
+
+
+def resolve_encoder(
+    codec: CodecChoice,
+    backend: BackendChoice,
+    available_encoders: set[str],
+    ffmpeg_path: Path | None = None,
+    runtime_capabilities: dict | None = None,
+) -> EncoderInfo:
+    backend_map = ENCODER_CANDIDATES[codec]
+    runtime_candidates = _runtime_candidates_for_codec(codec, runtime_capabilities)
+
+    if backend == BackendChoice.AUTO:
+        if runtime_candidates is not None:
+            for candidate_backend in AUTO_BACKEND_PRIORITY:
+                encoder_name = runtime_candidates.get(candidate_backend)
+                if encoder_name:
+                    return _encoder_info(codec, candidate_backend, encoder_name, ffmpeg_path)
+            raise RuntimeError(f"No usable {codec.value} encoder was found on this machine.")
+
+        for candidate_backend in AUTO_BACKEND_PRIORITY:
+            encoder_name = backend_map[candidate_backend]
+            if encoder_name in available_encoders:
+                return _encoder_info(codec, candidate_backend, encoder_name, ffmpeg_path)
+        raise RuntimeError(f"No available {codec.value} encoder was found in the current FFmpeg build.")
+
+    encoder_name = backend_map[backend]
+    if runtime_candidates is not None:
+        if runtime_candidates.get(backend) == encoder_name:
+            return _encoder_info(codec, backend, encoder_name, ffmpeg_path)
+        raise RuntimeError(f"Requested encoder {encoder_name} is not usable with the current FFmpeg/hardware.")
+
+    if encoder_name not in available_encoders:
+        raise RuntimeError(f"Requested encoder {encoder_name} is not available in the current FFmpeg build.")
+    return _encoder_info(codec, backend, encoder_name, ffmpeg_path)

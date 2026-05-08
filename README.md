@@ -35,7 +35,7 @@ python main.py --cli preset list
 
 Language can be selected with `--lang en` or `--lang zh_cn`.
 Supported backend values are `auto`, `cpu`, `nvenc`, `qsv`, and `amf`.
-When `auto` is selected, the planner prefers `nvenc`, then `qsv`, then `amf`, then `cpu`.
+When `auto` is selected, the planner prefers smoke-tested runtime encoders in this order: `nvenc`, `qsv`, `amf`, then `cpu`.
 
 ## GUI
 

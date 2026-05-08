@@ -4,9 +4,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Iterable
 
+from core.app_paths import config_dir as app_config_dir
 from core.bitrate_policy import choose_ratio, compute_target_video_bitrate
 from core.discover_ffmpeg import discover_ffmpeg_tools
-from core.encoder_caps import is_valid_preset, list_available_encoders, preset_choices_for_encoder, resolve_encoder
+from core.encoder_capability_cache import ensure_encoder_capabilities
+from core.encoder_caps import is_valid_preset, preset_choices_for_encoder, resolve_encoder
 from core.models import (
     EncodeOptions,
     EncodePlan,
@@ -59,6 +61,7 @@ def build_encode_plan(
     workdir: Path = Path("workdir"),
     ffmpeg_path: str | None = None,
     ffprobe_path: str | None = None,
+    config_dir: Path | None = None,
     files: Iterable[VideoFileItem] | None = None,
     progress_callback: Callable[[str], None] | None = None,
     progress_event_callback: Callable[[dict[str, object]], None] | None = None,
@@ -75,9 +78,10 @@ def build_encode_plan(
     ffmpeg, ffprobe = discover_ffmpeg_tools(ffmpeg_path, ffprobe_path)
     _emit(progress_callback, f"Using ffmpeg: {ffmpeg}")
     _emit(progress_callback, f"Using ffprobe: {ffprobe}")
-    available_encoders = list_available_encoders(ffmpeg)
-    _emit(progress_callback, f"Detected {len(available_encoders)} available encoders.")
-    encoder_info = resolve_encoder(options.codec, options.backend, available_encoders, ffmpeg)
+    runtime_capabilities = ensure_encoder_capabilities(config_dir or app_config_dir(), ffmpeg, progress_callback=progress_callback)
+    usable_encoder_count = sum(len(items) for items in runtime_capabilities.get("codecs", {}).values())
+    _emit(progress_callback, f"Detected {usable_encoder_count} usable encoder candidate(s).")
+    encoder_info = resolve_encoder(options.codec, options.backend, set(), ffmpeg, runtime_capabilities=runtime_capabilities)
     _emit(
         progress_callback,
         f"Resolved encoder: {encoder_info.encoder_name} ({encoder_info.backend.value})",

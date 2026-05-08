@@ -7,7 +7,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Sequence
 
-from core.encoder_caps import list_available_encoders, resolve_encoder
+from core.app_paths import config_dir as app_config_dir
+from core.encoder_capability_cache import ensure_encoder_capabilities
+from core.encoder_caps import resolve_encoder
 from core.exec_encode import execute_plan_item
 from core.models import BackendChoice, EncodePlan, EncodePlanItem, EncodeResult, OperationCancelledError
 from core.safety_checks import validate_workdir
@@ -95,9 +97,15 @@ def execute_plan_parallel(
 ) -> list[EncodeResult]:
     workdir = validate_workdir(workdir)
     normalized = validate_parallel_options(backends, plan)
-    available_encoders = list_available_encoders(plan.ffmpeg_path)
+    runtime_capabilities = ensure_encoder_capabilities(app_config_dir(), plan.ffmpeg_path)
     encoders = {
-        backend: resolve_encoder(plan.items[0].options.codec, backend, available_encoders, plan.ffmpeg_path)
+        backend: resolve_encoder(
+            plan.items[0].options.codec,
+            backend,
+            set(),
+            plan.ffmpeg_path,
+            runtime_capabilities=runtime_capabilities,
+        )
         for backend in normalized
     }
     pending = deque(enumerate(plan.items))

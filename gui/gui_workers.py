@@ -7,6 +7,8 @@ from typing import Iterable
 
 from PySide6.QtCore import QThread, Signal
 
+from core.discover_ffmpeg import find_binary
+from core.encoder_capability_cache import ensure_encoder_capabilities
 from core.exec_encode import execute_plan, execute_preview
 from core.models import EncodeOptions, OperationCancelledError, PreviewOptions, VideoFileItem
 from core.plan_encode import build_encode_plan
@@ -30,6 +32,41 @@ class ScanWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class EncoderCapabilityDetectWorker(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+    log = Signal(str)
+
+    def __init__(
+        self,
+        config_dir: Path,
+        ffmpeg_path: str | None,
+        *,
+        force_refresh: bool = False,
+    ) -> None:
+        super().__init__()
+        self.config_dir = config_dir
+        self.ffmpeg_path = ffmpeg_path
+        self.force_refresh = force_refresh
+
+    def _emit_log(self, message: str) -> None:
+        self.log.emit(message)
+        print(message, file=sys.stdout, flush=True)
+
+    def run(self) -> None:
+        try:
+            ffmpeg = find_binary(self.ffmpeg_path, "ffmpeg")
+            capabilities = ensure_encoder_capabilities(
+                self.config_dir,
+                ffmpeg,
+                force_refresh=self.force_refresh,
+                progress_callback=self._emit_log,
+            )
+            self.completed.emit(capabilities)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class PlanWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
@@ -45,6 +82,7 @@ class PlanWorker(QThread):
         workdir: Path,
         ffmpeg_path: str | None,
         ffprobe_path: str | None,
+        config_dir: Path | None = None,
         files: Iterable[VideoFileItem] | None = None,
     ) -> None:
         super().__init__()
@@ -54,6 +92,7 @@ class PlanWorker(QThread):
         self.workdir = workdir
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
+        self.config_dir = config_dir
         self.files = list(files) if files is not None else None
         self._cancel_event = threading.Event()
 
@@ -76,6 +115,7 @@ class PlanWorker(QThread):
                 workdir=self.workdir,
                 ffmpeg_path=self.ffmpeg_path,
                 ffprobe_path=self.ffprobe_path,
+                config_dir=self.config_dir,
                 files=self.files,
                 progress_callback=self._emit_log,
                 progress_event_callback=self._emit_progress,
@@ -104,6 +144,7 @@ class PreviewWorker(QThread):
         workdir: Path,
         ffmpeg_path: str | None,
         ffprobe_path: str | None,
+        config_dir: Path | None = None,
     ) -> None:
         super().__init__()
         self.input_path = input_path
@@ -113,6 +154,7 @@ class PreviewWorker(QThread):
         self.workdir = workdir
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
+        self.config_dir = config_dir
         self._cancel_event = threading.Event()
         self._current_process = None
 
@@ -143,6 +185,7 @@ class PreviewWorker(QThread):
                 workdir=self.workdir,
                 ffmpeg_path=self.ffmpeg_path,
                 ffprobe_path=self.ffprobe_path,
+                config_dir=self.config_dir,
                 progress_callback=self._emit_log,
                 progress_event_callback=self._emit_progress,
                 cancel_check=self._cancel_event.is_set,
@@ -182,6 +225,7 @@ class EncodeWorker(QThread):
         workdir: Path,
         ffmpeg_path: str | None,
         ffprobe_path: str | None,
+        config_dir: Path | None = None,
     ) -> None:
         super().__init__()
         self.input_path = input_path
@@ -190,6 +234,7 @@ class EncodeWorker(QThread):
         self.workdir = workdir
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
+        self.config_dir = config_dir
         self._cancel_event = threading.Event()
         self._current_process = None
 
@@ -220,6 +265,7 @@ class EncodeWorker(QThread):
                 workdir=self.workdir,
                 ffmpeg_path=self.ffmpeg_path,
                 ffprobe_path=self.ffprobe_path,
+                config_dir=self.config_dir,
                 progress_callback=self._emit_log,
                 progress_event_callback=self._emit_progress,
                 cancel_check=self._cancel_event.is_set,
