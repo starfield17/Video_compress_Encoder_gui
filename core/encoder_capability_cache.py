@@ -11,7 +11,8 @@ from core.models import BackendChoice, CodecChoice
 from core.preset_store import load_app_config, update_app_config
 
 
-ENCODER_CAPABILITIES_SCHEMA_VERSION = 1
+ENCODER_CAPABILITIES_SCHEMA_VERSION = 2
+SMOKE_TEST_SOURCE_SIZE = "256x256"
 SMOKE_TEST_TIMEOUT_SEC = 10.0
 _CACHE_LOCK = threading.RLock()
 
@@ -118,7 +119,7 @@ def smoke_test_encoder(
         "-f",
         "lavfi",
         "-i",
-        "testsrc2=size=128x128:rate=1",
+        f"testsrc2=size={SMOKE_TEST_SOURCE_SIZE}:rate=1",
         "-frames:v",
         "1",
         "-an",

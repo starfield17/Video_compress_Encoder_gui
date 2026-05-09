@@ -238,14 +238,14 @@ class ParallelCliTestCase(unittest.TestCase):
     def test_parallel_requires_backends(self) -> None:
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            exit_code = run_cli(["encode", "input.mp4", "--parallel"])
+            exit_code = run_cli(["encode", "input.mp4", "--parallel", "--lang", "en"])
         self.assertEqual(exit_code, 2)
         self.assertIn("requires at least one backend", stderr.getvalue())
 
     def test_parallel_rejects_two_pass(self) -> None:
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            exit_code = run_cli(["encode", "input.mp4", "--parallel", "--parallel-backends", "nvenc,qsv", "--two-pass"])
+            exit_code = run_cli(["encode", "input.mp4", "--parallel", "--parallel-backends", "nvenc,qsv", "--two-pass", "--lang", "en"])
         self.assertEqual(exit_code, 2)
         self.assertIn("does not support two-pass", stderr.getvalue())
 
@@ -263,6 +263,8 @@ class ParallelCliTestCase(unittest.TestCase):
                     "nvenc,qsv",
                     "--encoder-preset",
                     "slow",
+                    "--lang",
+                    "en",
                 ]
             )
         self.assertEqual(exit_code, 2)

@@ -8,6 +8,7 @@ from core.encoder_capability_cache import (
     ENCODER_CAPABILITIES_SCHEMA_VERSION,
     detect_encoder_capabilities,
     is_encoder_capability_cache_valid,
+    smoke_test_encoder,
 )
 from core.encoder_caps import resolve_encoder
 from core.models import BackendChoice, CodecChoice
@@ -77,6 +78,18 @@ class RuntimeCapabilityResolveTestCase(unittest.TestCase):
 
 
 class EncoderCapabilityCacheTestCase(unittest.TestCase):
+    def test_legacy_schema_version_is_invalidated(self) -> None:
+        with (
+            patch("core.encoder_capability_cache._ffmpeg_mtime_ns", return_value=123),
+            patch("core.encoder_capability_cache._ffmpeg_version_line", return_value="ffmpeg version test"),
+        ):
+            self.assertFalse(
+                is_encoder_capability_cache_valid(
+                    _cache_payload(schema_version=ENCODER_CAPABILITIES_SCHEMA_VERSION - 1),
+                    Path("/tmp/ffmpeg"),
+                )
+            )
+
     def test_cache_validation_uses_ffmpeg_fingerprint(self) -> None:
         with (
             patch("core.encoder_capability_cache._ffmpeg_mtime_ns", return_value=123),
@@ -127,6 +140,18 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
             capabilities["codecs"]["av1"],
             [{"backend": "cpu", "encoder": "libsvtav1"}],
         )
+
+    def test_smoke_test_uses_nvenc_compatible_frame_size(self) -> None:
+        captured: dict[str, list[str]] = {}
+
+        def fake_run(cmd: list[str], **_kwargs):
+            captured["cmd"] = cmd
+            return type("Proc", (), {"returncode": 0})()
+
+        with patch("core.encoder_capability_cache.subprocess.run", side_effect=fake_run):
+            self.assertTrue(smoke_test_encoder(Path("/tmp/ffmpeg"), "hevc_nvenc"))
+
+        self.assertIn("testsrc2=size=256x256:rate=1", captured["cmd"])
 
 
 if __name__ == "__main__":
