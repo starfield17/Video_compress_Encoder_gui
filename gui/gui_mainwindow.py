@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QStatusBar,
+    QStyle,
     QTabWidget,
     QToolBar,
     QVBoxLayout,
@@ -53,6 +54,15 @@ from gui.queue_manager import QueueManager
 from gui.queue_table import QueueTableModel, create_queue_view, format_duration, format_size
 from gui.queue_window import QueueWindow
 from gui.settings_dialog import SettingsDialog
+from gui.theme import apply_theme
+
+
+EXPLICIT_BACKEND_ORDER: tuple[BackendChoice, ...] = (
+    BackendChoice.NVENC,
+    BackendChoice.QSV,
+    BackendChoice.AMF,
+    BackendChoice.CPU,
+)
 
 
 class MainWindow(QMainWindow):
@@ -69,6 +79,7 @@ class MainWindow(QMainWindow):
 
         self.active_worker = None
         self.encoder_detection_worker = None
+        self._encoder_capabilities_ready = False
         self._startup_encoder_detection_started = False
         self._pending_encoder_detection_force_refresh = False
         self.queue_busy = False
@@ -100,13 +111,49 @@ class MainWindow(QMainWindow):
         self._startup_encoder_detection_started = True
         QTimer.singleShot(0, lambda: self._start_encoder_capability_detection(force_refresh=False))
 
+    def _apply_action_icons(self) -> None:
+        style = self.style()
+        icon_map = {
+            self.add_files_action: QStyle.SP_FileIcon,
+            self.add_folder_action: QStyle.SP_DirOpenIcon,
+            self.plan_action: QStyle.SP_FileDialogDetailedView,
+            self.start_queue_action: QStyle.SP_MediaPlay,
+            self.pause_after_current_action: QStyle.SP_MediaPause,
+            self.stop_action: QStyle.SP_MediaStop,
+            self.preview_action: QStyle.SP_FileDialogContentsView,
+            self.queue_action: QStyle.SP_FileDialogListView,
+            self.activity_log_action: QStyle.SP_FileDialogInfoView,
+            self.presets_action: QStyle.SP_DialogSaveButton,
+            self.settings_action: QStyle.SP_FileDialogDetailedView,
+        }
+        for action, icon_id in icon_map.items():
+            action.setIcon(style.standardIcon(icon_id))
+
+    def _sync_action_tips(self) -> None:
+        for action in [
+            self.add_files_action,
+            self.add_folder_action,
+            self.plan_action,
+            self.start_queue_action,
+            self.pause_after_current_action,
+            self.stop_action,
+            self.preview_action,
+            self.queue_action,
+            self.activity_log_action,
+            self.presets_action,
+            self.settings_action,
+        ]:
+            action.setToolTip(action.text())
+            action.setStatusTip(action.text())
+
     def _build_ui(self) -> None:
         self.setMinimumSize(1360, 860)
         self.resize(1520, 960)
+        apply_theme(self)
 
         toolbar = QToolBar(self)
         toolbar.setMovable(False)
-        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.addToolBar(Qt.TopToolBarArea, toolbar)
         self.toolbar = toolbar
 
@@ -121,6 +168,7 @@ class MainWindow(QMainWindow):
         self.activity_log_action = QAction(self)
         self.presets_action = QAction(self)
         self.settings_action = QAction(self)
+        self._apply_action_icons()
 
         for action in [
             self.add_files_action,
@@ -172,14 +220,15 @@ class MainWindow(QMainWindow):
         source_layout.addWidget(self.source_combo, 0, 1, 1, 3)
         source_layout.addWidget(self.source_file_button, 0, 4)
         source_layout.addWidget(self.source_dir_button, 0, 5)
-        source_layout.addWidget(self.preset_label, 1, 0)
-        source_layout.addWidget(self.preset_combo, 1, 1)
-        source_layout.addWidget(self.manage_presets_button, 1, 2)
-        source_layout.addWidget(self.output_label, 1, 3)
-        source_layout.addWidget(self.output_edit, 1, 4)
+        source_layout.addWidget(self.output_label, 1, 0)
+        source_layout.addWidget(self.output_edit, 1, 1, 1, 4)
         source_layout.addWidget(self.output_button, 1, 5)
+        source_layout.addWidget(self.preset_label, 2, 0)
+        source_layout.addWidget(self.preset_combo, 2, 1, 1, 3)
+        source_layout.addWidget(self.manage_presets_button, 2, 4, 1, 2)
         source_layout.setColumnStretch(1, 1)
-        source_layout.setColumnStretch(4, 1)
+        source_layout.setColumnStretch(2, 1)
+        source_layout.setColumnStretch(3, 1)
 
         self.options_tabs = QTabWidget()
         self._build_basic_tab()
@@ -222,6 +271,20 @@ class MainWindow(QMainWindow):
         self.states_value = QLabel("-")
         self.saved_space_title = QLabel()
         self.saved_space_value = QLabel("-")
+        for label in [
+            self.total_items_title,
+            self.total_duration_title,
+            self.states_title,
+            self.saved_space_title,
+        ]:
+            label.setObjectName("summaryTitle")
+        for label in [
+            self.total_items_value,
+            self.total_duration_value,
+            self.states_value,
+            self.saved_space_value,
+        ]:
+            label.setObjectName("summaryValue")
 
         left_layout.addWidget(self.total_items_title, 0, 0)
         left_layout.addWidget(self.total_items_value, 0, 1)
@@ -299,7 +362,7 @@ class MainWindow(QMainWindow):
         self.sample_mode_combo.currentIndexChanged.connect(self._sync_dependent_controls)
         self.audio_mode_combo.currentIndexChanged.connect(self._sync_dependent_controls)
         self.parallel_check.toggled.connect(self._sync_dependent_controls)
-        self.codec_combo.currentIndexChanged.connect(self._refresh_encoder_preset_choices)
+        self.codec_combo.currentIndexChanged.connect(self._on_codec_changed)
         self.backend_combo.currentIndexChanged.connect(self._refresh_encoder_preset_choices)
         self.source_combo.editTextChanged.connect(self._persist_runtime_state)
         self.output_edit.editingFinished.connect(self._persist_runtime_state)
@@ -342,7 +405,7 @@ class MainWindow(QMainWindow):
 
         self.backend_label = QLabel()
         self.backend_combo = QComboBox()
-        self.backend_combo.addItems(["auto", "cpu", "nvenc", "qsv", "amf"])
+        self.backend_combo.addItems(["auto", "cpu"])
 
         self.container_label = QLabel()
         self.container_combo = QComboBox()
@@ -559,6 +622,7 @@ class MainWindow(QMainWindow):
         self.activity_log_action.setText(self.tr.t("gui.button.activity_log"))
         self.presets_action.setText(self.tr.t("gui.button.presets"))
         self.settings_action.setText(self.tr.t("gui.button.settings"))
+        self._sync_action_tips()
 
         self.source_label.setText(self.tr.t("gui.label.source"))
         self.preset_label.setText(self.tr.t("gui.label.preset"))
@@ -620,6 +684,7 @@ class MainWindow(QMainWindow):
             self._status_percent,
         )
         self._update_queue_metrics(self.queue_model.metrics())
+        self._rebuild_backend_controls()
         self._refresh_encoder_preset_choices()
 
     def _set_source_history(self, items: list[str]) -> None:
@@ -661,6 +726,8 @@ class MainWindow(QMainWindow):
             self._append_log(self.tr.t("gui.log.encoder_detection_running"))
             return
 
+        self._encoder_capabilities_ready = False
+        self._rebuild_backend_controls()
         self._append_log(self.tr.t("gui.log.encoder_detection_started"))
         worker = EncoderCapabilityDetectWorker(
             self.config_dir,
@@ -676,6 +743,8 @@ class MainWindow(QMainWindow):
 
     def _on_encoder_capability_detection_completed(self, capabilities: dict) -> None:
         self.app_config["encoder_capabilities"] = capabilities
+        self._encoder_capabilities_ready = True
+        self._rebuild_backend_controls()
         self._append_log(
             self.tr.t(
                 "gui.log.encoder_detection_done",
@@ -685,6 +754,8 @@ class MainWindow(QMainWindow):
         self._refresh_encoder_preset_choices()
 
     def _on_encoder_capability_detection_failed(self, message: str) -> None:
+        self._encoder_capabilities_ready = False
+        self._rebuild_backend_controls()
         self._append_log(self.tr.t("gui.log.encoder_detection_failed", error=message))
 
     def _on_encoder_capability_detection_finished(self) -> None:
@@ -879,13 +950,11 @@ class MainWindow(QMainWindow):
 
     def _apply_options(self, options: EncodeOptions) -> None:
         self.codec_combo.setCurrentText(options.codec.value)
-        self.backend_combo.setCurrentText(options.backend.value)
+        self._rebuild_backend_controls(preferred_backend=options.backend, log_reset=options.backend != BackendChoice.AUTO)
         self.parallel_check.setChecked(options.parallel_enabled)
         selected = set(options.parallel_backends)
-        self.parallel_nvenc_check.setChecked(BackendChoice.NVENC in selected)
-        self.parallel_qsv_check.setChecked(BackendChoice.QSV in selected)
-        self.parallel_amf_check.setChecked(BackendChoice.AMF in selected)
-        self.parallel_cpu_check.setChecked(BackendChoice.CPU in selected)
+        for checkbox, backend in self._parallel_backend_widgets():
+            checkbox.setChecked(backend in selected and not checkbox.isHidden())
         self.ratio_edit.setText("" if options.ratio is None else str(options.ratio))
         self.container_combo.setCurrentText(options.container.value)
         self.audio_mode_combo.setCurrentText(options.audio_mode.value)
@@ -902,6 +971,10 @@ class MainWindow(QMainWindow):
         self.recursive_check.setChecked(options.recursive)
         self._refresh_encoder_preset_choices(preset=options.encoder_preset, log_invalid=options.encoder_preset is not None)
         self._sync_dependent_controls()
+
+    def _on_codec_changed(self, *_args) -> None:
+        self._rebuild_backend_controls()
+        self._refresh_encoder_preset_choices()
 
     def _selected_input(self) -> Path | None:
         text = self.source_combo.currentText().strip()
@@ -923,19 +996,97 @@ class MainWindow(QMainWindow):
         text = str(self.app_config.get("ffprobe_path", "")).strip()
         return text or None
 
+    def _parallel_backend_widgets(self) -> list[tuple[QCheckBox, BackendChoice]]:
+        return [
+            (self.parallel_nvenc_check, BackendChoice.NVENC),
+            (self.parallel_qsv_check, BackendChoice.QSV),
+            (self.parallel_amf_check, BackendChoice.AMF),
+            (self.parallel_cpu_check, BackendChoice.CPU),
+        ]
+
+    def _current_codec(self) -> CodecChoice:
+        return CodecChoice(self.codec_combo.currentText())
+
+    def _runtime_capabilities(self) -> dict | None:
+        capabilities = self.app_config.get("encoder_capabilities")
+        return capabilities if self._encoder_capabilities_ready and isinstance(capabilities, dict) else None
+
+    def _capability_has_backend(self, codec: CodecChoice, backend: BackendChoice) -> bool:
+        capabilities = self._runtime_capabilities()
+        if capabilities is None:
+            return backend == BackendChoice.CPU
+        codecs = capabilities.get("codecs")
+        if not isinstance(codecs, dict):
+            return False
+        items = codecs.get(codec.value)
+        if not isinstance(items, list):
+            return False
+        return any(
+            isinstance(item, dict)
+            and str(item.get("backend", "")).strip() == backend.value
+            for item in items
+        )
+
+    def _available_explicit_backends_for_current_codec(self) -> list[BackendChoice]:
+        codec = self._current_codec()
+        return [backend for backend in EXPLICIT_BACKEND_ORDER if self._capability_has_backend(codec, backend)]
+
+    def _rebuild_backend_controls(
+        self,
+        *,
+        preferred_backend: BackendChoice | None = None,
+        log_reset: bool = False,
+    ) -> None:
+        current_text = self.backend_combo.currentText().strip()
+        try:
+            current_backend = BackendChoice(current_text) if current_text else BackendChoice.AUTO
+        except ValueError:
+            current_backend = BackendChoice.AUTO
+        desired_backend = preferred_backend or current_backend
+
+        choices = [BackendChoice.AUTO, *self._available_explicit_backends_for_current_codec()]
+        if self._runtime_capabilities() is None and BackendChoice.CPU not in choices:
+            choices.append(BackendChoice.CPU)
+
+        if desired_backend in choices:
+            selected_backend = desired_backend
+        else:
+            selected_backend = BackendChoice.AUTO
+            if log_reset and desired_backend != BackendChoice.AUTO:
+                self._append_log(
+                    self.tr.t(
+                        "gui.log.backend_reset",
+                        backend=desired_backend.value,
+                        fallback=selected_backend.value,
+                    )
+                )
+
+        self.backend_combo.blockSignals(True)
+        self.backend_combo.clear()
+        for backend in choices:
+            self.backend_combo.addItem(backend.value, backend.value)
+        self.backend_combo.setCurrentText(selected_backend.value)
+        self.backend_combo.blockSignals(False)
+        tooltip_key = "gui.tooltip.backend_filtered" if self._runtime_capabilities() is not None else "gui.tooltip.backend_detecting"
+        self.backend_combo.setToolTip(self.tr.t(tooltip_key))
+
+        available_parallel = set(choices) - {BackendChoice.AUTO}
+        for checkbox, backend in self._parallel_backend_widgets():
+            visible = backend in available_parallel
+            checkbox.setVisible(visible)
+            if not visible:
+                checkbox.setChecked(False)
+            checkbox.setToolTip("" if visible else self.tr.t("gui.tooltip.parallel_backend_unavailable"))
+        self._sync_dependent_controls()
+
     def _sync_dependent_controls(self) -> None:
         custom_sample = self.sample_mode_combo.currentText() == PreviewSampleMode.CUSTOM.value
         self.sample_start_spin.setEnabled(custom_sample)
         self.audio_bitrate_edit.setEnabled(self.audio_mode_combo.currentText() == AudioMode.AAC.value)
         parallel_enabled = self.parallel_check.isChecked()
         self.backend_combo.setEnabled(not parallel_enabled)
-        for widget in [
-            self.parallel_nvenc_check,
-            self.parallel_qsv_check,
-            self.parallel_amf_check,
-            self.parallel_cpu_check,
-        ]:
-            widget.setEnabled(parallel_enabled)
+        for widget, _backend in self._parallel_backend_widgets():
+            widget.setEnabled(parallel_enabled and not widget.isHidden())
 
     def _default_preset_text(self) -> str:
         return self.tr.t("gui.value.encoder_preset_default")
@@ -947,12 +1098,14 @@ class MainWindow(QMainWindow):
     def _resolve_encoder_for_preset_choices(self):
         try:
             ffmpeg_path, _ffprobe_path = discover_ffmpeg_tools(self._selected_ffmpeg(), self._selected_ffprobe())
-            available_encoders = list_available_encoders(ffmpeg_path)
+            runtime_capabilities = self._runtime_capabilities()
+            available_encoders = set() if runtime_capabilities is not None else list_available_encoders(ffmpeg_path)
             encoder_info = resolve_encoder(
                 CodecChoice(self.codec_combo.currentText()),
                 BackendChoice(self.backend_combo.currentText()),
                 available_encoders,
                 ffmpeg_path,
+                runtime_capabilities=runtime_capabilities,
             )
             return ffmpeg_path, encoder_info
         except Exception:
@@ -1003,14 +1156,8 @@ class MainWindow(QMainWindow):
 
     def _selected_parallel_backends(self) -> list[BackendChoice]:
         selected: list[BackendChoice] = []
-        mapping = [
-            (self.parallel_nvenc_check, BackendChoice.NVENC),
-            (self.parallel_qsv_check, BackendChoice.QSV),
-            (self.parallel_amf_check, BackendChoice.AMF),
-            (self.parallel_cpu_check, BackendChoice.CPU),
-        ]
-        for checkbox, backend in mapping:
-            if checkbox.isChecked():
+        for checkbox, backend in self._parallel_backend_widgets():
+            if not checkbox.isHidden() and checkbox.isChecked():
                 selected.append(backend)
         return selected
 

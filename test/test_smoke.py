@@ -8,6 +8,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QHeaderView
 
@@ -26,7 +27,8 @@ class SmokeTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.repo_root = app_root()
-        cls.sample_video = cls.repo_root / "workdir" / "test.mp4"
+        oceans_video = cls.repo_root / "workdir" / "oceans.mp4"
+        cls.sample_video = oceans_video if oceans_video.exists() else cls.repo_root / "workdir" / "test.mp4"
         cls.app = QApplication.instance() or QApplication([])
 
     def require_sample_video(self) -> None:
@@ -36,6 +38,11 @@ class SmokeTestCase(unittest.TestCase):
     def test_app_config_path_uses_workdir(self) -> None:
         config_path = app_config_path(config_dir())
         self.assertEqual(config_path, self.repo_root / "workdir" / "app_config.json")
+
+    def test_oceans_video_is_used_as_smoke_sample_when_present(self) -> None:
+        if not (self.repo_root / "workdir" / "oceans.mp4").exists():
+            self.skipTest("oceans.mp4 is not present in workdir")
+        self.assertEqual(self.sample_video.name, "oceans.mp4")
 
     def test_cli_plan_smoke(self) -> None:
         self.require_sample_video()
@@ -70,6 +77,44 @@ class SmokeTestCase(unittest.TestCase):
             self.assertEqual(window.queue_model.rowCount(), 0)
             self.assertFalse(window.queue_busy)
             self.assertEqual(window.queue_progress_bar.value(), 0)
+        finally:
+            window.close()
+
+    def test_main_window_applies_desktop_polish_contract(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            self.assertIn("VideoCompressorTheme", window.styleSheet())
+            self.assertEqual(window.toolbar.toolButtonStyle(), Qt.ToolButtonTextBesideIcon)
+            for action in [
+                window.add_files_action,
+                window.add_folder_action,
+                window.plan_action,
+                window.start_queue_action,
+                window.pause_after_current_action,
+                window.stop_action,
+                window.preview_action,
+                window.queue_action,
+                window.activity_log_action,
+                window.presets_action,
+                window.settings_action,
+            ]:
+                self.assertFalse(action.icon().isNull(), action.text())
+                self.assertTrue(action.toolTip(), action.text())
+                self.assertTrue(action.statusTip(), action.text())
+            for label in [
+                window.total_items_title,
+                window.total_duration_title,
+                window.states_title,
+                window.saved_space_title,
+            ]:
+                self.assertEqual(label.objectName(), "summaryTitle")
+            for label in [
+                window.total_items_value,
+                window.total_duration_value,
+                window.states_value,
+                window.saved_space_value,
+            ]:
+                self.assertEqual(label.objectName(), "summaryValue")
         finally:
             window.close()
 

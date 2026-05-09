@@ -65,6 +65,22 @@ def _capabilities_for(codec: CodecChoice, entries: list[tuple[BackendChoice, str
     }
 
 
+def _capabilities_by_codec(
+    hevc: list[tuple[BackendChoice, str]],
+    av1: list[tuple[BackendChoice, str]] | None = None,
+) -> dict:
+    return {
+        "codecs": {
+            "hevc": [{"backend": backend.value, "encoder": encoder_name} for backend, encoder_name in hevc],
+            "av1": [{"backend": backend.value, "encoder": encoder_name} for backend, encoder_name in (av1 or [])],
+        }
+    }
+
+
+def _backend_combo_items(window: MainWindow) -> list[str]:
+    return [window.backend_combo.itemText(index) for index in range(window.backend_combo.count())]
+
+
 def _plan_item(encoder_name: str, backend: BackendChoice, options: EncodeOptions | None = None) -> EncodePlanItem:
     current = options or EncodeOptions()
     source = Path("/tmp/source.mp4")
@@ -229,12 +245,17 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
     def test_gui_shows_nvenc_and_qsv_preset_choices(self) -> None:
         window = MainWindow(self.repo_root, language="en")
         try:
+            window._on_encoder_capability_detection_completed(
+                _capabilities_by_codec(
+                    [(BackendChoice.NVENC, "hevc_nvenc"), (BackendChoice.QSV, "hevc_qsv")]
+                )
+            )
             with (
                 patch("gui.gui_mainwindow.discover_ffmpeg_tools", return_value=(Path("/tmp/ffmpeg"), Path("/tmp/ffprobe"))),
                 patch("gui.gui_mainwindow.list_available_encoders", return_value={"hevc_nvenc", "hevc_qsv"}),
                 patch(
                     "gui.gui_mainwindow.resolve_encoder",
-                    side_effect=lambda codec, backend, available, ffmpeg_path=None: _encoder_info(
+                    side_effect=lambda codec, backend, available, ffmpeg_path=None, runtime_capabilities=None: _encoder_info(
                         "hevc_nvenc" if backend == BackendChoice.NVENC else "hevc_qsv",
                         backend,
                         "p6" if backend == BackendChoice.NVENC else "slow",
@@ -251,6 +272,82 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
                 window.backend_combo.setCurrentText("qsv")
                 window._refresh_encoder_preset_choices()
                 self.assertEqual(window.encoder_preset_combo.itemText(1), "veryfast")
+        finally:
+            window.close()
+
+    def test_backend_combo_starts_with_safe_choices_until_detection_completes(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            self.assertEqual(_backend_combo_items(window), ["auto", "cpu"])
+        finally:
+            window.close()
+
+    def test_encoder_detection_filters_backend_combo_to_usable_backends(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            window._on_encoder_capability_detection_completed(
+                _capabilities_by_codec(
+                    [(BackendChoice.CPU, "libx265")],
+                    [(BackendChoice.CPU, "libsvtav1")],
+                )
+            )
+            self.assertEqual(_backend_combo_items(window), ["auto", "cpu"])
+            self.assertTrue(window.parallel_qsv_check.isHidden())
+            self.assertTrue(window.parallel_nvenc_check.isHidden())
+            self.assertTrue(window.parallel_amf_check.isHidden())
+            self.assertFalse(window.parallel_cpu_check.isHidden())
+        finally:
+            window.close()
+
+    def test_backend_filtering_is_codec_specific(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            window._on_encoder_capability_detection_completed(
+                _capabilities_by_codec(
+                    [(BackendChoice.QSV, "hevc_qsv"), (BackendChoice.CPU, "libx265")],
+                    [(BackendChoice.CPU, "libsvtav1")],
+                )
+            )
+            window.codec_combo.setCurrentText("hevc")
+            self.assertEqual(_backend_combo_items(window), ["auto", "qsv", "cpu"])
+            self.assertFalse(window.parallel_qsv_check.isHidden())
+
+            window.codec_combo.setCurrentText("av1")
+            self.assertEqual(_backend_combo_items(window), ["auto", "cpu"])
+            self.assertTrue(window.parallel_qsv_check.isHidden())
+        finally:
+            window.close()
+
+    def test_loaded_preset_falls_back_when_backend_is_not_available(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            window._on_encoder_capability_detection_completed(
+                _capabilities_by_codec(
+                    [(BackendChoice.CPU, "libx265")],
+                    [(BackendChoice.CPU, "libsvtav1")],
+                )
+            )
+            window._apply_options(
+                EncodeOptions(
+                    backend=BackendChoice.QSV,
+                    parallel_enabled=True,
+                    parallel_backends=(BackendChoice.QSV, BackendChoice.CPU),
+                )
+            )
+            self.assertEqual(window.backend_combo.currentText(), "auto")
+            options = window._current_options()
+            self.assertEqual(options.backend, BackendChoice.AUTO)
+            self.assertEqual(options.parallel_backends, (BackendChoice.CPU,))
+        finally:
+            window.close()
+
+    def test_encoder_detection_failure_keeps_safe_backend_choices(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            window.backend_combo.clear()
+            window.backend_combo.addItems(["auto", "nvenc", "qsv", "cpu"])
+            window._on_encoder_capability_detection_failed("boom")
+            self.assertEqual(_backend_combo_items(window), ["auto", "cpu"])
         finally:
             window.close()
 

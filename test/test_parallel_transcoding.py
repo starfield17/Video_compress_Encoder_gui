@@ -297,6 +297,9 @@ class ParallelGuiTestCase(unittest.TestCase):
     def test_window_collects_parallel_options_and_syncs_controls(self) -> None:
         window = MainWindow(self.repo_root, language="en")
         try:
+            window._on_encoder_capability_detection_completed(
+                _capabilities([(BackendChoice.NVENC, "hevc_nvenc"), (BackendChoice.QSV, "hevc_qsv")])
+            )
             window.parallel_check.setChecked(True)
             window.parallel_nvenc_check.setChecked(True)
             window.parallel_qsv_check.setChecked(True)
