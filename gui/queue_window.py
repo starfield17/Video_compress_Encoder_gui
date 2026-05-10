@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QLabel, QMainWindow, QProgressBar, QVBoxLayout, QW
 
 from core.i18n import Translator
 from gui.queue_table import QueueTableModel, create_queue_view, format_duration
+from gui.window_geometry import clamped_window_size
 
 
 class QueueWindow(QMainWindow):
@@ -15,7 +16,7 @@ class QueueWindow(QMainWindow):
         self.apply_translations(tr)
 
     def _build_ui(self) -> None:
-        self.resize(1280, 760)
+        self.resize(clamped_window_size(1280, 760, minimum_width=640, minimum_height=420))
         central = QWidget(self)
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -67,4 +68,3 @@ class QueueWindow(QMainWindow):
             )
         )
         self.queue_progress_bar.setValue(int(round(metrics.queue_percent * 10)))
-

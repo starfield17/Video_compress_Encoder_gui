@@ -7,6 +7,7 @@ from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
+    QAbstractScrollArea,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStatusBar,
     QStyle,
@@ -55,6 +57,7 @@ from gui.queue_table import QueueTableModel, create_queue_view, format_duration,
 from gui.queue_window import QueueWindow
 from gui.settings_dialog import SettingsDialog
 from gui.theme import apply_theme
+from gui.window_geometry import clamped_window_size
 
 
 EXPLICIT_BACKEND_ORDER: tuple[BackendChoice, ...] = (
@@ -90,6 +93,7 @@ class MainWindow(QMainWindow):
         self._status_speed = "-"
         self._status_elapsed = "-"
         self._status_percent: float | None = None
+        self._close_after_running_task_stops = False
 
         self.queue_model = QueueTableModel(self.tr, self)
         self.queue_manager = QueueManager(self.queue_model, self)
@@ -103,6 +107,31 @@ class MainWindow(QMainWindow):
         self._sync_dependent_controls()
         self._update_queue_metrics(self.queue_model.metrics())
         self._refresh_action_state()
+
+    def closeEvent(self, event) -> None:
+        if not self._has_running_task():
+            event.accept()
+            return
+        if self._close_after_running_task_stops:
+            event.ignore()
+            return
+
+        result = QMessageBox.question(
+            self,
+            self.tr.t("gui.message.close_busy_title"),
+            self.tr.t("gui.message.close_busy_text"),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if result != QMessageBox.Yes:
+            event.ignore()
+            return
+
+        self._close_after_running_task_stops = True
+        self._append_log(self.tr.t("gui.log.close_after_stop_requested"))
+        self._stop_active_task()
+        self._maybe_close_after_running_task()
+        event.ignore()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -147,8 +176,6 @@ class MainWindow(QMainWindow):
             action.setStatusTip(action.text())
 
     def _build_ui(self) -> None:
-        self.setMinimumSize(1360, 860)
-        self.resize(1520, 960)
         apply_theme(self)
 
         toolbar = QToolBar(self)
@@ -190,9 +217,19 @@ class MainWindow(QMainWindow):
         ]:
             toolbar.addAction(action)
 
-        central = QWidget(self)
+        central = QScrollArea(self)
+        central.setWidgetResizable(True)
+        central.setFrameShape(QFrame.NoFrame)
+        central.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        central.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        central.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        central.setMinimumSize(0, 0)
         self.setCentralWidget(central)
-        root_layout = QVBoxLayout(central)
+
+        content = QWidget(self)
+        content.setMinimumSize(0, 0)
+        central.setWidget(content)
+        root_layout = QVBoxLayout(content)
         root_layout.setContentsMargins(12, 12, 12, 12)
         root_layout.setSpacing(10)
 
@@ -341,6 +378,20 @@ class MainWindow(QMainWindow):
         status_bar.addPermanentWidget(self.status_elapsed_label)
         status_bar.addPermanentWidget(self.status_current_progress_label)
         status_bar.addPermanentWidget(self.current_progress_bar)
+        self.main_scroll_area = central
+        self.main_content_widget = content
+        self._apply_initial_window_geometry()
+
+    def _apply_initial_window_geometry(self) -> None:
+        minimum = clamped_window_size(760, 520)
+        self.setMinimumSize(minimum)
+        initial = clamped_window_size(
+            1520,
+            960,
+            minimum_width=minimum.width(),
+            minimum_height=minimum.height(),
+        )
+        self.resize(initial)
 
     def _connect_signals(self) -> None:
         self.add_files_action.triggered.connect(self._add_files_dialog)
@@ -373,6 +424,7 @@ class MainWindow(QMainWindow):
         self.queue_manager.progress.connect(self._update_progress)
         self.queue_manager.busyChanged.connect(self._on_queue_busy_changed)
         self.queue_manager.stateChanged.connect(self._on_queue_state_changed)
+        self.queue_manager.workerFinished.connect(self._maybe_close_after_running_task)
         self.queue_manager.error.connect(self._on_queue_error)
 
         self.table_view.customContextMenuRequested.connect(lambda pos: self._show_queue_context_menu(self.table_view, pos))
@@ -760,6 +812,10 @@ class MainWindow(QMainWindow):
 
     def _on_encoder_capability_detection_finished(self) -> None:
         self.encoder_detection_worker = None
+        if self._close_after_running_task_stops:
+            self._pending_encoder_detection_force_refresh = False
+            self._maybe_close_after_running_task()
+            return
         if self._pending_encoder_detection_force_refresh:
             self._pending_encoder_detection_force_refresh = False
             QTimer.singleShot(0, lambda: self._start_encoder_capability_detection(force_refresh=True))
@@ -1237,10 +1293,28 @@ class MainWindow(QMainWindow):
             view.setDragEnabled(not queue_busy)
             view.setAcceptDrops(not queue_busy)
 
+    def _has_running_task(self) -> bool:
+        queue_manager_busy = self.queue_manager.is_busy()
+        return (
+            self.active_worker is not None
+            or self.encoder_detection_worker is not None
+            or self.queue_busy
+            or queue_manager_busy
+        )
+
+    def _maybe_close_after_running_task(self) -> None:
+        if not self._close_after_running_task_stops:
+            return
+        if self._has_running_task():
+            return
+        self._close_after_running_task_stops = False
+        QTimer.singleShot(0, self.close)
+
     def _set_worker_busy(self, busy: bool) -> None:
         if not busy:
             self.active_worker = None
         self._refresh_action_state()
+        self._maybe_close_after_running_task()
 
     def _start_worker(self, worker, completed_slot) -> None:
         self.active_worker = worker
@@ -1268,6 +1342,7 @@ class MainWindow(QMainWindow):
     def _on_queue_busy_changed(self, busy: bool) -> None:
         self.queue_busy = busy
         self._refresh_action_state()
+        self._maybe_close_after_running_task()
 
     def _on_queue_state_changed(self, state: str) -> None:
         self._queue_state = state

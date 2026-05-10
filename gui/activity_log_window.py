@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.i18n import Translator
+from gui.window_geometry import clamped_window_size
 
 
 class ActivityLogWindow(QMainWindow):
@@ -30,7 +31,7 @@ class ActivityLogWindow(QMainWindow):
         self.apply_translations(tr)
 
     def _build_ui(self) -> None:
-        self.resize(980, 640)
+        self.resize(clamped_window_size(980, 640, minimum_width=560, minimum_height=360))
         central = QWidget(self)
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)

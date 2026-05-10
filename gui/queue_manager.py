@@ -145,6 +145,7 @@ class QueueManager(QObject):
     busyChanged = Signal(bool)
     stateChanged = Signal(str)
     error = Signal(str)
+    workerFinished = Signal()
 
     def __init__(self, model: QueueTableModel, parent=None) -> None:
         super().__init__(parent)
@@ -251,3 +252,4 @@ class QueueManager(QObject):
         self._worker = None
         self._active_item_ids.clear()
         self._pause_after_current_requested = False
+        self.workerFinished.emit()

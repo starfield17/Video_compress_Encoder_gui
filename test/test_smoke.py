@@ -4,12 +4,14 @@ import contextlib
 import io
 import os
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import QApplication, QMessageBox, QScrollArea
 from PySide6.QtWidgets import QHeaderView
 
 from core.app_paths import app_root, config_dir
@@ -116,6 +118,80 @@ class SmokeTestCase(unittest.TestCase):
             ]:
                 self.assertEqual(label.objectName(), "summaryValue")
         finally:
+            window.close()
+
+    def test_main_window_minimum_size_fits_low_resolution_contract(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            self.assertLessEqual(window.minimumWidth(), 800)
+            self.assertLessEqual(window.minimumHeight(), 600)
+        finally:
+            window.close()
+
+    def test_main_window_initial_size_is_clamped_to_available_screen(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            available = self.app.primaryScreen().availableGeometry()
+            self.assertLessEqual(window.width(), available.width())
+            self.assertLessEqual(window.height(), available.height())
+        finally:
+            window.close()
+
+    def test_auxiliary_window_initial_sizes_are_clamped_to_available_screen(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            available = self.app.primaryScreen().availableGeometry()
+            for child_window in [window.queue_window, window.activity_log_window]:
+                self.assertLessEqual(child_window.width(), available.width())
+                self.assertLessEqual(child_window.height(), available.height())
+        finally:
+            window.close()
+
+    def test_main_window_central_content_is_scrollable_for_small_screens(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            self.assertIsInstance(window.centralWidget(), QScrollArea)
+        finally:
+            window.close()
+
+    def test_close_event_accepts_when_idle_without_prompt(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            event = QCloseEvent()
+            with patch("gui.gui_mainwindow.QMessageBox.question") as question:
+                window.closeEvent(event)
+            question.assert_not_called()
+            self.assertTrue(event.isAccepted())
+        finally:
+            window.close()
+
+    def test_close_event_ignores_when_busy_close_is_cancelled(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            window.queue_busy = True
+            event = QCloseEvent()
+            with patch("gui.gui_mainwindow.QMessageBox.question", return_value=QMessageBox.No):
+                window.closeEvent(event)
+            self.assertFalse(event.isAccepted())
+        finally:
+            window.queue_busy = False
+            window.close()
+
+    def test_close_event_requests_stop_and_waits_when_busy_close_is_confirmed(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            window.queue_busy = True
+            event = QCloseEvent()
+            with patch("gui.gui_mainwindow.QMessageBox.question", return_value=QMessageBox.Yes), patch.object(
+                window, "_stop_active_task"
+            ) as stop_active_task:
+                window.closeEvent(event)
+            stop_active_task.assert_called_once()
+            self.assertFalse(event.isAccepted())
+            self.assertTrue(window._close_after_running_task_stops)
+        finally:
+            window.queue_busy = False
+            window._close_after_running_task_stops = False
             window.close()
 
     def test_responsive_queue_view_fills_viewport_when_space_is_available(self) -> None:
