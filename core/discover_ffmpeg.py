@@ -4,7 +4,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from core.app_paths import app_root, bundle_root
 
@@ -38,7 +38,23 @@ def _resolve_existing_file(candidate: Path) -> Optional[Path]:
     return None
 
 
+def _find_binary_under(
+    base_dirs: Iterable[Path],
+    relative_dirs: Iterable[Path],
+    binary_name: str,
+) -> Optional[Path]:
+    for base_dir in base_dirs:
+        for relative_dir in relative_dirs:
+            for name in candidate_binary_names(binary_name):
+                resolved = _resolve_existing_file(base_dir / relative_dir / name)
+                if resolved is not None:
+                    return resolved
+    return None
+
+
 def project_ffmpeg_dirs() -> list[Path]:
+    # Deduplicate because app_root and bundle_root can resolve to the same
+    # directory (e.g. in a non-bundled dev run).
     candidates: list[Path] = []
     seen: set[Path] = set()
     for root in (app_root(), bundle_root()):
@@ -51,14 +67,7 @@ def project_ffmpeg_dirs() -> list[Path]:
 
 
 def detect_project_binary(binary_name: str) -> Optional[Path]:
-    for base_dir in project_ffmpeg_dirs():
-        for relative_dir in PROJECT_BINARY_SEARCH_DIRS:
-            for name in candidate_binary_names(binary_name):
-                candidate = base_dir / relative_dir / name
-                resolved = _resolve_existing_file(candidate)
-                if resolved is not None:
-                    return resolved
-    return None
+    return _find_binary_under(project_ffmpeg_dirs(), PROJECT_BINARY_SEARCH_DIRS, binary_name)
 
 
 def detect_path_binary(binary_name: str) -> Optional[Path]:
@@ -87,15 +96,9 @@ def detect_scoop_ffmpeg(binary_name: str) -> Optional[Path]:
         prefix = proc.stdout.strip().strip('"')
         if not prefix:
             return None
-        for search_dir in PROJECT_BINARY_SEARCH_DIRS:
-            for name in candidate_binary_names(binary_name):
-                candidate = Path(prefix) / search_dir / name
-                resolved = _resolve_existing_file(candidate)
-                if resolved is not None:
-                    return resolved
+        return _find_binary_under((Path(prefix),), PROJECT_BINARY_SEARCH_DIRS, binary_name)
     except OSError:
         return None
-    return None
 
 
 def detect_homebrew_binary(binary_name: str) -> Optional[Path]:
@@ -113,24 +116,19 @@ def detect_homebrew_binary(binary_name: str) -> Optional[Path]:
             if proc.returncode == 0:
                 prefix = proc.stdout.strip().strip('"')
                 if prefix:
-                    for name in candidate_binary_names(binary_name):
-                        candidate = Path(prefix) / "bin" / name
-                        resolved = _resolve_existing_file(candidate)
-                        if resolved is not None:
-                            return resolved
+                    resolved = _find_binary_under((Path(prefix),), (Path("bin"),), binary_name)
+                    if resolved is not None:
+                        return resolved
         except OSError:
             pass
 
-    for prefix in COMMON_HOMEBREW_PREFIXES:
-        for name in candidate_binary_names(binary_name):
-            candidate = prefix / "bin" / name
-            resolved = _resolve_existing_file(candidate)
-            if resolved is not None:
-                return resolved
-    return None
+    return _find_binary_under(COMMON_HOMEBREW_PREFIXES, (Path("bin"),), binary_name)
 
 
 def find_binary(user_path: Optional[str], binary_name: str) -> Path:
+    # Discovery precedence: explicit user path > bundled project dir >
+    # system PATH > platform package manager (Scoop on Windows, Homebrew
+    # on macOS/Linux).
     if user_path:
         candidate = Path(user_path).expanduser()
         if candidate.exists() and candidate.is_file():

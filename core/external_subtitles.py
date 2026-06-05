@@ -27,6 +27,8 @@ def is_external_subtitle_file(path: Path) -> bool:
 
 
 def discover_external_subtitles(source_path: Path) -> list[Path]:
+    # Sidecar matching: same stem (movie.srt for movie.mkv) or stem-dot-prefixed
+    # (movie.en.srt for movie.mkv). Sorted case-insensitively for stable order.
     source_path = source_path.resolve()
     prefix = source_path.stem
     matches: list[Path] = []
@@ -39,6 +41,7 @@ def discover_external_subtitles(source_path: Path) -> list[Path]:
 
 
 def build_external_subtitle_output_path(source_path: Path, subtitle_path: Path, output_path: Path) -> Path:
+    # Remap subtitle filenames: movie.en.srt -> output.en.srt; plain movie.srt -> output.srt.
     subtitle_name = subtitle_path.name
     if subtitle_name.startswith(source_path.stem):
         suffix = subtitle_name[len(source_path.stem):]

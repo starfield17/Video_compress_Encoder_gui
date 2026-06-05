@@ -17,6 +17,7 @@ from core.models import (
 
 
 APP_CONFIG_NAME = "app_config.json"
+# Reentrant lock so nested calls (e.g. updater that reads config) don't deadlock.
 _APP_CONFIG_LOCK = RLock()
 
 
@@ -33,6 +34,7 @@ def app_config_path(config_dir: Path) -> Path:
 
 
 def _preset_path(name: str, config_dir: Path) -> Path:
+    # Validate preset name before constructing the path to prevent path traversal.
     if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
         raise ValueError("Preset names may only contain letters, numbers, dots, underscores, and dashes.")
     return presets_dir(config_dir) / f"{name}.json"
@@ -61,6 +63,7 @@ def encode_options_to_preset_data(options: EncodeOptions) -> dict[str, Any]:
 
 
 def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
+    # Backfill keys added after the preset format was established, then validate.
     data = dict(data)
     if "copy_external_subtitles" not in data:
         data["copy_external_subtitles"] = False
@@ -90,6 +93,7 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
     if missing:
         raise ValueError(f"Preset is missing fields: {', '.join(sorted(missing))}")
 
+    # Constructing each enum validates the string value; raises ValueError on invalid input.
     CodecChoice(data["codec"])
     BackendChoice(data["backend"])
     for backend in data["parallel_backends"]:
@@ -191,6 +195,8 @@ def update_app_config(
     config_dir: Path,
     updater: Callable[[dict[str, Any]], dict[str, Any] | None],
 ) -> Path:
+    # Atomically read-modify-write. Returning None means the updater mutated
+    # the loaded dict in place; returning a dict replaces it entirely.
     with _APP_CONFIG_LOCK:
         data = _load_app_config_unlocked(config_dir)
         updated = updater(data)

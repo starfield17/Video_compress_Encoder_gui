@@ -37,6 +37,7 @@ def build_video_args(plan_item: EncodePlanItem) -> list[str]:
         args += ["-preset", str(plan_item.options.encoder_preset)]
 
     if encoder == "libx265":
+        # hvc1 tag is required for Apple QuickTime / macOS Finder playback.
         args += ["-tag:v", "hvc1", "-x265-params", "log-level=error"]
 
     return args
@@ -63,6 +64,8 @@ def build_subtitle_args(plan_item: EncodePlanItem) -> list[str]:
 def build_common_output_args(plan_item: EncodePlanItem) -> list[str]:
     args = ["-map_metadata", "0", "-map_chapters", "0"]
     if plan_item.options.container == ContainerChoice.MP4:
+        # Move the moov atom to the front so the file starts playing before
+        # it is fully downloaded (progressive-download / streaming-friendly).
         args += ["-movflags", "+faststart"]
     return args
 

@@ -14,6 +14,7 @@ class Translator:
         self.messages = self._load_messages(self.language)
 
     def _load_messages(self, language: str) -> dict[str, str]:
+        # Fallback chain: requested language -> English -> empty dict (keys shown as-is).
         path = self.config_dir / "i18n" / f"{language}.json"
         if not path.exists() and language != "en":
             path = self.config_dir / "i18n" / "en.json"
@@ -22,6 +23,8 @@ class Translator:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def t(self, key: str, **kwargs: object) -> str:
+        # Returns the translation key itself when the template is missing or formatting fails,
+        # so the UI always shows something rather than crashing.
         template = self.messages.get(key, key)
         try:
             return template.format(**kwargs)

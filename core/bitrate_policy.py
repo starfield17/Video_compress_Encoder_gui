@@ -3,6 +3,9 @@ from __future__ import annotations
 from core.models import CodecChoice
 
 
+# Target-bitrate multipliers: how much of the source bitrate each codec
+# should retain at default quality. HEVC is ~24% more efficient than source;
+# AV1 is ~36% more efficient.
 DEFAULT_RATIO = {
     CodecChoice.HEVC: 0.76,
     CodecChoice.AV1: 0.64,
@@ -37,4 +40,6 @@ def compute_target_video_bitrate(
     target = max(target, kbps_to_bps(min_video_kbps))
     if max_video_kbps > 0:
         target = min(target, kbps_to_bps(max_video_kbps))
+    # Hard floor to prevent an unreasonably low bitrate slipping through,
+    # even when both the ratio and user-supplied minimum are very small.
     return max(target, 50_000)

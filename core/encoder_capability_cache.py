@@ -47,6 +47,8 @@ def _ffmpeg_version_line(ffmpeg_path: Path) -> str:
     return ""
 
 
+# Validate that the cached data structure matches the current ENCODER_CANDIDATES
+# schema. A mismatch means the app was upgraded and the cache must be rebuilt.
 def _valid_capability_shape(capabilities: dict) -> bool:
     codecs = capabilities.get("codecs")
     if not isinstance(codecs, dict):
@@ -104,6 +106,8 @@ def is_encoder_capability_cache_valid(capabilities: dict | None, ffmpeg_path: Pa
     return _valid_capability_shape(capabilities)
 
 
+# Render a single test frame then discard it. A clean exit means the encoder
+# binary is present and functional at runtime, not just listed in -encoders.
 def smoke_test_encoder(
     ffmpeg_path: Path,
     encoder_name: str,

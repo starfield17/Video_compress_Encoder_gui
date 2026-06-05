@@ -8,6 +8,8 @@ from pathlib import Path
 from core.models import BackendChoice, CodecChoice, EncoderInfo
 
 
+# Ordered by preference: hardware encoders (NVENC, QSV, AMF) are faster and
+# offload work from the CPU, so they are tried first. CPU is the universal fallback.
 AUTO_BACKEND_PRIORITY: tuple[BackendChoice, ...] = (
     BackendChoice.NVENC,
     BackendChoice.QSV,
@@ -30,6 +32,8 @@ ENCODER_CANDIDATES: dict[CodecChoice, dict[BackendChoice, str]] = {
     },
 }
 
+# Hardcoded preset lists used when parsing the encoder's help output fails.
+# Based on published encoder docs; may drift if ffmpeg adds or removes presets.
 FALLBACK_PRESET_CHOICES: dict[str, tuple[str, ...]] = {
     "libx265": (
         "ultrafast",
@@ -164,6 +168,7 @@ def _encoder_info(
         codec=codec,
         backend=backend,
         encoder_name=encoder_name,
+        # Only x265 exposes a reliable two-pass mode through ffmpeg.
         supports_two_pass=encoder_name == "libx265",
         default_preset=default_preset_for_encoder(encoder_name, ffmpeg_path),
     )

@@ -27,6 +27,7 @@ def choose_sample_window(duration_sec: float, options: PreviewOptions) -> tuple[
             notes.append("Custom preview start was out of range and has been clamped.")
         return clamped, sample_duration, notes
 
+    # Default policy: sample from the middle for a representative segment.
     start_sec = max((duration_sec - sample_duration) / 2.0, 0.0)
     return start_sec, sample_duration, notes
 

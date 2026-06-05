@@ -14,6 +14,7 @@ def source_root() -> Path:
 
 
 def bundle_root() -> Path:
+    # Fallback chain for frozen builds: PyInstaller _MEIPASS dir > exe dir > source root.
     if is_frozen():
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
@@ -37,6 +38,8 @@ def workdir_dir() -> Path:
 
 
 def _copy_tree_if_missing(source_dir: Path, target_dir: Path) -> None:
+    # Copy files from source to target only when they don't already exist in target.
+    # Directories are always created; only leaf files are checked for existence.
     if not source_dir.exists():
         return
     for item in source_dir.rglob("*"):
@@ -51,6 +54,8 @@ def _copy_tree_if_missing(source_dir: Path, target_dir: Path) -> None:
 
 
 def ensure_runtime_layout() -> tuple[Path, Path]:
+    # Seeds the writable runtime directory from the bundled (potentially read-only) config.
+    # Returns (runtime_config_dir, runtime_workdir).
     runtime_root = app_root()
     runtime_root.mkdir(parents=True, exist_ok=True)
 

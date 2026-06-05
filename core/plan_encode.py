@@ -13,6 +13,7 @@ from core.models import (
     EncodeOptions,
     EncodePlan,
     EncodePlanItem,
+    EncoderInfo,
     OperationCancelledError,
     VideoFileItem,
 )
@@ -53,6 +54,193 @@ def _iter_sources(
     return input_root, collect_video_files(input_root, recursive)
 
 
+def _usable_encoder_count(runtime_capabilities: dict) -> int:
+    return sum(len(items) for items in runtime_capabilities.get("codecs", {}).values())
+
+
+def _options_with_default_preset(
+    options: EncodeOptions,
+    ffmpeg: Path,
+    encoder_info: EncoderInfo,
+    progress_callback: Callable[[str], None] | None,
+) -> EncodeOptions:
+    # When the user is parallel-encoding, baked-in default presets are not
+    # applied because every job gets its own explicit encoder selection.
+    if options.encoder_preset is not None or options.parallel_enabled:
+        return options
+
+    default_preset = encoder_info.default_preset
+    if default_preset:
+        choices = preset_choices_for_encoder(ffmpeg, encoder_info.encoder_name)
+        if choices and not is_valid_preset(ffmpeg, encoder_info.encoder_name, default_preset):
+            _emit(
+                progress_callback,
+                f"Default encoder preset {default_preset!r} is not valid for {encoder_info.encoder_name}; falling back to encoder defaults.",
+            )
+            default_preset = None
+    options = replace(options, encoder_preset=default_preset)
+    if default_preset:
+        _emit(progress_callback, f"Using default encoder preset: {default_preset}")
+    return options
+
+
+def _resolve_plan_encoder(
+    options: EncodeOptions,
+    ffmpeg: Path,
+    config_dir: Path | None,
+    progress_callback: Callable[[str], None] | None,
+) -> tuple[EncoderInfo, EncodeOptions]:
+    runtime_capabilities = ensure_encoder_capabilities(
+        config_dir or app_config_dir(),
+        ffmpeg,
+        progress_callback=progress_callback,
+    )
+    _emit(progress_callback, f"Detected {_usable_encoder_count(runtime_capabilities)} usable encoder candidate(s).")
+    encoder_info = resolve_encoder(
+        options.codec,
+        options.backend,
+        set(),
+        ffmpeg,
+        runtime_capabilities=runtime_capabilities,
+    )
+    _emit(
+        progress_callback,
+        f"Resolved encoder: {encoder_info.encoder_name} ({encoder_info.backend.value})",
+    )
+    return encoder_info, _options_with_default_preset(options, ffmpeg, encoder_info, progress_callback)
+
+
+def _build_default_output(
+    file_item: VideoFileItem,
+    input_root: Path,
+    output_root: Path,
+    options: EncodeOptions,
+) -> Path:
+    return build_output_path(
+        source_path=file_item.path,
+        input_root=input_root if input_root.is_dir() else file_item.path.parent,
+        output_root=output_root,
+        codec=options.codec,
+        container=options.container,
+    )
+
+
+def _successful_plan_item(
+    file_item: VideoFileItem,
+    default_output: Path,
+    ffprobe: Path,
+    ratio: float,
+    options: EncodeOptions,
+    encoder_info: EncoderInfo,
+    workdir: Path,
+) -> EncodePlanItem:
+    media_info = probe_media_info(ffprobe, file_item.path)
+    target_bitrate = compute_target_video_bitrate(
+        media_info.video_bitrate_bps,
+        ratio,
+        options.min_video_kbps,
+        options.max_video_kbps,
+    )
+    item = EncodePlanItem(
+        source_path=file_item.path,
+        output_path=default_output,
+        media_info=media_info,
+        encoder_info=encoder_info,
+        options=options,
+        target_video_bitrate_bps=target_bitrate,
+    )
+    if options.copy_external_subtitles:
+        sidecars = discover_external_subtitles(file_item.path)
+        if sidecars:
+            item.warnings.append(
+                f"Will copy {len(sidecars)} external subtitle file(s) next to the output."
+            )
+    validate_plan_item(
+        source_path=file_item.path,
+        output_path=default_output,
+        options=options,
+        encoder_info=encoder_info,
+        workdir=workdir,
+    )
+    return item
+
+
+def _skipped_plan_item(
+    file_item: VideoFileItem,
+    default_output: Path,
+    options: EncodeOptions,
+    encoder_info: EncoderInfo,
+    exc: Exception,
+) -> EncodePlanItem:
+    return EncodePlanItem(
+        source_path=file_item.path,
+        output_path=default_output,
+        media_info=None,
+        encoder_info=encoder_info,
+        options=options,
+        target_video_bitrate_bps=0,
+        skip_reason=str(exc),
+    )
+
+
+def _emit_probe_started(
+    file_item: VideoFileItem,
+    index: int,
+    total: int,
+    progress_callback: Callable[[str], None] | None,
+    progress_event_callback: Callable[[dict[str, object]], None] | None,
+) -> None:
+    _emit(
+        progress_callback,
+        f"[{index}/{total}] Probing source: {file_item.path}",
+    )
+    _emit_progress(
+        progress_event_callback,
+        stage="planning",
+        state="probing",
+        file_path=str(file_item.path),
+        file_name=file_item.path.name,
+        current=index,
+        total=total,
+        percent=((index - 1) / max(total, 1)) * 100.0,
+    )
+
+
+def _emit_plan_item_status(
+    state: str,
+    file_item: VideoFileItem,
+    index: int,
+    total: int,
+    progress_callback: Callable[[str], None] | None,
+    progress_event_callback: Callable[[dict[str, object]], None] | None,
+    *,
+    output_path: Path | None = None,
+    error: str | None = None,
+) -> None:
+    if state == "planned" and output_path is not None:
+        _emit(
+            progress_callback,
+            f"[{index}/{total}] Planned: {file_item.path.name} -> {output_path}",
+        )
+    elif state == "skipped" and error is not None:
+        _emit(progress_callback, f"[{index}/{total}] Skipped: {file_item.path.name} | {error}")
+
+    event: dict[str, object] = {
+        "stage": "planning",
+        "state": state,
+        "file_path": str(file_item.path),
+        "file_name": file_item.path.name,
+        "current": index,
+        "total": total,
+        "percent": (index / max(total, 1)) * 100.0,
+    }
+    if output_path is not None:
+        event["output_path"] = str(output_path)
+    if error is not None:
+        event["error"] = error
+    _emit_progress(progress_event_callback, **event)
+
+
 def build_encode_plan(
     input_path: Path | None,
     options: EncodeOptions,
@@ -78,27 +266,7 @@ def build_encode_plan(
     ffmpeg, ffprobe = discover_ffmpeg_tools(ffmpeg_path, ffprobe_path)
     _emit(progress_callback, f"Using ffmpeg: {ffmpeg}")
     _emit(progress_callback, f"Using ffprobe: {ffprobe}")
-    runtime_capabilities = ensure_encoder_capabilities(config_dir or app_config_dir(), ffmpeg, progress_callback=progress_callback)
-    usable_encoder_count = sum(len(items) for items in runtime_capabilities.get("codecs", {}).values())
-    _emit(progress_callback, f"Detected {usable_encoder_count} usable encoder candidate(s).")
-    encoder_info = resolve_encoder(options.codec, options.backend, set(), ffmpeg, runtime_capabilities=runtime_capabilities)
-    _emit(
-        progress_callback,
-        f"Resolved encoder: {encoder_info.encoder_name} ({encoder_info.backend.value})",
-    )
-    if options.encoder_preset is None and not options.parallel_enabled:
-        default_preset = encoder_info.default_preset
-        if default_preset:
-            choices = preset_choices_for_encoder(ffmpeg, encoder_info.encoder_name)
-            if choices and not is_valid_preset(ffmpeg, encoder_info.encoder_name, default_preset):
-                _emit(
-                    progress_callback,
-                    f"Default encoder preset {default_preset!r} is not valid for {encoder_info.encoder_name}; falling back to encoder defaults.",
-                )
-                default_preset = None
-        options = replace(options, encoder_preset=default_preset)
-        if default_preset:
-            _emit(progress_callback, f"Using default encoder preset: {default_preset}")
+    encoder_info, options = _resolve_plan_encoder(options, ffmpeg, config_dir, progress_callback)
 
     output_root = choose_output_root(input_root, output_dir, options.codec)
     _emit(progress_callback, f"Output root: {output_root}")
@@ -117,94 +285,39 @@ def build_encode_plan(
                 percent=((index - 1) / max(len(file_items), 1)) * 100.0,
             )
             raise OperationCancelledError("Planning cancelled.")
-        _emit(
-            progress_callback,
-            f"[{index}/{len(file_items)}] Probing source: {file_item.path}",
-        )
-        _emit_progress(
-            progress_event_callback,
-            stage="planning",
-            state="probing",
-            file_path=str(file_item.path),
-            file_name=file_item.path.name,
-            current=index,
-            total=len(file_items),
-            percent=((index - 1) / max(len(file_items), 1)) * 100.0,
-        )
-        default_output = build_output_path(
-            source_path=file_item.path,
-            input_root=input_root if input_root.is_dir() else file_item.path.parent,
-            output_root=output_root,
-            codec=options.codec,
-            container=options.container,
-        )
+        total_items = len(file_items)
+        _emit_probe_started(file_item, index, total_items, progress_callback, progress_event_callback)
+        default_output = _build_default_output(file_item, input_root, output_root, options)
         try:
-            media_info = probe_media_info(ffprobe, file_item.path)
-            target_bitrate = compute_target_video_bitrate(
-                media_info.video_bitrate_bps,
+            item = _successful_plan_item(
+                file_item,
+                default_output,
+                ffprobe,
                 ratio,
-                options.min_video_kbps,
-                options.max_video_kbps,
+                options,
+                encoder_info,
+                workdir,
             )
-            item = EncodePlanItem(
-                source_path=file_item.path,
-                output_path=default_output,
-                media_info=media_info,
-                encoder_info=encoder_info,
-                options=options,
-                target_video_bitrate_bps=target_bitrate,
-            )
-            if options.copy_external_subtitles:
-                sidecars = discover_external_subtitles(file_item.path)
-                if sidecars:
-                    item.warnings.append(
-                        f"Will copy {len(sidecars)} external subtitle file(s) next to the output."
-                    )
-            validate_plan_item(
-                source_path=file_item.path,
-                output_path=default_output,
-                options=options,
-                encoder_info=encoder_info,
-                workdir=workdir,
-            )
-            _emit(
+            _emit_plan_item_status(
+                "planned",
+                file_item,
+                index,
+                total_items,
                 progress_callback,
-                f"[{index}/{len(file_items)}] Planned: {file_item.path.name} -> {default_output}",
-            )
-            _emit_progress(
                 progress_event_callback,
-                stage="planning",
-                state="planned",
-                file_path=str(file_item.path),
-                file_name=file_item.path.name,
-                current=index,
-                total=len(file_items),
-                percent=(index / max(len(file_items), 1)) * 100.0,
-                output_path=str(default_output),
+                output_path=default_output,
             )
         except Exception as exc:
-            item = EncodePlanItem(
-                source_path=file_item.path,
-                output_path=default_output,
-                media_info=None,
-                encoder_info=encoder_info,
-                options=options,
-                target_video_bitrate_bps=0,
-                skip_reason=str(exc),
-            )
-            _emit(
+            # Probing or validation failures produce skipped items rather than
+            # aborting the whole batch.
+            item = _skipped_plan_item(file_item, default_output, options, encoder_info, exc)
+            _emit_plan_item_status(
+                "skipped",
+                file_item,
+                index,
+                total_items,
                 progress_callback,
-                f"[{index}/{len(file_items)}] Skipped: {file_item.path.name} | {exc}",
-            )
-            _emit_progress(
                 progress_event_callback,
-                stage="planning",
-                state="skipped",
-                file_path=str(file_item.path),
-                file_name=file_item.path.name,
-                current=index,
-                total=len(file_items),
-                percent=(index / max(len(file_items), 1)) * 100.0,
                 error=str(exc),
             )
         items.append(item)

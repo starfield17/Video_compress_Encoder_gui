@@ -63,9 +63,12 @@ class EncodeOptions:
     codec: CodecChoice = CodecChoice.HEVC
     backend: BackendChoice = BackendChoice.AUTO
     parallel_enabled: bool = False
+    # Explicit backends used when parallel mode fans work out across encoders.
     parallel_backends: tuple[BackendChoice, ...] = ()
+    # None means choose the default compression ratio for the selected codec.
     ratio: Optional[float] = None
     min_video_kbps: int = 250
+    # 0 means no upper cap on video bitrate.
     max_video_kbps: int = 0
     container: ContainerChoice = ContainerChoice.MP4
     audio_mode: AudioMode = AudioMode.COPY
@@ -73,8 +76,11 @@ class EncodeOptions:
     copy_subtitles: bool = True
     copy_external_subtitles: bool = True
     two_pass: bool = False
+    # Encoder-specific speed/quality preset name, such as "slow" or "p6".
     encoder_preset: Optional[str] = None
+    # yuv420p keeps output broadly playable on older players and devices.
     pix_fmt: str = "yuv420p"
+    # VBV rate-control multipliers; defaults keep bufsize comfortably above maxrate.
     maxrate_factor: float = 1.25
     bufsize_factor: float = 4.0
     overwrite: bool = False

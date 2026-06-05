@@ -81,6 +81,19 @@ def _first_exception(exceptions: list[BaseException]) -> BaseException | None:
     return exceptions[0] if exceptions else None
 
 
+def _process_callback_for_worker(
+    process_callback: ProcessCallback | None,
+    worker_name: str,
+) -> Callable[[object | None], None] | None:
+    if process_callback is None:
+        return None
+
+    def callback(proc: object | None) -> None:
+        process_callback(worker_name, proc)
+
+    return callback
+
+
 def execute_plan_parallel(
     plan: EncodePlan,
     workdir: Path,
@@ -95,6 +108,7 @@ def execute_plan_parallel(
     item_started_callback: ItemStartedCallback | None = None,
     item_result_callback: ItemResultCallback | None = None,
 ) -> list[EncodeResult]:
+    # One daemon thread per backend pulls work from a lock-protected deque.
     workdir = validate_workdir(workdir)
     normalized = validate_parallel_options(backends, plan)
     runtime_capabilities = ensure_encoder_capabilities(app_config_dir(), plan.ffmpeg_path)
@@ -116,6 +130,7 @@ def execute_plan_parallel(
     total = len(plan.items)
 
     def should_stop() -> bool:
+        # Combines internal error/stop signal with external user cancellation.
         return stop_event.is_set() or (cancel_check is not None and cancel_check())
 
     def worker(backend: BackendChoice) -> None:
@@ -123,6 +138,7 @@ def execute_plan_parallel(
         worker_name = backend.value
         while not should_stop():
             if pause_check is not None and pause_check():
+                # Workers exit on pause so the caller can resume the queue later.
                 return
             with lock:
                 if not pending:
@@ -133,9 +149,7 @@ def execute_plan_parallel(
                 context = _context_for_item(item_contexts, index, backend, encoder.encoder_name)
                 if item_started_callback is not None:
                     item_started_callback(index, backend.value, encoder.encoder_name)
-                callback = None
-                if process_callback is not None:
-                    callback = lambda proc, name=worker_name: process_callback(name, proc)
+                callback = _process_callback_for_worker(process_callback, worker_name)
                 result = execute_plan_item(
                     plan.ffmpeg_path,
                     bound_item,

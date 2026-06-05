@@ -15,6 +15,8 @@ def validate_workdir(workdir: Path) -> Path:
 
 
 def validate_output_path(source_path: Path, output_path: Path, overwrite: bool) -> None:
+    # Guard against accidentally destroying the source file (e.g. same input/output directory
+    # combined with a codec suffix that collides with the original extension).
     if source_path.resolve() == output_path.resolve():
         raise RuntimeError(f"Output path matches the input path, refusing to overwrite source: {source_path}")
     if output_path.exists() and not overwrite:
@@ -34,6 +36,7 @@ def validate_plan_item(
     encoder_info: EncoderInfo,
     workdir: Path,
 ) -> None:
+    # Run every pre-encode safety check for a single plan item before touching ffmpeg.
     validate_workdir(workdir)
     validate_output_path(source_path, output_path, options.overwrite)
     validate_two_pass(options, encoder_info)

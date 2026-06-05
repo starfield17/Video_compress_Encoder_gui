@@ -40,5 +40,6 @@ def collect_video_files(input_path: Path, recursive: bool) -> list[VideoFileItem
         for path in iterator
         if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
     ]
+    # Stable traversal order: sort by relative path case-insensitively.
     files.sort(key=lambda item: str(item.relative_path).lower())
     return files

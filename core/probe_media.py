@@ -94,12 +94,17 @@ def probe_media_info(ffprobe_path: Path, input_path: Path) -> MediaInfo:
 
     format_bitrate_bps = _parse_int(fmt.get("bit_rate"))
     if format_bitrate_bps <= 0:
+        # Some containers (e.g. raw .265, certain MKV) omit the format-level
+        # bitrate. Estimate it from total file size / duration as a fallback.
         format_bitrate_bps = max(1, int(round(input_path.stat().st_size * 8 / duration)))
 
     video_bitrate_bps = _parse_int(video_stream.get("bit_rate"))
     audio_bitrate_bps = sum(_parse_int(item.get("bit_rate")) for item in audio_streams)
 
     if video_bitrate_bps <= 0:
+        # Video stream metadata may lack a bitrate field. Subtract known audio
+        # bitrates from the format total first; if that fails, assume video
+        # consumes roughly 85 % of the format bitrate.
         estimated = format_bitrate_bps - audio_bitrate_bps
         if estimated > 0:
             video_bitrate_bps = estimated

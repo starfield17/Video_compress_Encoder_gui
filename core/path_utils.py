@@ -13,6 +13,8 @@ def ensure_dir(path: Path) -> Path:
 
 
 def choose_output_root(input_path: Path, output_dir: Path | None, codec: CodecChoice) -> Path:
+    # When no explicit output directory, place output next to input for single files,
+    # or in a sibling "_compressed_<codec>" directory for whole directories.
     if output_dir:
         return output_dir.expanduser().resolve()
     input_path = input_path.expanduser().resolve()
@@ -32,6 +34,7 @@ def build_output_path(
         try:
             relative_parent = source_path.parent.relative_to(input_root)
         except ValueError:
+            # Source is outside input_root; place directly in output_root with no subdirectory.
             relative_parent = Path()
     else:
         relative_parent = Path()
@@ -40,10 +43,15 @@ def build_output_path(
 
 
 def _safe_name(value: str) -> str:
+    # Sanitize a string for use in a filename: replace unsafe chars with underscores,
+    # strip leading/trailing dots and underscores, fall back to "item".
     return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._") or "item"
 
 
 def _source_token(source_path: Path) -> str:
+    # Stable unique token for per-file temp directories and logs.
+    # Uses a truncated SHA1 so two files with the same stem in different directories
+    # get distinct tokens without path separators in filenames.
     digest = hashlib.sha1(str(source_path).encode("utf-8")).hexdigest()[:10]
     return f"{_safe_name(source_path.stem)}_{digest}"
 

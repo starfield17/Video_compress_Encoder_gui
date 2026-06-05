@@ -4,6 +4,7 @@ from core.models import PreviewJob, PreviewResult
 
 
 def estimate_preview(job: PreviewJob) -> PreviewResult:
+    # Assumes the sample compression ratio applies uniformly to the full source.
     source_size = job.source_sample_path.stat().st_size
     encoded_size = job.encoded_sample_path.stat().st_size
     ratio = (encoded_size / source_size) if source_size > 0 else 0.0
