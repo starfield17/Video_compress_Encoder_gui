@@ -16,26 +16,40 @@ from scripts.build_nuitka import (
 
 class NuitkaBuildCommandTestCase(unittest.TestCase):
     def test_common_command_contains_required_options(self) -> None:
-        command = build_nuitka_command("1.2.3", root=Path("/tmp/video-compressor"), platform_name="linux")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            command = build_nuitka_command(
+                "1.2.3",
+                root=root,
+                platform_name="linux",
+            )
 
-        self.assertIn("--mode=standalone", command)
-        self.assertIn("--enable-plugin=pyside6", command)
-        self.assertIn("--include-package=cli", command)
-        self.assertIn("--include-package=core", command)
-        self.assertIn("--include-package=gui", command)
-        self.assertIn("--output-filename=video-compressor", command)
-        self.assertTrue(any(option.startswith("--report=") for option in command))
+            self.assertIn("--mode=standalone", command)
+            self.assertIn("--enable-plugin=pyside6", command)
+            self.assertIn("--include-package=cli", command)
+            self.assertIn("--include-package=core", command)
+            self.assertIn("--include-package=gui", command)
+            self.assertIn("--output-filename=video-compressor", command)
+            self.assertTrue(
+                any(option.startswith("--report=") for option in command)
+            )
 
     def test_windows_command_contains_metadata_and_console_options(self) -> None:
-        command = build_nuitka_command("1.2.3", root=Path("/tmp/video-compressor"), platform_name="win32")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            command = build_nuitka_command(
+                "1.2.3",
+                root=root,
+                platform_name="win32",
+            )
 
-        self.assertIn("--msvc=latest", command)
-        self.assertIn("--windows-console-mode=attach", command)
-        self.assertIn("--product-name=Video Compressor", command)
-        self.assertIn("--file-description=Video Compressor", command)
-        self.assertIn("--company-name=starfield17", command)
-        self.assertIn("--product-version=1.2.3.0", command)
-        self.assertIn("--file-version=1.2.3.0", command)
+            self.assertIn("--msvc=latest", command)
+            self.assertIn("--windows-console-mode=attach", command)
+            self.assertIn("--product-name=Video Compressor", command)
+            self.assertIn("--file-description=Video Compressor", command)
+            self.assertIn("--company-name=starfield17", command)
+            self.assertIn("--product-version=1.2.3.0", command)
+            self.assertIn("--file-version=1.2.3.0", command)
 
 
 class NuitkaVersionTestCase(unittest.TestCase):
@@ -107,9 +121,18 @@ class NuitkaStagingTestCase(unittest.TestCase):
             self.assertFalse((package_dir / "FFmpeg").exists())
 
     def test_default_public_package_directory_is_normalized(self) -> None:
-        root = Path("/tmp/video-compressor")
-        self.assertEqual(final_package_dir(root=root), root / "dist" / "video-compressor")
-        self.assertEqual(build_paths(root=root).package_dir, root / "dist" / "video-compressor")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            expected = root / "dist" / "video-compressor"
+
+            self.assertEqual(
+                final_package_dir(root=root),
+                expected,
+            )
+            self.assertEqual(
+                build_paths(root=root).package_dir,
+                expected,
+            )
 
 
 if __name__ == "__main__":
