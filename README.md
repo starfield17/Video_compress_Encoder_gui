@@ -84,22 +84,25 @@ The GUI now includes:
 
 ## Packaging
 
-Build with PyInstaller from the repo root:
+Install the build dependencies from the repo root:
 
 ```bash
-python scripts/build_pyinstaller.py --clean
+python -m pip install -r requirements-build.txt
 ```
 
-Common variants:
+Build a standalone package locally:
 
 ```bash
-python scripts/build_pyinstaller.py --clean --windowed
-python scripts/build_pyinstaller.py --clean --onefile
-python scripts/build_pyinstaller.py --clean --name video-compressor-gui
-python scripts/build_pyinstaller.py --clean --icon packaging/assets/app.ico
+python scripts/build_nuitka.py --clean
 ```
 
-Convenience launchers:
+Build with a release version:
+
+```bash
+python scripts/build_nuitka.py --clean --version 1.2.3
+```
+
+Convenience scripts:
 
 ```bat
 scripts\build_windows.bat
@@ -109,13 +112,22 @@ scripts\build_windows.bat
 ./scripts/build_linux.sh
 ```
 
-Notes:
+The normalized output is:
 
-- The default build uses the spec file at `packaging/video_compressor.spec`.
-- The convenience launcher scripts now build a console app by default, which keeps a persistent terminal window like running `python main.py` directly.
-- If you explicitly want a GUI-only build with no persistent console, use `python scripts/build_pyinstaller.py --clean --windowed`.
-- `config/` is bundled automatically.
-- If the project root contains an `FFmpeg/` directory, it is bundled automatically for release builds.
-- In frozen builds, the app uses a writable runtime layout next to the executable, so `config/` and `workdir/` remain editable after packaging.
-- Optional icons are auto-detected from `packaging/assets/`.
-- Windows version metadata is loaded from `packaging/windows_version_info.txt`.
+```text
+dist/video-compressor/
+```
+
+Packaging uses Nuitka standalone directory mode. Builds run natively on each
+target platform; this is multi-platform release automation, not single-host
+cross-compilation.
+
+The package includes `config/` and `README.md`. `workdir/` is created at
+runtime and is not bundled. FFmpeg is included only when a complete compatible
+`ffmpeg`/`ffprobe` pair exists under `FFmpeg/`; otherwise the application
+continues to resolve an installed system FFmpeg.
+
+Tags such as `v1.2.3` trigger four-platform GitHub Releases for Windows
+x86-64, Linux x86-64, and macOS Intel and Apple Silicon. macOS output is
+currently a standalone directory archive rather than a signed or notarized
+`.app`.

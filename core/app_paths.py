@@ -5,8 +5,13 @@ import sys
 from pathlib import Path
 
 
+def is_compiled() -> bool:
+    return bool(getattr(sys, "frozen", False) or globals().get("__compiled__") is not None)
+
+
 def is_frozen() -> bool:
-    return bool(getattr(sys, "frozen", False))
+    """Compatibility name for callers that only need compiled-build detection."""
+    return is_compiled()
 
 
 def source_root() -> Path:
@@ -14,17 +19,13 @@ def source_root() -> Path:
 
 
 def bundle_root() -> Path:
-    # Fallback chain for frozen builds: PyInstaller _MEIPASS dir > exe dir > source root.
-    if is_frozen():
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            return Path(meipass).resolve()
+    if is_compiled():
         return Path(sys.executable).resolve().parent
     return source_root()
 
 
 def app_root() -> Path:
-    if is_frozen():
+    if is_compiled():
         return Path(sys.executable).resolve().parent
     return source_root()
 

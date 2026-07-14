@@ -13,6 +13,9 @@ env/
 # Build/dist
 build/
 dist/
+*.build/
+*.dist/
+*.onefile-build/
 *.so
 
 #codex files
