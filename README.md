@@ -102,6 +102,25 @@ Build with a release version:
 python scripts/build_nuitka.py --clean --version 1.2.3
 ```
 
+On Windows, the default build uses Nuitka-managed MinGW64:
+
+```bash
+python scripts/build_nuitka.py --clean
+```
+
+Nuitka downloads its supported MinGW64 compiler automatically, so Visual
+Studio Build Tools are not required. To use MSVC explicitly:
+
+```powershell
+python scripts/build_nuitka.py `
+  --clean `
+  --windows-compiler msvc
+```
+
+MSVC mode requires Visual Studio 2022 C++ Build Tools or later. MinGW64
+packaging must use Python 3.12 or older; CI and Release currently use Python
+3.12.
+
 Convenience scripts:
 
 ```bat

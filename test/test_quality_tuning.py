@@ -83,10 +83,10 @@ def _backend_combo_items(window: MainWindow) -> list[str]:
 
 def _plan_item(encoder_name: str, backend: BackendChoice, options: EncodeOptions | None = None) -> EncodePlanItem:
     current = options or EncodeOptions()
-    source = Path("/tmp/source.mp4")
+    source = Path("source.mp4")
     return EncodePlanItem(
         source_path=source,
-        output_path=Path("/tmp/output.mkv"),
+        output_path=Path("output.mkv"),
         media_info=_media(source),
         encoder_info=_encoder_info(encoder_name, backend, current.encoder_preset),
         options=current,
@@ -104,7 +104,7 @@ class EncoderCapsTestCase(unittest.TestCase):
         self.assertEqual(default_preset_for_encoder("av1_qsv"), "slow")
 
     def test_fallback_preset_lists_match_expected(self) -> None:
-        ffmpeg_path = Path("/tmp/fake_ffmpeg")
+        ffmpeg_path = Path("fake_ffmpeg")
         with patch("core.encoder_caps._cached_runtime_preset_choices", return_value=()):
             self.assertEqual(
                 preset_choices_for_encoder(ffmpeg_path, "libx265"),
@@ -123,7 +123,7 @@ class EncoderCapsTestCase(unittest.TestCase):
             self.assertEqual(preset_choices_for_encoder(ffmpeg_path, "libsvtav1"), [])
 
     def test_is_valid_preset_uses_detected_choices(self) -> None:
-        ffmpeg_path = Path("/tmp/fake_ffmpeg")
+        ffmpeg_path = Path("fake_ffmpeg")
         with patch("core.encoder_caps._cached_runtime_preset_choices", return_value=("p5", "p6")):
             self.assertTrue(is_valid_preset(ffmpeg_path, "hevc_nvenc", "p6"))
             self.assertFalse(is_valid_preset(ffmpeg_path, "hevc_nvenc", "slow"))
@@ -251,7 +251,7 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
                 )
             )
             with (
-                patch("gui.gui_mainwindow.discover_ffmpeg_tools", return_value=(Path("/tmp/ffmpeg"), Path("/tmp/ffprobe"))),
+                patch("gui.gui_mainwindow.discover_ffmpeg_tools", return_value=(Path("ffmpeg"), Path("ffprobe"))),
                 patch("gui.gui_mainwindow.list_available_encoders", return_value={"hevc_nvenc", "hevc_qsv"}),
                 patch(
                     "gui.gui_mainwindow.resolve_encoder",
@@ -365,7 +365,7 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
         window = MainWindow(self.repo_root, language="en")
         try:
             with (
-                patch("gui.gui_mainwindow.discover_ffmpeg_tools", return_value=(Path("/tmp/ffmpeg"), Path("/tmp/ffprobe"))),
+                patch("gui.gui_mainwindow.discover_ffmpeg_tools", return_value=(Path("ffmpeg"), Path("ffprobe"))),
                 patch("gui.gui_mainwindow.list_available_encoders", return_value={"hevc_nvenc"}),
                 patch(
                     "gui.gui_mainwindow.resolve_encoder",
@@ -382,7 +382,7 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
 class CliPresetValidationTestCase(unittest.TestCase):
     def test_cli_accepts_valid_preset(self) -> None:
         with (
-            patch("cli.cli_entry.discover_ffmpeg_tools", return_value=(Path("/tmp/ffmpeg"), Path("/tmp/ffprobe"))),
+            patch("cli.cli_entry.discover_ffmpeg_tools", return_value=(Path("ffmpeg"), Path("ffprobe"))),
             patch("cli.cli_entry.list_available_encoders", return_value={"hevc_nvenc"}),
             patch("cli.cli_entry.resolve_encoder", return_value=_encoder_info("hevc_nvenc", BackendChoice.NVENC, "p6")),
             patch("cli.cli_entry.preset_choices_for_encoder", return_value=["p5", "p6"]),
@@ -397,7 +397,7 @@ class CliPresetValidationTestCase(unittest.TestCase):
         stderr = io.StringIO()
         with (
             contextlib.redirect_stderr(stderr),
-            patch("cli.cli_entry.discover_ffmpeg_tools", return_value=(Path("/tmp/ffmpeg"), Path("/tmp/ffprobe"))),
+            patch("cli.cli_entry.discover_ffmpeg_tools", return_value=(Path("ffmpeg"), Path("ffprobe"))),
             patch("cli.cli_entry.list_available_encoders", return_value={"hevc_nvenc"}),
             patch("cli.cli_entry.resolve_encoder", return_value=_encoder_info("hevc_nvenc", BackendChoice.NVENC, "p6")),
             patch("cli.cli_entry.preset_choices_for_encoder", return_value=["p5", "p6"]),
