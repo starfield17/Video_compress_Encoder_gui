@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -136,11 +137,30 @@ class DiscoverFfmpegTestCase(unittest.TestCase):
                 patch.object(discover_ffmpeg, "bundle_root", return_value=project_root),
                 patch.object(discover_ffmpeg, "is_windows", return_value=True),
                 patch("core.discover_ffmpeg.shutil.which", side_effect=which_side_effect),
-                patch("core.discover_ffmpeg.subprocess.run", return_value=proc),
+                patch("core.discover_ffmpeg.subprocess.run", return_value=proc) as run,
             ):
                 resolved = discover_ffmpeg.find_binary(None, "ffmpeg")
 
             self.assertEqual(resolved, scoop_binary.resolve())
+            self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_homebrew_prefix_query_uses_noninteractive_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            brew_prefix = temp_root / "brew"
+            brew_binary = _touch_binary(brew_prefix / "bin" / "ffprobe")
+            brew = temp_root / "brew"
+            proc = Mock(returncode=0, stdout=str(brew_prefix))
+
+            with (
+                patch.object(discover_ffmpeg, "is_windows", return_value=False),
+                patch("core.discover_ffmpeg.shutil.which", return_value=str(brew)),
+                patch("core.discover_ffmpeg.subprocess.run", return_value=proc) as run,
+            ):
+                resolved = discover_ffmpeg.detect_homebrew_binary("ffprobe")
+
+            self.assertEqual(resolved, brew_binary.resolve())
+            self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
 
     def test_discover_tools_can_mix_explicit_and_auto_detection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -16,6 +16,17 @@ from core.preview_sample import build_preview_job
 from core.scan_videos import collect_video_files
 
 
+def _safe_console_print(message: str) -> None:
+    stream = sys.stdout
+    if stream is None:
+        return
+
+    try:
+        print(message, file=stream, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 class ScanWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
@@ -51,7 +62,7 @@ class EncoderCapabilityDetectWorker(QThread):
 
     def _emit_log(self, message: str) -> None:
         self.log.emit(message)
-        print(message, file=sys.stdout, flush=True)
+        _safe_console_print(message)
 
     def run(self) -> None:
         try:
@@ -98,7 +109,7 @@ class PlanWorker(QThread):
 
     def _emit_log(self, message: str) -> None:
         self.log.emit(message)
-        print(message, file=sys.stdout, flush=True)
+        _safe_console_print(message)
 
     def _emit_progress(self, event: dict[str, object]) -> None:
         self.progress.emit(event)
@@ -160,7 +171,7 @@ class PreviewWorker(QThread):
 
     def _emit_log(self, message: str) -> None:
         self.log.emit(message)
-        print(message, file=sys.stdout, flush=True)
+        _safe_console_print(message)
 
     def _emit_progress(self, event: dict[str, object]) -> None:
         self.progress.emit(event)
@@ -240,7 +251,7 @@ class EncodeWorker(QThread):
 
     def _emit_log(self, message: str) -> None:
         self.log.emit(message)
-        print(message, file=sys.stdout, flush=True)
+        _safe_console_print(message)
 
     def _emit_progress(self, event: dict[str, object]) -> None:
         self.progress.emit(event)

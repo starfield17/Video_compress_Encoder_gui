@@ -151,7 +151,6 @@
   "gui.log.previewing": "正在执行预览任务...",
   "gui.log.preview_done": "预览任务已完成。",
   "gui.log.preview_ratio": "预览压缩比：{ratio}，预估完整大小：{size}",
-  "gui.log.encoder_detection_started": "正在检测硬件编码器...",
   "gui.log.encoder_detection_done": "编码器能力已就绪：{summary}",
   "gui.log.encoder_detection_failed": "编码器能力检测失败：{error}",
   "gui.log.encoder_detection_running": "编码器能力检测已在进行中。",

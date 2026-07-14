@@ -780,7 +780,6 @@ class MainWindow(QMainWindow):
 
         self._encoder_capabilities_ready = False
         self._rebuild_backend_controls()
-        self._append_log(self.tr.t("gui.log.encoder_detection_started"))
         worker = EncoderCapabilityDetectWorker(
             self.config_dir,
             self._selected_ffmpeg(),

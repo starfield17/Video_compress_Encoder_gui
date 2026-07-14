@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from core.models import MediaInfo
+from core.subprocess_utils import noninteractive_run_kwargs
 
 
 def _run_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -16,6 +17,7 @@ def _run_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        **noninteractive_run_kwargs(),
     )
 
 

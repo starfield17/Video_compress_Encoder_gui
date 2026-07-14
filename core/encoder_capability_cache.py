@@ -9,6 +9,7 @@ from typing import Callable, Iterable
 from core.encoder_caps import AUTO_BACKEND_PRIORITY, ENCODER_CANDIDATES, list_available_encoders
 from core.models import BackendChoice, CodecChoice
 from core.preset_store import load_app_config, update_app_config
+from core.subprocess_utils import noninteractive_run_kwargs
 
 
 ENCODER_CAPABILITIES_SCHEMA_VERSION = 2
@@ -39,6 +40,7 @@ def _ffmpeg_version_line(ffmpeg_path: Path) -> str:
         encoding="utf-8",
         errors="replace",
         timeout=10,
+        **noninteractive_run_kwargs(),
     )
     for line in "\n".join([proc.stdout, proc.stderr]).splitlines():
         normalized = line.strip()
@@ -142,6 +144,7 @@ def smoke_test_encoder(
             encoding="utf-8",
             errors="replace",
             timeout=timeout_sec,
+            **noninteractive_run_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return False

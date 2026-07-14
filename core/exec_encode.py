@@ -22,6 +22,7 @@ from core.models import (
 from core.path_utils import log_file_path
 from core.preview_estimate import estimate_preview
 from core.safety_checks import validate_workdir
+from core.subprocess_utils import hidden_popen_kwargs
 
 
 def _emit(log_callback: Callable[[str], None] | None, message: str) -> None:
@@ -133,6 +134,7 @@ def _start_command_process(cmd: list[str]) -> subprocess.Popen[str]:
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        **hidden_popen_kwargs(),
     )
 
 

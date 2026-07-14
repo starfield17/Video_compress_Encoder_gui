@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from core.app_paths import app_root, bundle_root
+from core.subprocess_utils import noninteractive_run_kwargs
 
 
 PROJECT_FFMPEG_DIRNAME = "FFmpeg"
@@ -90,6 +91,7 @@ def detect_scoop_ffmpeg(binary_name: str) -> Optional[Path]:
             text=True,
             encoding="utf-8",
             errors="replace",
+            **noninteractive_run_kwargs(),
         )
         if proc.returncode != 0:
             return None
@@ -112,6 +114,7 @@ def detect_homebrew_binary(binary_name: str) -> Optional[Path]:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                **noninteractive_run_kwargs(),
             )
             if proc.returncode == 0:
                 prefix = proc.stdout.strip().strip('"')

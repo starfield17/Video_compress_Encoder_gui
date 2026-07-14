@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from core.models import BackendChoice, CodecChoice, EncoderInfo
+from core.subprocess_utils import noninteractive_run_kwargs
 
 
 # Ordered by preference: hardware encoders (NVENC, QSV, AMF) are faster and
@@ -66,6 +67,7 @@ def list_available_encoders(ffmpeg_path: Path) -> set[str]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        **noninteractive_run_kwargs(),
     )
     encoders: set[str] = set()
     pattern = re.compile(r"^\s*[A-Z\.]{6}\s+([^\s]+)")
@@ -88,6 +90,7 @@ def _run_encoder_help(ffmpeg_path: Path, encoder_name: str) -> str:
         text=True,
         encoding="utf-8",
         errors="replace",
+        **noninteractive_run_kwargs(),
     )
     return "\n".join(part for part in (proc.stdout, proc.stderr) if part)
 

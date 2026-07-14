@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,11 +8,12 @@ from unittest.mock import patch
 
 from core.encoder_capability_cache import (
     ENCODER_CAPABILITIES_SCHEMA_VERSION,
+    _ffmpeg_version_line,
     detect_encoder_capabilities,
     is_encoder_capability_cache_valid,
     smoke_test_encoder,
 )
-from core.encoder_caps import resolve_encoder
+from core.encoder_caps import _run_encoder_help, list_available_encoders, resolve_encoder
 from core.models import BackendChoice, CodecChoice
 
 
@@ -163,16 +165,107 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
         )
 
     def test_smoke_test_uses_nvenc_compatible_frame_size(self) -> None:
-        captured: dict[str, list[str]] = {}
+        captured: dict[str, object] = {}
 
         def fake_run(cmd: list[str], **_kwargs):
             captured["cmd"] = cmd
+            captured["kwargs"] = _kwargs
             return type("Proc", (), {"returncode": 0})()
 
         with patch("core.encoder_capability_cache.subprocess.run", side_effect=fake_run):
             self.assertTrue(smoke_test_encoder(Path("ffmpeg"), "hevc_nvenc"))
 
         self.assertIn("testsrc2=size=256x256:rate=1", captured["cmd"])
+        self.assertIs(captured["kwargs"]["stdin"], subprocess.DEVNULL)
+
+    def test_ffmpeg_version_query_uses_noninteractive_stdin(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["ffmpeg", "-version"],
+            0,
+            stdout="ffmpeg version test\n",
+            stderr="",
+        )
+        with patch("core.encoder_capability_cache.subprocess.run", return_value=completed) as run:
+            self.assertEqual(_ffmpeg_version_line(Path("ffmpeg")), "ffmpeg version test")
+
+        self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_ffmpeg_version_query_forwards_windows_creation_flag(self) -> None:
+        creationflags = 0x08000000
+        completed = subprocess.CompletedProcess(
+            ["ffmpeg", "-version"],
+            0,
+            stdout="ffmpeg version test\n",
+            stderr="",
+        )
+        with (
+            patch("core.subprocess_utils.hidden_process_creationflags", return_value=creationflags),
+            patch("core.encoder_capability_cache.subprocess.run", return_value=completed) as run,
+        ):
+            _ffmpeg_version_line(Path("ffmpeg"))
+
+        self.assertEqual(run.call_args.kwargs["creationflags"], creationflags)
+
+    def test_smoke_test_forwards_windows_creation_flag(self) -> None:
+        creationflags = 0x08000000
+        completed = type("Proc", (), {"returncode": 0})()
+        with (
+            patch("core.subprocess_utils.hidden_process_creationflags", return_value=creationflags),
+            patch("core.encoder_capability_cache.subprocess.run", return_value=completed) as run,
+        ):
+            self.assertTrue(smoke_test_encoder(Path("ffmpeg"), "hevc_nvenc"))
+
+        self.assertEqual(run.call_args.kwargs["creationflags"], creationflags)
+
+
+class EncoderSubprocessTestCase(unittest.TestCase):
+    def test_encoder_listing_uses_noninteractive_stdin(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["ffmpeg", "-encoders"],
+            0,
+            stdout=" V..... h264_nvenc       NVIDIA encoder\n",
+            stderr="",
+        )
+        with patch("core.encoder_caps.subprocess.run", return_value=completed) as run:
+            self.assertEqual(list_available_encoders(Path("ffmpeg")), {"h264_nvenc"})
+
+        self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_encoder_help_uses_noninteractive_stdin(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["ffmpeg", "-h", "encoder=libx265"],
+            0,
+            stdout="encoder help",
+            stderr="",
+        )
+        with patch("core.encoder_caps.subprocess.run", return_value=completed) as run:
+            self.assertEqual(_run_encoder_help(Path("ffmpeg"), "libx265"), "encoder help")
+
+        self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_encoder_queries_forward_windows_creation_flag(self) -> None:
+        creationflags = 0x08000000
+        listing = subprocess.CompletedProcess(
+            ["ffmpeg", "-encoders"],
+            0,
+            stdout=" V..... h264_nvenc       NVIDIA encoder\n",
+            stderr="",
+        )
+        help_output = subprocess.CompletedProcess(
+            ["ffmpeg", "-h", "encoder=libx265"],
+            0,
+            stdout="encoder help",
+            stderr="",
+        )
+        with (
+            patch("core.subprocess_utils.hidden_process_creationflags", return_value=creationflags),
+            patch("core.encoder_caps.subprocess.run", side_effect=[listing, help_output]) as run,
+        ):
+            list_available_encoders(Path("ffmpeg"))
+            _run_encoder_help(Path("ffmpeg"), "libx265")
+
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["creationflags"], creationflags)
 
 
 if __name__ == "__main__":
