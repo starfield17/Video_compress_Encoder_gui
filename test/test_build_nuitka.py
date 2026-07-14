@@ -43,13 +43,36 @@ class NuitkaBuildCommandTestCase(unittest.TestCase):
                 platform_name="win32",
             )
 
-            self.assertIn("--msvc=latest", command)
+            self.assertIn("--mingw64", command)
+            self.assertNotIn("--msvc=latest", command)
             self.assertIn("--windows-console-mode=attach", command)
             self.assertIn("--product-name=Video Compressor", command)
             self.assertIn("--file-description=Video Compressor", command)
             self.assertIn("--company-name=starfield17", command)
             self.assertIn("--product-version=1.2.3.0", command)
             self.assertIn("--file-version=1.2.3.0", command)
+
+    def test_windows_command_can_select_msvc(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            command = build_nuitka_command(
+                "1.2.3",
+                root=Path(temp_dir).resolve(),
+                platform_name="win32",
+                windows_compiler="msvc",
+            )
+
+        self.assertIn("--msvc=latest", command)
+        self.assertNotIn("--mingw64", command)
+
+    def test_windows_command_rejects_unknown_compiler(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "Unsupported Windows compiler"):
+                build_nuitka_command(
+                    "1.2.3",
+                    root=Path(temp_dir).resolve(),
+                    platform_name="win32",
+                    windows_compiler="unknown",
+                )
 
 
 class NuitkaVersionTestCase(unittest.TestCase):

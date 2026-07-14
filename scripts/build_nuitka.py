@@ -126,6 +126,7 @@ def build_nuitka_command(
     root: Path | None = None,
     platform_name: str | None = None,
     python_executable: str | None = None,
+    windows_compiler: str = "mingw64",
 ) -> list[str]:
     """Construct the single canonical Nuitka command used by local and CI builds."""
     normalized_version = normalize_version(version)
@@ -161,9 +162,15 @@ def build_nuitka_command(
         command.append("--static-libpython=no")
 
     if _is_windows(platform_name):
+        if windows_compiler == "mingw64":
+            command.append("--mingw64")
+        elif windows_compiler == "msvc":
+            command.append("--msvc=latest")
+        else:
+            raise ValueError(f"Unsupported Windows compiler: {windows_compiler}")
+
         command.extend(
             [
-                "--msvc=latest",
                 "--windows-console-mode=attach",
                 "--product-name=Video Compressor",
                 "--file-description=Video Compressor",
@@ -289,6 +296,15 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", default=DEFAULT_VERSION, help="Numeric release version")
     parser.add_argument("--name", default=DEFAULT_NAME, help="Executable and normalized package name")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Package output directory inside the repository")
+    parser.add_argument(
+        "--windows-compiler",
+        choices=("mingw64", "msvc"),
+        default="mingw64",
+        help=(
+            "Windows C compiler backend. 'mingw64' uses Nuitka's managed "
+            "compiler; 'msvc' requires Visual Studio C++ Build Tools."
+        ),
+    )
     return parser
 
 
@@ -306,6 +322,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Build configuration error: {exc}", file=sys.stderr)
         return 2
 
+    if (
+        sys.platform.startswith("win")
+        and args.windows_compiler == "mingw64"
+        and sys.version_info >= (3, 13)
+    ):
+        print(
+            "Build configuration error: Nuitka MinGW64 builds require "
+            "Python 3.12 or older. Use Python 3.12 or select "
+            "--windows-compiler msvc with Visual Studio Build Tools.",
+            file=sys.stderr,
+        )
+        return 2
+
     if args.clean:
         clean_generated_paths(root, paths.package_dir)
 
@@ -317,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=args.output_dir,
         report_path=paths.report_path,
         root=root,
+        windows_compiler=args.windows_compiler,
     )
     print("Running:", " ".join(command))
     subprocess.run(command, check=True, cwd=root, env=_build_environment(root))

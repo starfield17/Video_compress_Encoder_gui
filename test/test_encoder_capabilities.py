@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -23,10 +24,10 @@ def _capabilities(hevc: list[tuple[BackendChoice, str]], av1: list[tuple[Backend
     }
 
 
-def _cache_payload(**overrides) -> dict:
+def _cache_payload(ffmpeg_path: Path, **overrides) -> dict:
     payload = {
         "schema_version": ENCODER_CAPABILITIES_SCHEMA_VERSION,
-        "ffmpeg_path": "/tmp/ffmpeg",
+        "ffmpeg_path": str(ffmpeg_path.expanduser().resolve()),
         "ffmpeg_mtime_ns": 123,
         "ffmpeg_version": "ffmpeg version test",
         "codecs": {"hevc": [], "av1": []},
@@ -44,7 +45,7 @@ class RuntimeCapabilityResolveTestCase(unittest.TestCase):
             CodecChoice.HEVC,
             BackendChoice.AUTO,
             {"hevc_nvenc", "hevc_qsv", "libx265"},
-            Path("/tmp/ffmpeg"),
+            Path("ffmpeg"),
             runtime_capabilities=capabilities,
         )
         self.assertEqual(encoder.backend, BackendChoice.QSV)
@@ -59,7 +60,7 @@ class RuntimeCapabilityResolveTestCase(unittest.TestCase):
             CodecChoice.AV1,
             BackendChoice.AUTO,
             {"av1_qsv", "libsvtav1"},
-            Path("/tmp/ffmpeg"),
+            Path("ffmpeg"),
             runtime_capabilities=capabilities,
         )
         self.assertEqual(encoder.backend, BackendChoice.CPU)
@@ -72,48 +73,68 @@ class RuntimeCapabilityResolveTestCase(unittest.TestCase):
                 CodecChoice.HEVC,
                 BackendChoice.NVENC,
                 {"hevc_nvenc"},
-                Path("/tmp/ffmpeg"),
+                Path("ffmpeg"),
                 runtime_capabilities=capabilities,
             )
 
 
 class EncoderCapabilityCacheTestCase(unittest.TestCase):
     def test_legacy_schema_version_is_invalidated(self) -> None:
-        with (
-            patch("core.encoder_capability_cache._ffmpeg_mtime_ns", return_value=123),
-            patch("core.encoder_capability_cache._ffmpeg_version_line", return_value="ffmpeg version test"),
-        ):
-            self.assertFalse(
-                is_encoder_capability_cache_valid(
-                    _cache_payload(schema_version=ENCODER_CAPABILITIES_SCHEMA_VERSION - 1),
-                    Path("/tmp/ffmpeg"),
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ffmpeg_path = Path(temp_dir) / "ffmpeg"
+
+            with (
+                patch("core.encoder_capability_cache._ffmpeg_mtime_ns", return_value=123),
+                patch("core.encoder_capability_cache._ffmpeg_version_line", return_value="ffmpeg version test"),
+            ):
+                self.assertFalse(
+                    is_encoder_capability_cache_valid(
+                        _cache_payload(
+                            ffmpeg_path,
+                            schema_version=ENCODER_CAPABILITIES_SCHEMA_VERSION - 1,
+                        ),
+                        ffmpeg_path,
+                    )
                 )
-            )
 
     def test_cache_validation_uses_ffmpeg_fingerprint(self) -> None:
-        with (
-            patch("core.encoder_capability_cache._ffmpeg_mtime_ns", return_value=123),
-            patch("core.encoder_capability_cache._ffmpeg_version_line", return_value="ffmpeg version test"),
-        ):
-            self.assertTrue(is_encoder_capability_cache_valid(_cache_payload(), Path("/tmp/ffmpeg")))
-            self.assertFalse(
-                is_encoder_capability_cache_valid(
-                    _cache_payload(ffmpeg_path="/tmp/other-ffmpeg"),
-                    Path("/tmp/ffmpeg"),
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ffmpeg_path = Path(temp_dir) / "ffmpeg"
+            other_ffmpeg_path = Path(temp_dir) / "other-ffmpeg"
+
+            with (
+                patch("core.encoder_capability_cache._ffmpeg_mtime_ns", return_value=123),
+                patch("core.encoder_capability_cache._ffmpeg_version_line", return_value="ffmpeg version test"),
+            ):
+                self.assertTrue(
+                    is_encoder_capability_cache_valid(
+                        _cache_payload(ffmpeg_path),
+                        ffmpeg_path,
+                    )
                 )
-            )
-            self.assertFalse(
-                is_encoder_capability_cache_valid(
-                    _cache_payload(ffmpeg_mtime_ns=456),
-                    Path("/tmp/ffmpeg"),
+                mismatched_payload = _cache_payload(ffmpeg_path)
+                mismatched_payload["ffmpeg_path"] = str(other_ffmpeg_path.resolve())
+                self.assertFalse(
+                    is_encoder_capability_cache_valid(
+                        mismatched_payload,
+                        ffmpeg_path,
+                    )
                 )
-            )
-            self.assertFalse(
-                is_encoder_capability_cache_valid(
-                    _cache_payload(ffmpeg_version="ffmpeg version old"),
-                    Path("/tmp/ffmpeg"),
+                self.assertFalse(
+                    is_encoder_capability_cache_valid(
+                        _cache_payload(ffmpeg_path, ffmpeg_mtime_ns=456),
+                        ffmpeg_path,
+                    )
                 )
-            )
+                self.assertFalse(
+                    is_encoder_capability_cache_valid(
+                        _cache_payload(
+                            ffmpeg_path,
+                            ffmpeg_version="ffmpeg version old",
+                        ),
+                        ffmpeg_path,
+                    )
+                )
 
     def test_detection_filters_encoder_listing_with_smoke_tests(self) -> None:
         def fake_smoke_test(_ffmpeg_path: Path, encoder_name: str) -> bool:
@@ -125,7 +146,7 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
             patch("core.encoder_capability_cache.smoke_test_encoder", side_effect=fake_smoke_test),
         ):
             capabilities = detect_encoder_capabilities(
-                Path("/tmp/ffmpeg"),
+                Path("ffmpeg"),
                 available_encoders={"hevc_nvenc", "hevc_qsv", "libx265", "libsvtav1"},
             )
 
@@ -149,7 +170,7 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
             return type("Proc", (), {"returncode": 0})()
 
         with patch("core.encoder_capability_cache.subprocess.run", side_effect=fake_run):
-            self.assertTrue(smoke_test_encoder(Path("/tmp/ffmpeg"), "hevc_nvenc"))
+            self.assertTrue(smoke_test_encoder(Path("ffmpeg"), "hevc_nvenc"))
 
         self.assertIn("testsrc2=size=256x256:rate=1", captured["cmd"])
 
