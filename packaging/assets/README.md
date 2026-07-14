@@ -6,4 +6,4 @@ Supported auto-detected names:
 - macOS: `app.icns` or `icon.icns`
 - Linux: `app.png` or `icon.png`
 
-If no icon file is present, PyInstaller will build without a custom icon.
+If no icon file is present, the build will use no custom icon.

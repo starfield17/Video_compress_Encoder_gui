@@ -19,4 +19,4 @@ else
 fi
 
 echo "Using Python: ${PYTHON_BIN}"
-"${PYTHON_BIN}" scripts/build_pyinstaller.py --clean
+"${PYTHON_BIN}" scripts/build_nuitka.py --clean

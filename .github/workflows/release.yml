@@ -1,0 +1,162 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  QT_QPA_PLATFORM: offscreen
+  PYTHONUTF8: "1"
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: windows-x86_64
+            archive_extension: zip
+          - os: ubuntu-22.04
+            target: linux-x86_64
+            archive_extension: tar.gz
+          - os: macos-15-intel
+            target: macos-x86_64
+            archive_extension: tar.gz
+          - os: macos-15
+            target: macos-arm64
+            archive_extension: tar.gz
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+
+      - name: Install Linux packaging tools
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Run unit tests
+        run: python -m unittest discover -s test -p "test_*.py" -v
+
+      - name: Derive numeric release version
+        id: version
+        shell: bash
+        run: |
+          release_version="${GITHUB_REF_NAME#v}"
+          echo "version=${release_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build standalone package
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: python scripts/build_nuitka.py --clean --version "$RELEASE_VERSION"
+
+      - name: Smoke test packaged executable on Windows
+        if: matrix.os == 'windows-2022'
+        shell: pwsh
+        run: |
+          & ".\dist\video-compressor\video-compressor.exe" --cli --help
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+
+      - name: Smoke test packaged executable on Unix
+        if: matrix.os != 'windows-2022'
+        shell: bash
+        run: |
+          chmod +x dist/video-compressor/video-compressor
+          ./dist/video-compressor/video-compressor --cli --help
+
+      - name: Archive Windows package
+        if: matrix.os == 'windows-2022'
+        shell: bash
+        env:
+          ARCHIVE_NAME: video-compressor-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_extension }}
+        run: 7z a -tzip "$ARCHIVE_NAME" "dist/video-compressor"
+
+      - name: Archive Unix package
+        if: matrix.os != 'windows-2022'
+        shell: bash
+        env:
+          ARCHIVE_NAME: video-compressor-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_extension }}
+        run: tar -czf "$ARCHIVE_NAME" -C dist video-compressor
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-package-${{ matrix.target }}
+          path: video-compressor-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_extension }}
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - name: Upload Nuitka compilation report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nuitka-report-${{ matrix.target }}
+          path: build/reports/**
+          include-hidden-files: true
+          if-no-files-found: warn
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download package artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-package-*
+          path: packages
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          shopt -s nullglob
+          archives=(packages/*.zip packages/*.tar.gz)
+          if [[ "${#archives[@]}" -ne 4 ]]; then
+              echo "Expected four release archives, found ${#archives[@]}" >&2
+              exit 1
+          fi
+          (
+              cd packages
+              sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+          )
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              gh release upload "$GITHUB_REF_NAME" packages/* --clobber
+          else
+              gh release create "$GITHUB_REF_NAME" packages/* --generate-notes --title "$GITHUB_REF_NAME"
+          fi
