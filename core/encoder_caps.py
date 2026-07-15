@@ -4,17 +4,19 @@ import re
 import subprocess
 from functools import lru_cache
 from pathlib import Path
+from typing import Iterable
 
 from core.models import BackendChoice, CodecChoice, EncoderInfo
 from core.subprocess_utils import noninteractive_run_kwargs
 
 
-# Ordered by preference: hardware encoders (NVENC, QSV, AMF) are faster and
-# offload work from the CPU, so they are tried first. CPU is the universal fallback.
+# Ordered by preference: hardware encoders (NVENC, QSV, AMF, VideoToolbox) are
+# tried before the universal CPU fallback.
 AUTO_BACKEND_PRIORITY: tuple[BackendChoice, ...] = (
     BackendChoice.NVENC,
     BackendChoice.QSV,
     BackendChoice.AMF,
+    BackendChoice.VIDEOTOOLBOX,
     BackendChoice.CPU,
 )
 
@@ -23,6 +25,7 @@ ENCODER_CANDIDATES: dict[CodecChoice, dict[BackendChoice, str]] = {
         BackendChoice.NVENC: "hevc_nvenc",
         BackendChoice.QSV: "hevc_qsv",
         BackendChoice.AMF: "hevc_amf",
+        BackendChoice.VIDEOTOOLBOX: "hevc_videotoolbox",
         BackendChoice.CPU: "libx265",
     },
     CodecChoice.AV1: {
@@ -57,6 +60,35 @@ QUALITY_PRESET_KEYWORD = "quality"
 PRESET_LINE_RE = re.compile(r"^\s*-preset(?:\s|$)")
 OPTION_LINE_RE = re.compile(r"^\s*-[A-Za-z0-9]")
 PRESET_TOKEN_RE = re.compile(r"^[A-Za-z0-9_]+$")
+HWACCEL_TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9_.+\-]*$")
+
+
+def parse_hwaccels(output: str) -> set[str]:
+    """Parse the accelerator names printed by ``ffmpeg -hwaccels``."""
+    hwaccels: set[str] = set()
+    for line in output.splitlines():
+        normalized = line.strip().lower()
+        if not normalized or normalized.rstrip(":") == "hardware acceleration methods":
+            continue
+        if HWACCEL_TOKEN_RE.fullmatch(normalized):
+            hwaccels.add(normalized)
+    return hwaccels
+
+
+def list_available_hwaccels(ffmpeg_path: Path) -> set[str]:
+    proc = subprocess.run(
+        [str(ffmpeg_path), "-hide_banner", "-hwaccels"],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **noninteractive_run_kwargs(),
+    )
+    output = "\n".join(
+        part for part in (proc.stdout, proc.stderr) if isinstance(part, str) and part
+    )
+    return parse_hwaccels(output)
 
 
 def list_available_encoders(ffmpeg_path: Path) -> set[str]:
@@ -76,6 +108,16 @@ def list_available_encoders(ffmpeg_path: Path) -> set[str]:
         if match:
             encoders.add(match.group(1))
     return encoders
+
+
+def _iter_codec_candidates(
+    codec: CodecChoice,
+) -> Iterable[tuple[BackendChoice, str]]:
+    backend_map = ENCODER_CANDIDATES[codec]
+    for backend in AUTO_BACKEND_PRIORITY:
+        encoder_name = backend_map.get(backend)
+        if encoder_name is not None:
+            yield backend, encoder_name
 
 
 def _fallback_preset_choices(encoder_name: str) -> list[str]:
@@ -127,6 +169,8 @@ def _cached_runtime_preset_choices(ffmpeg_path: Path, encoder_name: str) -> tupl
 
 
 def preset_choices_for_encoder(ffmpeg_path: Path, encoder_name: str) -> list[str]:
+    if encoder_name.endswith("_videotoolbox"):
+        return []
     choices = list(_cached_runtime_preset_choices(ffmpeg_path, encoder_name))
     if choices:
         return choices
@@ -156,6 +200,8 @@ def default_preset_for_encoder(encoder_name: str, ffmpeg_path: Path | None = Non
         return "p6"
     if encoder_name in {"hevc_qsv", "av1_qsv"}:
         return "slow"
+    if encoder_name == "hevc_videotoolbox":
+        return None
     if encoder_name in {"hevc_amf", "av1_amf"} and ffmpeg_path is not None:
         return _quality_preset_from_choices(preset_choices_for_encoder(ffmpeg_path, encoder_name))
     return None
@@ -223,13 +269,16 @@ def resolve_encoder(
                     return _encoder_info(codec, candidate_backend, encoder_name, ffmpeg_path)
             raise RuntimeError(f"No usable {codec.value} encoder was found on this machine.")
 
-        for candidate_backend in AUTO_BACKEND_PRIORITY:
-            encoder_name = backend_map[candidate_backend]
+        for candidate_backend, encoder_name in _iter_codec_candidates(codec):
             if encoder_name in available_encoders:
                 return _encoder_info(codec, candidate_backend, encoder_name, ffmpeg_path)
         raise RuntimeError(f"No available {codec.value} encoder was found in the current FFmpeg build.")
 
-    encoder_name = backend_map[backend]
+    encoder_name = backend_map.get(backend)
+    if encoder_name is None:
+        raise RuntimeError(
+            f"Backend {backend.value} does not support codec {codec.value}."
+        )
     if runtime_candidates is not None:
         if runtime_candidates.get(backend) == encoder_name:
             return _encoder_info(codec, backend, encoder_name, ffmpeg_path)

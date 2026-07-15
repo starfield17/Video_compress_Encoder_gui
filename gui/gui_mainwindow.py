@@ -40,13 +40,19 @@ from core.models import (
     BackendChoice,
     CodecChoice,
     ContainerChoice,
+    DecodeAcceleration,
     EncodeOptions,
     PreviewOptions,
     PreviewSampleMode,
     VideoFileItem,
 )
 from core.discover_ffmpeg import discover_ffmpeg_tools
-from core.encoder_caps import list_available_encoders, preset_choices_for_encoder, resolve_encoder
+from core.encoder_caps import (
+    ENCODER_CANDIDATES,
+    list_available_encoders,
+    preset_choices_for_encoder,
+    resolve_encoder,
+)
 from core.preset_store import delete_preset, list_presets, load_app_config, load_preset, save_preset, update_app_config
 from gui.activity_log_window import ActivityLogWindow
 from gui.gui_workers import EncoderCapabilityDetectWorker, PlanWorker, PreviewWorker
@@ -64,6 +70,7 @@ EXPLICIT_BACKEND_ORDER: tuple[BackendChoice, ...] = (
     BackendChoice.NVENC,
     BackendChoice.QSV,
     BackendChoice.AMF,
+    BackendChoice.VIDEOTOOLBOX,
     BackendChoice.CPU,
 )
 
@@ -85,6 +92,7 @@ class MainWindow(QMainWindow):
         self._encoder_capabilities_ready = False
         self._startup_encoder_detection_started = False
         self._pending_encoder_detection_force_refresh = False
+        self._pending_backend: BackendChoice | None = None
         self.queue_busy = False
         self._header_sync_guard = False
         self._queue_state = "idle"
@@ -415,6 +423,7 @@ class MainWindow(QMainWindow):
         self.parallel_check.toggled.connect(self._sync_dependent_controls)
         self.codec_combo.currentIndexChanged.connect(self._on_codec_changed)
         self.backend_combo.currentIndexChanged.connect(self._refresh_encoder_preset_choices)
+        self.decode_acceleration_combo.currentIndexChanged.connect(self._sync_dependent_controls)
         self.source_combo.editTextChanged.connect(self._persist_runtime_state)
         self.output_edit.editingFinished.connect(self._persist_runtime_state)
         self.preset_combo.currentIndexChanged.connect(self._preset_combo_changed)
@@ -473,6 +482,7 @@ class MainWindow(QMainWindow):
         self.parallel_nvenc_check = QCheckBox("NVENC")
         self.parallel_qsv_check = QCheckBox("QSV")
         self.parallel_amf_check = QCheckBox("AMF")
+        self.parallel_videotoolbox_check = QCheckBox("VideoToolbox")
         self.parallel_cpu_check = QCheckBox("CPU")
 
         layout.addWidget(self.codec_label, 0, 0)
@@ -490,7 +500,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.parallel_nvenc_check, 3, 1)
         layout.addWidget(self.parallel_qsv_check, 3, 2)
         layout.addWidget(self.parallel_amf_check, 3, 3)
-        layout.addWidget(self.parallel_cpu_check, 3, 4)
+        layout.addWidget(self.parallel_videotoolbox_check, 3, 4)
+        layout.addWidget(self.parallel_cpu_check, 3, 5)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
         layout.setColumnStretch(5, 1)
@@ -507,6 +518,11 @@ class MainWindow(QMainWindow):
 
         self.encoder_preset_label = QLabel()
         self.encoder_preset_combo = QComboBox()
+
+        self.decode_acceleration_label = QLabel()
+        self.decode_acceleration_combo = QComboBox()
+        self.decode_acceleration_combo.addItem("", DecodeAcceleration.SOFTWARE.value)
+        self.decode_acceleration_combo.addItem("", DecodeAcceleration.VIDEOTOOLBOX.value)
 
         self.pix_fmt_label = QLabel()
         self.pix_fmt_edit = QLineEdit()
@@ -539,17 +555,19 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.encoder_preset_label, 0, 0)
         layout.addWidget(self.encoder_preset_combo, 0, 1)
-        layout.addWidget(self.pix_fmt_label, 0, 2)
-        layout.addWidget(self.pix_fmt_edit, 0, 3)
-        layout.addWidget(self.min_bitrate_label, 1, 0)
-        layout.addWidget(self.min_bitrate_spin, 1, 1)
-        layout.addWidget(self.max_bitrate_label, 1, 2)
-        layout.addWidget(self.max_bitrate_spin, 1, 3)
-        layout.addWidget(self.maxrate_factor_label, 2, 0)
-        layout.addWidget(self.maxrate_factor_spin, 2, 1)
-        layout.addWidget(self.bufsize_factor_label, 2, 2)
-        layout.addWidget(self.bufsize_factor_spin, 2, 3)
-        layout.addWidget(self.two_pass_check, 3, 0, 1, 2)
+        layout.addWidget(self.decode_acceleration_label, 0, 2)
+        layout.addWidget(self.decode_acceleration_combo, 0, 3)
+        layout.addWidget(self.pix_fmt_label, 1, 0)
+        layout.addWidget(self.pix_fmt_edit, 1, 1)
+        layout.addWidget(self.min_bitrate_label, 1, 2)
+        layout.addWidget(self.min_bitrate_spin, 1, 3)
+        layout.addWidget(self.max_bitrate_label, 2, 0)
+        layout.addWidget(self.max_bitrate_spin, 2, 1)
+        layout.addWidget(self.maxrate_factor_label, 2, 2)
+        layout.addWidget(self.maxrate_factor_spin, 2, 3)
+        layout.addWidget(self.bufsize_factor_label, 3, 0)
+        layout.addWidget(self.bufsize_factor_spin, 3, 1)
+        layout.addWidget(self.two_pass_check, 3, 2, 1, 2)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
 
@@ -692,7 +710,17 @@ class MainWindow(QMainWindow):
         self.recursive_check.setText(self.tr.t("gui.checkbox.recursive"))
         self.parallel_check.setText(self.tr.t("gui.checkbox.parallel_enabled"))
         self.parallel_backends_label.setText(self.tr.t("gui.label.parallel_backends"))
+        self.parallel_videotoolbox_check.setText(self.tr.t("gui.value.backend_videotoolbox"))
         self.encoder_preset_label.setText(self.tr.t("gui.label.encoder_preset"))
+        self.decode_acceleration_label.setText(self.tr.t("gui.label.decode_acceleration"))
+        self.decode_acceleration_combo.setItemText(
+            self.decode_acceleration_combo.findData(DecodeAcceleration.SOFTWARE.value),
+            self.tr.t("gui.value.decode_software"),
+        )
+        self.decode_acceleration_combo.setItemText(
+            self.decode_acceleration_combo.findData(DecodeAcceleration.VIDEOTOOLBOX.value),
+            self.tr.t("gui.value.decode_videotoolbox"),
+        )
         self.pix_fmt_label.setText(self.tr.t("gui.label.pix_fmt"))
         self.min_bitrate_label.setText(self.tr.t("gui.label.min_video_kbps"))
         self.max_bitrate_label.setText(self.tr.t("gui.label.max_video_kbps"))
@@ -769,6 +797,12 @@ class MainWindow(QMainWindow):
                     if backend and encoder:
                         labels.append(f"{encoder} ({backend})")
             parts.append(f"{codec.value}: {', '.join(labels) if labels else self.tr.t('gui.label.none')}")
+        hwaccels = capabilities.get("hwaccels", [])
+        if isinstance(hwaccels, list) and hwaccels:
+            parts.append(
+                f"{self.tr.t('gui.label.decode_hwaccels')}: "
+                f"{', '.join(str(item) for item in hwaccels)}"
+            )
         return "; ".join(parts)
 
     def _start_encoder_capability_detection(self, *, force_refresh: bool) -> None:
@@ -795,7 +829,13 @@ class MainWindow(QMainWindow):
     def _on_encoder_capability_detection_completed(self, capabilities: dict) -> None:
         self.app_config["encoder_capabilities"] = capabilities
         self._encoder_capabilities_ready = True
-        self._rebuild_backend_controls()
+        pending_backend = self._pending_backend
+        self._pending_backend = None
+        self._rebuild_backend_controls(
+            preferred_backend=pending_backend,
+            log_reset=pending_backend is not None,
+        )
+        self._refresh_decode_acceleration_choices(log_reset=True)
         self._append_log(
             self.tr.t(
                 "gui.log.encoder_detection_done",
@@ -806,7 +846,10 @@ class MainWindow(QMainWindow):
 
     def _on_encoder_capability_detection_failed(self, message: str) -> None:
         self._encoder_capabilities_ready = False
+        self._pending_backend = None
         self._rebuild_backend_controls()
+        self._pending_backend = None
+        self._refresh_decode_acceleration_choices(log_reset=True, force_unavailable=True)
         self._append_log(self.tr.t("gui.log.encoder_detection_failed", error=message))
 
     def _on_encoder_capability_detection_finished(self) -> None:
@@ -995,6 +1038,10 @@ class MainWindow(QMainWindow):
             copy_subtitles=self.copy_subtitles_check.isChecked(),
             copy_external_subtitles=self.copy_external_subtitles_check.isChecked(),
             two_pass=self.two_pass_check.isChecked(),
+            decode_acceleration=DecodeAcceleration(
+                self.decode_acceleration_combo.currentData()
+                or self.decode_acceleration_combo.currentText()
+            ),
             encoder_preset=encoder_preset,
             pix_fmt=pix_fmt,
             maxrate_factor=float(self.maxrate_factor_spin.value()),
@@ -1006,6 +1053,10 @@ class MainWindow(QMainWindow):
     def _apply_options(self, options: EncodeOptions) -> None:
         self.codec_combo.setCurrentText(options.codec.value)
         self._rebuild_backend_controls(preferred_backend=options.backend, log_reset=options.backend != BackendChoice.AUTO)
+        self._refresh_decode_acceleration_choices(
+            preferred=options.decode_acceleration,
+            log_reset=options.decode_acceleration != DecodeAcceleration.SOFTWARE,
+        )
         self.parallel_check.setChecked(options.parallel_enabled)
         selected = set(options.parallel_backends)
         for checkbox, backend in self._parallel_backend_widgets():
@@ -1056,6 +1107,7 @@ class MainWindow(QMainWindow):
             (self.parallel_nvenc_check, BackendChoice.NVENC),
             (self.parallel_qsv_check, BackendChoice.QSV),
             (self.parallel_amf_check, BackendChoice.AMF),
+            (self.parallel_videotoolbox_check, BackendChoice.VIDEOTOOLBOX),
             (self.parallel_cpu_check, BackendChoice.CPU),
         ]
 
@@ -1066,7 +1118,59 @@ class MainWindow(QMainWindow):
         capabilities = self.app_config.get("encoder_capabilities")
         return capabilities if self._encoder_capabilities_ready and isinstance(capabilities, dict) else None
 
+    def _refresh_decode_acceleration_choices(
+        self,
+        *,
+        preferred=_PRESET_UNSET,
+        log_reset: bool = False,
+        force_unavailable: bool = False,
+    ) -> None:
+        current_value = self.decode_acceleration_combo.currentData()
+        desired_value = current_value if preferred is self._PRESET_UNSET else preferred
+        try:
+            desired = DecodeAcceleration(desired_value)
+        except ValueError:
+            desired = DecodeAcceleration.SOFTWARE
+
+        capabilities = self._runtime_capabilities()
+        runtime_known = capabilities is not None or force_unavailable
+        hwaccels = capabilities.get("hwaccels", []) if capabilities is not None else []
+        videotoolbox_available = (
+            not force_unavailable
+            and isinstance(hwaccels, list)
+            and "videotoolbox" in {str(item).strip().lower() for item in hwaccels}
+        )
+
+        videotoolbox_index = self.decode_acceleration_combo.findData(DecodeAcceleration.VIDEOTOOLBOX.value)
+        model = self.decode_acceleration_combo.model()
+        item_getter = getattr(model, "item", None)
+        if videotoolbox_index >= 0 and callable(item_getter):
+            item = item_getter(videotoolbox_index)
+            if item is not None:
+                item.setEnabled(videotoolbox_available)
+        if runtime_known and not videotoolbox_available:
+            self.decode_acceleration_combo.setToolTip(
+                self.tr.t("gui.tooltip.decode_acceleration_unavailable")
+            )
+        else:
+            self.decode_acceleration_combo.setToolTip("")
+
+        if desired == DecodeAcceleration.VIDEOTOOLBOX and runtime_known and not videotoolbox_available:
+            desired = DecodeAcceleration.SOFTWARE
+            if log_reset:
+                self._append_log(self.tr.t("gui.log.decode_acceleration_reset"))
+
+        selected_index = self.decode_acceleration_combo.findData(desired.value)
+        if selected_index < 0:
+            selected_index = self.decode_acceleration_combo.findData(DecodeAcceleration.SOFTWARE.value)
+        if selected_index >= 0:
+            self.decode_acceleration_combo.blockSignals(True)
+            self.decode_acceleration_combo.setCurrentIndex(selected_index)
+            self.decode_acceleration_combo.blockSignals(False)
+
     def _capability_has_backend(self, codec: CodecChoice, backend: BackendChoice) -> bool:
+        if backend not in ENCODER_CANDIDATES[codec]:
+            return False
         capabilities = self._runtime_capabilities()
         if capabilities is None:
             return backend == BackendChoice.CPU
@@ -1107,14 +1211,20 @@ class MainWindow(QMainWindow):
             selected_backend = desired_backend
         else:
             selected_backend = BackendChoice.AUTO
+            if self._runtime_capabilities() is None and desired_backend == BackendChoice.VIDEOTOOLBOX:
+                self._pending_backend = desired_backend
             if log_reset and desired_backend != BackendChoice.AUTO:
-                self._append_log(
-                    self.tr.t(
-                        "gui.log.backend_reset",
-                        backend=desired_backend.value,
-                        fallback=selected_backend.value,
+                if not (
+                    self._runtime_capabilities() is None
+                    and desired_backend == BackendChoice.VIDEOTOOLBOX
+                ):
+                    self._append_log(
+                        self.tr.t(
+                            "gui.log.backend_reset",
+                            backend=desired_backend.value,
+                            fallback=selected_backend.value,
+                        )
                     )
-                )
 
         self.backend_combo.blockSignals(True)
         self.backend_combo.clear()
