@@ -17,6 +17,12 @@ class BackendChoice(str, Enum):
     NVENC = "nvenc"
     QSV = "qsv"
     AMF = "amf"
+    VIDEOTOOLBOX = "videotoolbox"
+
+
+class DecodeAcceleration(str, Enum):
+    SOFTWARE = "software"
+    VIDEOTOOLBOX = "videotoolbox"
 
 
 class AudioMode(str, Enum):
@@ -62,6 +68,7 @@ class MediaInfo:
 class EncodeOptions:
     codec: CodecChoice = CodecChoice.HEVC
     backend: BackendChoice = BackendChoice.AUTO
+    decode_acceleration: DecodeAcceleration = DecodeAcceleration.SOFTWARE
     parallel_enabled: bool = False
     # Explicit backends used when parallel mode fans work out across encoders.
     parallel_backends: tuple[BackendChoice, ...] = ()

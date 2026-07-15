@@ -26,16 +26,37 @@ jobs:
         include:
           - os: windows-2022
             target: windows-x86_64
-            archive_extension: zip
+            architecture: x64
+            package_kind: standalone
+            windows_compiler: mingw64
+
+          - os: windows-11-arm
+            target: windows-arm64
+            architecture: arm64
+            package_kind: standalone
+            windows_compiler: clang
+
           - os: ubuntu-22.04
             target: linux-x86_64
-            archive_extension: tar.gz
+            architecture: x64
+            package_kind: standalone
+
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+            architecture: arm64
+            package_kind: standalone
+
           - os: macos-15-intel
             target: macos-x86_64
-            archive_extension: tar.gz
+            architecture: x64
+            target_arch: x86_64
+            package_kind: macos-app
+
           - os: macos-15
             target: macos-arm64
-            archive_extension: tar.gz
+            architecture: arm64
+            target_arch: arm64
+            package_kind: macos-app
     steps:
       - name: Check out tagged commit
         uses: actions/checkout@v7
@@ -46,6 +67,7 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          architecture: ${{ matrix.architecture }}
           cache: pip
           cache-dependency-path: requirements-build.txt
 
@@ -63,6 +85,9 @@ jobs:
       - name: Install build dependencies
         run: python -m pip install -r requirements-build.txt
 
+      - name: Diagnose packaging interpreter
+        run: python -c "import platform, PySide6; print(platform.platform()); print(platform.machine()); print(PySide6.__version__)"
+
       - name: Run unit tests
         run: python -m unittest discover -s test -p "test_*.py" -v
 
@@ -73,47 +98,111 @@ jobs:
           release_version="${GITHUB_REF_NAME#v}"
           echo "version=${release_version}" >> "$GITHUB_OUTPUT"
 
-      - name: Build standalone package
+      - name: Build Windows standalone package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python .\scripts\build_nuitka.py `
+            --clean `
+            --version "$env:RELEASE_VERSION" `
+            --windows-compiler "${{ matrix.windows_compiler }}"
+
+      - name: Build Linux standalone package
+        if: runner.os == 'Linux'
         shell: bash
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
-        run: python scripts/build_nuitka.py --clean --version "$RELEASE_VERSION"
+        run: |
+          python scripts/build_nuitka.py \
+            --clean \
+            --version "$RELEASE_VERSION"
+
+      - name: Build macOS app bundle
+        if: runner.os == 'macOS' && matrix.package_kind == 'macos-app'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python scripts/build_nuitka.py \
+            --clean \
+            --version "$RELEASE_VERSION" \
+            --macos-app-bundle \
+            --target-arch "${{ matrix.target_arch }}"
 
       - name: Smoke test packaged executable on Windows
-        if: matrix.os == 'windows-2022'
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & ".\dist\video-compressor\video-compressor.exe" --cli --help
+          $executable = ".\dist\video-compressor\video-compressor.exe"
+          if (-not (Test-Path $executable)) {
+              throw "Packaged executable not found: $executable"
+          }
+          & $executable --cli --help
           if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
           }
 
-      - name: Smoke test packaged executable on Unix
-        if: matrix.os != 'windows-2022'
+      - name: Smoke test packaged executable on Linux
+        if: runner.os == 'Linux'
         shell: bash
         run: |
+          test -f dist/video-compressor/video-compressor
           chmod +x dist/video-compressor/video-compressor
           ./dist/video-compressor/video-compressor --cli --help
 
+      - name: Smoke test macOS app bundle and DMG
+        if: runner.os == 'macOS' && matrix.package_kind == 'macos-app'
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.target_arch }}
+        run: |
+          app="dist/Video Compressor.app"
+          executable="$app/Contents/MacOS/video-compressor"
+          dmg="dist/video-compressor.dmg"
+          test -d "$app"
+          test -f "$app/Contents/Info.plist"
+          test -x "$executable"
+          "$executable" --cli --help
+          codesign --verify --deep --strict "$app"
+          file "$executable"
+          archs="$(lipo -archs "$executable")"
+          if [[ "$archs" != "$TARGET_ARCH" ]]; then
+              printf 'Expected native %s executable, found %s\n' "$TARGET_ARCH" "$archs" >&2
+              exit 1
+          fi
+          test -f "$dmg"
+          hdiutil verify "$dmg"
+
       - name: Archive Windows package
-        if: matrix.os == 'windows-2022'
-        shell: bash
-        env:
-          ARCHIVE_NAME: video-compressor-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_extension }}
-        run: 7z a -tzip "$ARCHIVE_NAME" "dist/video-compressor"
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = "video-compressor-$env:GITHUB_REF_NAME-${{ matrix.target }}.zip"
+          7z a -tzip $archive ".\dist\video-compressor"
 
-      - name: Archive Unix package
-        if: matrix.os != 'windows-2022'
+      - name: Archive Linux package
+        if: runner.os == 'Linux'
         shell: bash
-        env:
-          ARCHIVE_NAME: video-compressor-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_extension }}
-        run: tar -czf "$ARCHIVE_NAME" -C dist video-compressor
+        run: |
+          tar -czf "video-compressor-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" \
+            -C dist video-compressor
 
-      - name: Upload release package
+      - name: Archive macOS app bundle
+        if: runner.os == 'macOS' && matrix.package_kind == 'macos-app'
+        shell: bash
+        run: |
+          tar -czf "video-compressor-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" \
+            -C dist "Video Compressor.app"
+          cp "dist/video-compressor.dmg" \
+            "video-compressor-${GITHUB_REF_NAME}-${{ matrix.target }}.dmg"
+
+      - name: Upload release packages
         uses: actions/upload-artifact@v7
         with:
           name: release-package-${{ matrix.target }}
-          path: video-compressor-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_extension }}
+          path: video-compressor-${{ github.ref_name }}-${{ matrix.target }}.*
           include-hidden-files: true
           if-no-files-found: error
 
@@ -141,18 +230,68 @@ jobs:
           path: packages
           merge-multiple: true
 
-      - name: Generate checksums
+      - name: Validate release packages and generate checksums
         shell: bash
         run: |
           shopt -s nullglob
-          archives=(packages/*.zip packages/*.tar.gz)
-          if [[ "${#archives[@]}" -ne 4 ]]; then
-              echo "Expected four release archives, found ${#archives[@]}" >&2
+          archives=(
+            packages/*.zip
+            packages/*.tar.gz
+            packages/*.dmg
+          )
+
+          if [[ "${#archives[@]}" -ne 8 ]]; then
+              printf 'Expected 8 release packages, found %s\n' \
+                "${#archives[@]}" >&2
+              printf '%s\n' "${archives[@]}" >&2
               exit 1
           fi
+
+          release="$GITHUB_REF_NAME"
+          expected=(
+            "video-compressor-${release}-windows-x86_64.zip"
+            "video-compressor-${release}-windows-arm64.zip"
+            "video-compressor-${release}-linux-x86_64.tar.gz"
+            "video-compressor-${release}-linux-arm64.tar.gz"
+            "video-compressor-${release}-macos-x86_64.tar.gz"
+            "video-compressor-${release}-macos-arm64.tar.gz"
+            "video-compressor-${release}-macos-x86_64.dmg"
+            "video-compressor-${release}-macos-arm64.dmg"
+          )
+
+          declare -A expected_set=()
+          for name in "${expected[@]}"; do
+              expected_set["$name"]=1
+          done
+
+          declare -A seen_names=()
+          for archive in "${archives[@]}"; do
+              name="$(basename "$archive")"
+              if [[ -n "${seen_names[$name]+x}" ]]; then
+                  printf 'Duplicate package filename: %s\n' "$name" >&2
+                  exit 1
+              fi
+              seen_names["$name"]=1
+              if [[ -z "${expected_set[$name]+x}" ]]; then
+                  printf 'Unexpected package filename: %s\n' "$name" >&2
+                  exit 1
+              fi
+              if [[ ! -s "$archive" ]]; then
+                  printf 'Empty package: %s\n' "$archive" >&2
+                  exit 1
+              fi
+          done
+
+          for name in "${expected[@]}"; do
+              if [[ ! -s "packages/$name" ]]; then
+                  printf 'Missing expected package: %s\n' "$name" >&2
+                  exit 1
+              fi
+          done
+
           (
-              cd packages
-              sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+            cd packages
+            sha256sum *.zip *.tar.gz *.dmg > SHA256SUMS.txt
           )
 
       - name: Create or update GitHub Release
@@ -163,5 +302,8 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               gh release upload "$GITHUB_REF_NAME" packages/* --clobber --repo "$GITHUB_REPOSITORY"
           else
-              gh release create "$GITHUB_REF_NAME" packages/* --generate-notes --title "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+              gh release create "$GITHUB_REF_NAME" packages/* \
+                --generate-notes \
+                --title "$GITHUB_REF_NAME" \
+                --repo "$GITHUB_REPOSITORY"
           fi

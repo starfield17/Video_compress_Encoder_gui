@@ -18,6 +18,7 @@ from core.models import (
     BackendChoice,
     CodecChoice,
     ContainerChoice,
+    DecodeAcceleration,
     EncodeOptions,
     PreviewOptions,
     PreviewSampleMode,
@@ -71,6 +72,7 @@ def _merge_options(base: EncodeOptions, args: argparse.Namespace) -> EncodeOptio
     scalar_map = {
         "codec": lambda value: CodecChoice(value),
         "backend": lambda value: BackendChoice(value),
+        "decode_acceleration": lambda value: DecodeAcceleration(value),
         "ratio": float,
         "min_video_kbps": int,
         "max_video_kbps": int,
@@ -136,7 +138,17 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, include_input: bool = Tr
 
 def _add_encode_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--codec", choices=["hevc", "av1"], help="Target codec")
-    parser.add_argument("--backend", choices=["auto", "cpu", "nvenc", "qsv", "amf"], help="Encoder backend")
+    parser.add_argument(
+        "--backend",
+        choices=[backend.value for backend in BackendChoice],
+        help="Encoder backend",
+    )
+    parser.add_argument(
+        "--decode-acceleration",
+        dest="decode_acceleration",
+        choices=[acceleration.value for acceleration in DecodeAcceleration],
+        help="Video decoding acceleration method",
+    )
     parser.add_argument("--parallel", action="store_true", help="Enable queue-level parallel transcoding")
     parser.add_argument("--parallel-backends", dest="parallel_backends", help="Comma-separated explicit backends")
     parser.add_argument("--ratio", type=float, help="Target video bitrate ratio")

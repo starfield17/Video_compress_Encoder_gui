@@ -3,13 +3,21 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.build_nuitka import (
     build_nuitka_command,
     build_paths,
+    clean_generated_paths,
     final_package_dir,
     find_ffmpeg_pair,
+    locate_app_bundle,
+    locate_dmg,
     normalize_version,
+    normalized_machine,
+    patch_nuitka_windows_arm64_clang_probe,
+    resolve_macos_target_arch,
+    resolve_windows_compiler,
     stage_release_resources,
 )
 
@@ -41,6 +49,7 @@ class NuitkaBuildCommandTestCase(unittest.TestCase):
                 "1.2.3",
                 root=root,
                 platform_name="win32",
+                machine="x86_64",
             )
 
             self.assertIn("--mingw64", command)
@@ -64,6 +73,32 @@ class NuitkaBuildCommandTestCase(unittest.TestCase):
         self.assertIn("--msvc=latest", command)
         self.assertNotIn("--mingw64", command)
 
+    def test_windows_command_can_select_clang_without_conflicting_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            command = build_nuitka_command(
+                "1.2.3",
+                root=Path(temp_dir).resolve(),
+                platform_name="win32",
+                windows_compiler="clang",
+                machine="arm64",
+            )
+
+        self.assertIn("--clang", command)
+        self.assertNotIn("--mingw64", command)
+        self.assertNotIn("--msvc=latest", command)
+
+    def test_windows_compiler_auto_resolves_by_native_machine(self) -> None:
+        self.assertEqual(normalized_machine("AMD64"), "x86_64")
+        self.assertEqual(normalized_machine("x86_64"), "x86_64")
+        self.assertEqual(normalized_machine("ARM64"), "arm64")
+        self.assertEqual(normalized_machine("aarch64"), "arm64")
+        self.assertEqual(resolve_windows_compiler("auto", machine="AMD64"), "mingw64")
+        self.assertEqual(resolve_windows_compiler("auto", machine="x86_64"), "mingw64")
+        self.assertEqual(resolve_windows_compiler("auto", machine="ARM64"), "clang")
+        self.assertEqual(resolve_windows_compiler("auto", machine="aarch64"), "clang")
+        self.assertEqual(resolve_windows_compiler("msvc", machine="arm64"), "msvc")
+        self.assertEqual(resolve_windows_compiler("clang", machine="x86_64"), "clang")
+
     def test_windows_command_rejects_unknown_compiler(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(ValueError, "Unsupported Windows compiler"):
@@ -73,6 +108,102 @@ class NuitkaBuildCommandTestCase(unittest.TestCase):
                     platform_name="win32",
                     windows_compiler="unknown",
                 )
+
+    def test_patches_pinned_nuitka_arm64_clang_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            nuitka_root = Path(temp_dir)
+            probe_path = nuitka_root / "build" / "SconsUtils.py"
+            probe_path.parent.mkdir()
+            probe_path.write_text(
+                'elif b"ARM64" in process_result.stderr:\n',
+                encoding="utf-8",
+            )
+
+            self.assertTrue(
+                patch_nuitka_windows_arm64_clang_probe(
+                    platform_name="win32",
+                    machine="aarch64",
+                    nuitka_root=nuitka_root,
+                )
+            )
+            self.assertIn(
+                'b"aarch64" in process_result.stdout',
+                probe_path.read_text(encoding="utf-8"),
+            )
+            self.assertFalse(
+                patch_nuitka_windows_arm64_clang_probe(
+                    platform_name="win32",
+                    machine="arm64",
+                    nuitka_root=nuitka_root,
+                )
+            )
+
+    def test_does_not_patch_nuitka_probe_on_other_platforms(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            nuitka_root = Path(temp_dir)
+            probe_path = nuitka_root / "build" / "SconsUtils.py"
+            probe_path.parent.mkdir()
+            original = 'elif b"ARM64" in process_result.stderr:\n'
+            probe_path.write_text(original, encoding="utf-8")
+
+            self.assertFalse(
+                patch_nuitka_windows_arm64_clang_probe(
+                    platform_name="darwin",
+                    machine="arm64",
+                    nuitka_root=nuitka_root,
+                )
+            )
+            self.assertEqual(probe_path.read_text(encoding="utf-8"), original)
+
+    def test_macos_app_command_and_paths_are_native(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            command = build_nuitka_command(
+                "1.2.3",
+                root=root,
+                platform_name="darwin",
+                macos_app_bundle=True,
+                target_arch="arm64",
+                machine="arm64",
+            )
+            paths = build_paths(
+                root=root,
+                platform_name="darwin",
+                macos_app_bundle=True,
+                target_arch="arm64",
+                machine="arm64",
+            )
+
+        self.assertIn("--mode=app-dist", command)
+        self.assertNotIn("--mode=standalone", command)
+        self.assertIn("--macos-app-name=Video Compressor", command)
+        self.assertIn("--macos-app-mode=gui", command)
+        self.assertIn("--macos-app-version=1.2.3", command)
+        self.assertIn("--macos-target-arch=arm64", command)
+        self.assertIn("--macos-app-create-dmg", command)
+        self.assertEqual(paths.package_dir, root / "dist" / "Video Compressor.app")
+        self.assertEqual(
+            paths.executable_path,
+            root / "dist" / "Video Compressor.app" / "Contents" / "MacOS" / "video-compressor",
+        )
+        self.assertEqual(paths.resources_dir, paths.package_dir / "Contents" / "Resources")
+        self.assertEqual(paths.dmg_path, root / "dist" / "video-compressor.dmg")
+        self.assertEqual(paths.target_arch, "arm64")
+
+    def test_macos_app_build_rejects_non_macos_platform_and_cross_architecture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            with self.assertRaisesRegex(ValueError, "only supported on macOS"):
+                build_nuitka_command(
+                    "1.2.3",
+                    root=root,
+                    platform_name="linux",
+                    macos_app_bundle=True,
+                    target_arch="arm64",
+                    machine="arm64",
+                )
+            with self.assertRaisesRegex(ValueError, "native runner architecture"):
+                resolve_macos_target_arch("x86_64", machine="arm64")
 
 
 class NuitkaVersionTestCase(unittest.TestCase):
@@ -143,6 +274,28 @@ class NuitkaStagingTestCase(unittest.TestCase):
 
             self.assertFalse((package_dir / "FFmpeg").exists())
 
+    def test_app_staging_skips_ffmpeg_with_wrong_architecture(self) -> None:
+        temp_dir, root, _ = self._make_root()
+        with temp_dir:
+            (root / "FFmpeg").mkdir()
+            (root / "FFmpeg" / "ffmpeg").write_text("ffmpeg", encoding="utf-8")
+            (root / "FFmpeg" / "ffprobe").write_text("ffprobe", encoding="utf-8")
+            app_dir = root / "dist" / "Video Compressor.app"
+            resource_dir = app_dir / "Contents" / "Resources"
+            with patch(
+                "scripts.build_nuitka.binary_architectures",
+                return_value={"x86_64"},
+            ):
+                stage_release_resources(
+                    app_dir,
+                    root=root,
+                    platform_name="darwin",
+                    resource_dir=resource_dir,
+                    target_arch="arm64",
+                )
+
+            self.assertFalse((resource_dir / "FFmpeg").exists())
+
     def test_default_public_package_directory_is_normalized(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
@@ -156,6 +309,63 @@ class NuitkaStagingTestCase(unittest.TestCase):
                 build_paths(root=root).package_dir,
                 expected,
             )
+
+    def test_app_staging_uses_contents_resources(self) -> None:
+        temp_dir, root, _ = self._make_root()
+        with temp_dir:
+            app_dir = root / "dist" / "Video Compressor.app"
+            app_dir.mkdir(parents=True)
+            stage_release_resources(
+                app_dir,
+                root=root,
+                platform_name="darwin",
+                resource_dir=app_dir / "Contents" / "Resources",
+                target_arch="arm64",
+            )
+
+            self.assertTrue(
+                (app_dir / "Contents" / "Resources" / "config" / "i18n" / "en.json").is_file()
+            )
+            self.assertTrue((app_dir / "Contents" / "Resources" / "README.md").is_file())
+            self.assertFalse((app_dir / "Contents" / "MacOS" / "config").exists())
+
+
+class NuitkaOutputDiscoveryTestCase(unittest.TestCase):
+    def test_app_and_dmg_discovery_requires_exactly_one_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            build_dir = Path(temp_dir) / "build"
+            build_dir.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "exactly one macOS app"):
+                locate_app_bundle(build_dir)
+            app = build_dir / "Video Compressor.app"
+            app.mkdir()
+            self.assertEqual(locate_app_bundle(build_dir), app.resolve())
+            (build_dir / "Other.app").mkdir()
+            with self.assertRaisesRegex(RuntimeError, "exactly one macOS app"):
+                locate_app_bundle(build_dir)
+
+            dmg = build_dir / "Video Compressor.dmg"
+            dmg.write_bytes(b"dmg")
+            self.assertEqual(locate_dmg(build_dir), dmg.resolve())
+            (build_dir / "Other.dmg").write_bytes(b"dmg")
+            with self.assertRaisesRegex(RuntimeError, "exactly one macOS DMG"):
+                locate_dmg(build_dir)
+
+    def test_clean_removes_app_and_dmg_without_removing_other_dist_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            dist = root / "dist"
+            app = dist / "Video Compressor.app"
+            app.mkdir(parents=True)
+            (dist / "video-compressor.dmg").write_bytes(b"dmg")
+            keep = dist / "keep.txt"
+            keep.write_text("keep", encoding="utf-8")
+
+            clean_generated_paths(root, app, output_dir=dist)
+
+            self.assertFalse(app.exists())
+            self.assertFalse((dist / "video-compressor.dmg").exists())
+            self.assertTrue(keep.is_file())
 
 
 if __name__ == "__main__":

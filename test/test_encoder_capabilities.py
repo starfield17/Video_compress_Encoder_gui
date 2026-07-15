@@ -13,12 +13,17 @@ from core.encoder_capability_cache import (
     is_encoder_capability_cache_valid,
     smoke_test_encoder,
 )
-from core.encoder_caps import _run_encoder_help, list_available_encoders, resolve_encoder
+from core.encoder_caps import (
+    _run_encoder_help,
+    list_available_encoders,
+    resolve_encoder,
+)
 from core.models import BackendChoice, CodecChoice
 
 
 def _capabilities(hevc: list[tuple[BackendChoice, str]], av1: list[tuple[BackendChoice, str]] | None = None) -> dict:
     return {
+        "hwaccels": [],
         "codecs": {
             "hevc": [{"backend": backend.value, "encoder": encoder_name} for backend, encoder_name in hevc],
             "av1": [{"backend": backend.value, "encoder": encoder_name} for backend, encoder_name in (av1 or [])],
@@ -32,6 +37,7 @@ def _cache_payload(ffmpeg_path: Path, **overrides) -> dict:
         "ffmpeg_path": str(ffmpeg_path.expanduser().resolve()),
         "ffmpeg_mtime_ns": 123,
         "ffmpeg_version": "ffmpeg version test",
+        "hwaccels": [],
         "codecs": {"hevc": [], "av1": []},
     }
     payload.update(overrides)
@@ -150,6 +156,7 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
             capabilities = detect_encoder_capabilities(
                 Path("ffmpeg"),
                 available_encoders={"hevc_nvenc", "hevc_qsv", "libx265", "libsvtav1"},
+                available_hwaccels=set(),
             )
 
         self.assertEqual(

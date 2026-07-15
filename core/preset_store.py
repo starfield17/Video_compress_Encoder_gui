@@ -12,6 +12,7 @@ from core.models import (
     BackendChoice,
     CodecChoice,
     ContainerChoice,
+    DecodeAcceleration,
     EncodeOptions,
 )
 
@@ -44,6 +45,7 @@ def encode_options_to_preset_data(options: EncodeOptions) -> dict[str, Any]:
     return {
         "codec": options.codec.value,
         "backend": options.backend.value,
+        "decode_acceleration": options.decode_acceleration.value,
         "parallel_enabled": options.parallel_enabled,
         "parallel_backends": [backend.value for backend in options.parallel_backends],
         "ratio": options.ratio,
@@ -71,10 +73,13 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
         data["parallel_enabled"] = False
     if "parallel_backends" not in data:
         data["parallel_backends"] = []
+    if "decode_acceleration" not in data:
+        data["decode_acceleration"] = DecodeAcceleration.SOFTWARE.value
 
     required = {
         "codec",
         "backend",
+        "decode_acceleration",
         "ratio",
         "min_video_kbps",
         "max_video_kbps",
@@ -96,6 +101,7 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
     # Constructing each enum validates the string value; raises ValueError on invalid input.
     CodecChoice(data["codec"])
     BackendChoice(data["backend"])
+    DecodeAcceleration(data["decode_acceleration"])
     for backend in data["parallel_backends"]:
         BackendChoice(backend)
     ContainerChoice(data["container"])
@@ -106,12 +112,13 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def preset_data_to_encode_options(data: dict[str, Any]) -> EncodeOptions:
-    validate_preset_schema(data)
+    data = validate_preset_schema(data)
     preset_value = data.get("preset")
     normalized_preset = str(preset_value).strip() if preset_value is not None else ""
     return EncodeOptions(
         codec=CodecChoice(data["codec"]),
         backend=BackendChoice(data["backend"]),
+        decode_acceleration=DecodeAcceleration(data["decode_acceleration"]),
         parallel_enabled=bool(data.get("parallel_enabled", False)),
         parallel_backends=tuple(BackendChoice(item) for item in data.get("parallel_backends", [])),
         ratio=None if data["ratio"] is None else float(data["ratio"]),

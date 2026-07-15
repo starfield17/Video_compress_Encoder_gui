@@ -34,8 +34,51 @@ python main.py --cli preset list
 ```
 
 Language can be selected with `--lang en` or `--lang zh_cn`.
-Supported backend values are `auto`, `cpu`, `nvenc`, `qsv`, and `amf`.
-When `auto` is selected, the planner prefers smoke-tested runtime encoders in this order: `nvenc`, `qsv`, `amf`, then `cpu`.
+Supported backend values are `auto`, `cpu`, `nvenc`, `qsv`, `amf`, and
+`videotoolbox`. When `auto` is selected, the planner prefers smoke-tested
+runtime encoders in this order: `nvenc`, `qsv`, `amf`, `videotoolbox`, then
+`cpu`.
+
+### macOS VideoToolbox acceleration
+
+On supported macOS FFmpeg builds, the project can use `hevc_videotoolbox` for
+HEVC hardware encoding and optionally request hardware decoding with
+`-hwaccel videotoolbox`. VideoToolbox support depends on the selected FFmpeg
+build. The project performs a real one-frame encoder smoke test, and uses
+`-allow_sw 0` so an unavailable hardware encoder cannot silently fall back to
+software. Hardware decoding is optional and defaults to software decoding.
+
+This version does not implement zero-copy hardware frames or
+`-hwaccel_output_format videotoolbox`, and VideoToolbox does not provide AV1
+support in this project.
+
+Parallel VideoToolbox encode/decode workers may contend for shared Apple media
+hardware; parallel mode is never enabled automatically.
+
+VideoToolbox CLI examples:
+
+```bash
+python main.py --cli encode input.mp4 \
+  --codec hevc \
+  --backend videotoolbox \
+  --overwrite
+```
+
+```bash
+python main.py --cli encode input.mp4 \
+  --codec hevc \
+  --backend videotoolbox \
+  --decode-acceleration videotoolbox \
+  --overwrite
+```
+
+Diagnostic commands:
+
+```bash
+ffmpeg -hide_banner -encoders | grep videotoolbox
+ffmpeg -hide_banner -hwaccels
+ffmpeg -hide_banner -h encoder=hevc_videotoolbox
+```
 
 ## GUI
 
@@ -121,6 +164,43 @@ MSVC mode requires Visual Studio 2022 C++ Build Tools or later. MinGW64
 packaging must use Python 3.12 or older; CI and Release currently use Python
 3.12.
 
+Windows ARM64 packaging is native and uses the LLVM/Clang backend:
+
+```powershell
+python scripts/build_nuitka.py `
+  --clean `
+  --windows-compiler clang
+```
+
+The wrapper's `auto` compiler choice selects Clang on ARM64 and MinGW64 on
+x86-64. It never cross-compiles a Windows ARM64 package from an x86 runner.
+
+Build a native macOS application bundle and DMG on the matching Mac:
+
+```bash
+python scripts/build_nuitka.py \
+  --clean \
+  --version 0.2.0 \
+  --macos-app-bundle \
+  --target-arch arm64
+```
+
+The app build uses Nuitka `app-dist` mode and produces:
+
+```text
+dist/Video Compressor.app/
+dist/video-compressor.dmg
+```
+
+The app's read-only resources are under `Contents/Resources`. Configuration,
+logs, previews, and temporary files are written to
+`~/Library/Application Support/Video Compressor`, outside the app bundle.
+The standalone package continues to use the executable-adjacent layout:
+
+```text
+dist/video-compressor/
+```
+
 Convenience scripts:
 
 ```bat
@@ -146,7 +226,37 @@ runtime and is not bundled. FFmpeg is included only when a complete compatible
 `ffmpeg`/`ffprobe` pair exists under `FFmpeg/`; otherwise the application
 continues to resolve an installed system FFmpeg.
 
-Tags such as `v1.2.3` trigger four-platform GitHub Releases for Windows
-x86-64, Linux x86-64, and macOS Intel and Apple Silicon. macOS output is
-currently a standalone directory archive rather than a signed or notarized
-`.app`.
+### Native release matrix
+
+A tag such as `v1.2.3` produces six native builds:
+
+| Target | Runner/package |
+| --- | --- |
+| Windows x86-64 | Native Windows x86-64 standalone package |
+| Windows ARM64 | Native Windows ARM64 standalone package |
+| Linux x86-64 | Native Ubuntu x86-64 standalone package |
+| Linux ARM64 | Native Ubuntu ARM64 standalone package |
+| macOS Intel | Native x86-64 `.app` bundle |
+| macOS Apple Silicon | Native arm64 `.app` bundle |
+
+Each tagged release publishes exactly eight platform packages:
+
+```text
+video-compressor-v1.2.3-windows-x86_64.zip
+video-compressor-v1.2.3-windows-arm64.zip
+video-compressor-v1.2.3-linux-x86_64.tar.gz
+video-compressor-v1.2.3-linux-arm64.tar.gz
+video-compressor-v1.2.3-macos-x86_64.tar.gz
+video-compressor-v1.2.3-macos-arm64.tar.gz
+video-compressor-v1.2.3-macos-x86_64.dmg
+video-compressor-v1.2.3-macos-arm64.dmg
+```
+
+The macOS tarballs and DMGs contain native `.app` bundles. Intel and Apple
+Silicon builds are separate native packages, not universal binaries merged
+with `lipo`. Releases are ad-hoc signed; they are not Developer ID signed or
+notarized, so Gatekeeper may require using **Open** or right-clicking the app
+and choosing **Open**. Linux ARM64 requires a sufficiently recent glibc
+distribution. Windows ARM64 is a native ARM package rather than an x86
+executable relying on emulation. FFmpeg, when bundled, must also match the
+operating system and CPU architecture.

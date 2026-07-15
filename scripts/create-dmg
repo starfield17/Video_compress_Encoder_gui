@@ -1,0 +1,40 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if [[ "$#" -lt 2 ]]; then
+    printf 'Usage: create-dmg [options] output.dmg source-folder\n' >&2
+    exit 2
+fi
+
+arguments=("$@")
+output_path="${arguments[$(( $# - 2 ))]}"
+source_path="${arguments[$(( $# - 1 ))]}"
+
+# Nuitka invokes create-dmg with the temporary standalone directory as the
+# source argument. In app-dist mode the normalized .app is its sibling.
+if [[ "$source_path" == *.dist && -d "${source_path%.dist}.app" ]]; then
+    source_path="${source_path%.dist}.app"
+fi
+
+if [[ ! -d "$source_path" ]]; then
+    printf 'DMG source directory not found: %s\n' "$source_path" >&2
+    exit 1
+fi
+
+temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/video-compressor-dmg.XXXXXXXX")"
+temporary_path="$temporary_dir/image.dmg"
+cleanup() {
+    rm -rf "$temporary_dir"
+}
+trap cleanup EXIT
+
+/usr/bin/hdiutil create \
+    -volname "$(basename "$source_path" .app)" \
+    -srcfolder "$source_path" \
+    -ov \
+    -format UDZO \
+    "$temporary_path"
+
+rm -f "$output_path"
+mv "$temporary_path" "$output_path"

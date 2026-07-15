@@ -10,6 +10,7 @@ from core.discover_ffmpeg import discover_ffmpeg_tools
 from core.encoder_capability_cache import ensure_encoder_capabilities
 from core.encoder_caps import is_valid_preset, preset_choices_for_encoder, resolve_encoder
 from core.models import (
+    DecodeAcceleration,
     EncodeOptions,
     EncodePlan,
     EncodePlanItem,
@@ -58,6 +59,21 @@ def _usable_encoder_count(runtime_capabilities: dict) -> int:
     return sum(len(items) for items in runtime_capabilities.get("codecs", {}).values())
 
 
+def _validate_decode_acceleration(
+    options: EncodeOptions,
+    runtime_capabilities: dict,
+) -> None:
+    if options.decode_acceleration != DecodeAcceleration.VIDEOTOOLBOX:
+        return
+
+    hwaccels = runtime_capabilities.get("hwaccels", [])
+    if "videotoolbox" not in hwaccels:
+        raise RuntimeError(
+            "VideoToolbox decoding was requested, but the selected FFmpeg build "
+            "does not expose the videotoolbox hardware accelerator."
+        )
+
+
 def _options_with_default_preset(
     options: EncodeOptions,
     ffmpeg: Path,
@@ -95,6 +111,7 @@ def _resolve_plan_encoder(
         ffmpeg,
         progress_callback=progress_callback,
     )
+    _validate_decode_acceleration(options, runtime_capabilities)
     _emit(progress_callback, f"Detected {_usable_encoder_count(runtime_capabilities)} usable encoder candidate(s).")
     encoder_info = resolve_encoder(
         options.codec,

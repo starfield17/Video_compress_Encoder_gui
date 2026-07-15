@@ -3,12 +3,24 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from core.models import AudioMode, ContainerChoice, EncodePlanItem, PreviewJob
+from core.models import AudioMode, ContainerChoice, DecodeAcceleration, EncodePlanItem, PreviewJob
 from core.path_utils import passlog_prefix
 
 
 def _null_sink() -> str:
     return "NUL" if os.name == "nt" else "/dev/null"
+
+
+def build_input_acceleration_args(plan_item: EncodePlanItem) -> list[str]:
+    acceleration = plan_item.options.decode_acceleration
+
+    if acceleration == DecodeAcceleration.SOFTWARE:
+        return []
+
+    if acceleration == DecodeAcceleration.VIDEOTOOLBOX:
+        return ["-hwaccel", "videotoolbox"]
+
+    raise ValueError(f"Unsupported decode acceleration: {acceleration}")
 
 
 def build_video_args(plan_item: EncodePlanItem) -> list[str]:
@@ -36,9 +48,15 @@ def build_video_args(plan_item: EncodePlanItem) -> list[str]:
     if plan_item.options.encoder_preset:
         args += ["-preset", str(plan_item.options.encoder_preset)]
 
-    if encoder == "libx265":
+    if encoder in {"libx265", "hevc_videotoolbox"}:
         # hvc1 tag is required for Apple QuickTime / macOS Finder playback.
-        args += ["-tag:v", "hvc1", "-x265-params", "log-level=error"]
+        args += ["-tag:v", "hvc1"]
+
+    if encoder == "libx265":
+        args += ["-x265-params", "log-level=error"]
+
+    if encoder == "hevc_videotoolbox":
+        args += ["-allow_sw", "0"]
 
     return args
 
@@ -85,7 +103,14 @@ def build_encode_commands(
     source_path = input_path or plan_item.source_path
     final_output = output_path or plan_item.output_path
     overwrite_flag = "-y" if plan_item.options.overwrite or stage == "preview" else "-n"
-    base_input = [str(ffmpeg_path), "-hide_banner", overwrite_flag, "-i", str(source_path)]
+    base_input = [
+        str(ffmpeg_path),
+        "-hide_banner",
+        overwrite_flag,
+        *build_input_acceleration_args(plan_item),
+        "-i",
+        str(source_path),
+    ]
 
     video_args = build_video_args(plan_item)
     audio_args = build_audio_args(plan_item)

@@ -4,15 +4,20 @@ import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable
 
-from core.encoder_caps import AUTO_BACKEND_PRIORITY, ENCODER_CANDIDATES, list_available_encoders
+from core.encoder_caps import (
+    ENCODER_CANDIDATES,
+    iter_codec_candidates,
+    list_available_encoders,
+    list_available_hwaccels,
+)
 from core.models import BackendChoice, CodecChoice
 from core.preset_store import load_app_config, update_app_config
 from core.subprocess_utils import noninteractive_run_kwargs
 
 
-ENCODER_CAPABILITIES_SCHEMA_VERSION = 2
+ENCODER_CAPABILITIES_SCHEMA_VERSION = 3
 SMOKE_TEST_SOURCE_SIZE = "256x256"
 SMOKE_TEST_TIMEOUT_SEC = 10.0
 _CACHE_LOCK = threading.RLock()
@@ -52,6 +57,20 @@ def _ffmpeg_version_line(ffmpeg_path: Path) -> str:
 # Validate that the cached data structure matches the current ENCODER_CANDIDATES
 # schema. A mismatch means the app was upgraded and the cache must be rebuilt.
 def _valid_capability_shape(capabilities: dict) -> bool:
+    hwaccels = capabilities.get("hwaccels")
+    if not isinstance(hwaccels, list):
+        return False
+    seen_hwaccels: set[str] = set()
+    for hwaccel in hwaccels:
+        if not isinstance(hwaccel, str):
+            return False
+        normalized_hwaccel = hwaccel.strip().lower()
+        if not normalized_hwaccel or normalized_hwaccel != hwaccel:
+            return False
+        if normalized_hwaccel in seen_hwaccels:
+            return False
+        seen_hwaccels.add(normalized_hwaccel)
+
     codecs = capabilities.get("codecs")
     if not isinstance(codecs, dict):
         return False
@@ -79,6 +98,8 @@ def load_cached_encoder_capabilities(config_dir: Path) -> dict | None:
 
 
 def save_encoder_capabilities(config_dir: Path, capabilities: dict) -> Path:
+    if not _valid_capability_shape(capabilities):
+        raise ValueError("Invalid encoder capability cache shape.")
     return update_app_config(
         config_dir,
         lambda data: {**data, "encoder_capabilities": capabilities},
@@ -131,10 +152,10 @@ def smoke_test_encoder(
         "-an",
         "-c:v",
         encoder_name,
-        "-f",
-        "null",
-        "-",
     ]
+    if encoder_name.endswith("_videotoolbox"):
+        cmd += ["-allow_sw", "0"]
+    cmd += ["-f", "null", "-"]
     try:
         proc = subprocess.run(
             cmd,
@@ -151,21 +172,25 @@ def smoke_test_encoder(
     return proc.returncode == 0
 
 
-def _iter_codec_candidates(codec: CodecChoice) -> Iterable[tuple[BackendChoice, str]]:
-    backend_map = ENCODER_CANDIDATES[codec]
-    for backend in AUTO_BACKEND_PRIORITY:
-        yield backend, backend_map[backend]
-
-
 def detect_encoder_capabilities(
     ffmpeg_path: Path,
     available_encoders: set[str] | None = None,
     progress_callback: Callable[[str], None] | None = None,
+    *,
+    available_hwaccels: set[str] | None = None,
 ) -> dict:
     resolved = _resolved_ffmpeg_path(ffmpeg_path)
     if available_encoders is None:
         _emit(progress_callback, "Scanning FFmpeg encoder list...")
         available_encoders = list_available_encoders(resolved)
+    if available_hwaccels is None:
+        _emit(progress_callback, "Scanning FFmpeg hardware-accelerator list...")
+        available_hwaccels = list_available_hwaccels(resolved)
+    available_hwaccels = {
+        item.strip().lower()
+        for item in available_hwaccels
+        if isinstance(item, str) and item.strip()
+    }
 
     capabilities: dict[str, object] = {
         "schema_version": ENCODER_CAPABILITIES_SCHEMA_VERSION,
@@ -173,13 +198,14 @@ def detect_encoder_capabilities(
         "ffmpeg_mtime_ns": _ffmpeg_mtime_ns(resolved),
         "ffmpeg_version": _ffmpeg_version_line(resolved),
         "detected_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "hwaccels": sorted(available_hwaccels),
         "codecs": {},
     }
 
     codecs: dict[str, list[dict[str, str]]] = {}
     for codec in CodecChoice:
         usable: list[dict[str, str]] = []
-        for backend, encoder_name in _iter_codec_candidates(codec):
+        for backend, encoder_name in iter_codec_candidates(codec):
             if encoder_name not in available_encoders:
                 _emit(progress_callback, f"{codec.value}/{backend.value}: {encoder_name} is not in this FFmpeg build.")
                 continue
