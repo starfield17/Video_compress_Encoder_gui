@@ -110,7 +110,7 @@ def list_available_encoders(ffmpeg_path: Path) -> set[str]:
     return encoders
 
 
-def _iter_codec_candidates(
+def iter_codec_candidates(
     codec: CodecChoice,
 ) -> Iterable[tuple[BackendChoice, str]]:
     backend_map = ENCODER_CANDIDATES[codec]
@@ -269,7 +269,7 @@ def resolve_encoder(
                     return _encoder_info(codec, candidate_backend, encoder_name, ffmpeg_path)
             raise RuntimeError(f"No usable {codec.value} encoder was found on this machine.")
 
-        for candidate_backend, encoder_name in _iter_codec_candidates(codec):
+        for candidate_backend, encoder_name in iter_codec_candidates(codec):
             if encoder_name in available_encoders:
                 return _encoder_info(codec, candidate_backend, encoder_name, ffmpeg_path)
         raise RuntimeError(f"No available {codec.value} encoder was found in the current FFmpeg build.")

@@ -848,7 +848,6 @@ class MainWindow(QMainWindow):
         self._encoder_capabilities_ready = False
         self._pending_backend = None
         self._rebuild_backend_controls()
-        self._pending_backend = None
         self._refresh_decode_acceleration_choices(log_reset=True, force_unavailable=True)
         self._append_log(self.tr.t("gui.log.encoder_detection_failed", error=message))
 

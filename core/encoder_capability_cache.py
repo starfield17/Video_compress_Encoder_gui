@@ -4,11 +4,11 @@ import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable
 
 from core.encoder_caps import (
     ENCODER_CANDIDATES,
-    _iter_codec_candidates as iter_codec_candidates,
+    iter_codec_candidates,
     list_available_encoders,
     list_available_hwaccels,
 )
@@ -172,10 +172,6 @@ def smoke_test_encoder(
     return proc.returncode == 0
 
 
-def _iter_codec_candidates(codec: CodecChoice) -> Iterable[tuple[BackendChoice, str]]:
-    yield from iter_codec_candidates(codec)
-
-
 def detect_encoder_capabilities(
     ffmpeg_path: Path,
     available_encoders: set[str] | None = None,
@@ -209,7 +205,7 @@ def detect_encoder_capabilities(
     codecs: dict[str, list[dict[str, str]]] = {}
     for codec in CodecChoice:
         usable: list[dict[str, str]] = []
-        for backend, encoder_name in _iter_codec_candidates(codec):
+        for backend, encoder_name in iter_codec_candidates(codec):
             if encoder_name not in available_encoders:
                 _emit(progress_callback, f"{codec.value}/{backend.value}: {encoder_name} is not in this FFmpeg build.")
                 continue

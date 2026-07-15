@@ -28,7 +28,7 @@ from core.encoder_capability_cache import (
     smoke_test_encoder,
 )
 from core.encoder_caps import (
-    _iter_codec_candidates,
+    iter_codec_candidates,
     default_preset_for_encoder,
     list_available_hwaccels,
     parse_hwaccels,
@@ -126,8 +126,8 @@ class VideoToolboxModelAndPresetTestCase(unittest.TestCase):
 
 class VideoToolboxEncoderMappingTestCase(unittest.TestCase):
     def test_codec_candidates_are_codec_specific(self) -> None:
-        hevc = list(_iter_codec_candidates(CodecChoice.HEVC))
-        av1 = list(_iter_codec_candidates(CodecChoice.AV1))
+        hevc = list(iter_codec_candidates(CodecChoice.HEVC))
+        av1 = list(iter_codec_candidates(CodecChoice.AV1))
         self.assertIn((BackendChoice.VIDEOTOOLBOX, "hevc_videotoolbox"), hevc)
         self.assertNotIn(BackendChoice.VIDEOTOOLBOX, [backend for backend, _ in av1])
         self.assertIsNone(default_preset_for_encoder("hevc_videotoolbox"))

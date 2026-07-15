@@ -5,6 +5,9 @@ import sys
 from pathlib import Path
 
 
+APP_DISPLAY_NAME = "Video Compressor"
+
+
 def is_compiled() -> bool:
     return bool(getattr(sys, "frozen", False) or globals().get("__compiled__") is not None)
 
@@ -18,13 +21,37 @@ def source_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def macos_app_bundle_path(executable_path: str | Path | None = None) -> Path | None:
+    """Return the enclosing ``.app`` for a macOS bundle executable, if any."""
+    executable = Path(executable_path or sys.executable).expanduser().resolve()
+    macos_dir = executable.parent
+    contents_dir = macos_dir.parent
+    app_bundle = contents_dir.parent
+    if (
+        macos_dir.name == "MacOS"
+        and contents_dir.name == "Contents"
+        and app_bundle.suffix == ".app"
+    ):
+        return app_bundle
+    return None
+
+
+def is_macos_app_bundle(executable_path: str | Path | None = None) -> bool:
+    return macos_app_bundle_path(executable_path) is not None
+
+
 def bundle_root() -> Path:
+    app_bundle = macos_app_bundle_path()
+    if app_bundle is not None:
+        return app_bundle / "Contents" / "Resources"
     if is_compiled():
         return Path(sys.executable).resolve().parent
     return source_root()
 
 
 def app_root() -> Path:
+    if is_macos_app_bundle():
+        return Path.home() / "Library" / "Application Support" / APP_DISPLAY_NAME
     if is_compiled():
         return Path(sys.executable).resolve().parent
     return source_root()
