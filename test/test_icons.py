@@ -42,7 +42,8 @@ class IconAssetTestCase(unittest.TestCase):
             for name in ("app-assets.json", "app.icns", "app.ico", "app.png"):
                 (output_dir / name).write_bytes((source_dir / name).read_bytes())
             svg_path = output_dir / "app.svg"
-            svg_path.write_bytes((source_dir / "app.svg").read_bytes().replace(b"\n", b"\r\n"))
+            svg_payload = (source_dir / "app.svg").read_bytes().replace(b"\r\n", b"\n")
+            svg_path.write_bytes(svg_payload.replace(b"\n", b"\r\n"))
 
             self.assertTrue(write_assets(svg_path, output_dir, check=True))
 
