@@ -11,12 +11,13 @@ from core.app_paths import config_dir as app_config_dir
 from core.app_paths import ensure_runtime_layout, workdir_dir
 from core.discover_ffmpeg import discover_ffmpeg_tools
 from core.encoder_caps import list_available_encoders, preset_choices_for_encoder, resolve_encoder
-from core.exec_encode import execute_plan, execute_preview
+from core.exec_encode import execute_plan, execute_preview, execute_smart_preview
 from core.i18n import get_translator
 from core.models import (
     AudioMode,
     BackendChoice,
     CodecChoice,
+    CompressionMode,
     ContainerChoice,
     DecodeAcceleration,
     EncodeOptions,
@@ -71,9 +72,12 @@ def _merge_options(base: EncodeOptions, args: argparse.Namespace) -> EncodeOptio
     updates: dict[str, object] = {}
     scalar_map = {
         "codec": lambda value: CodecChoice(value),
+        "compression_mode": lambda value: CompressionMode(value),
         "backend": lambda value: BackendChoice(value),
         "decode_acceleration": lambda value: DecodeAcceleration(value),
         "ratio": float,
+        "min_vmaf": float,
+        "max_output_ratio": float,
         "min_video_kbps": int,
         "max_video_kbps": int,
         "container": lambda value: ContainerChoice(value),
@@ -139,6 +143,12 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, include_input: bool = Tr
 def _add_encode_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--codec", choices=["hevc", "av1"], help="Target codec")
     parser.add_argument(
+        "--compression-mode",
+        dest="compression_mode",
+        choices=[mode.value for mode in CompressionMode],
+        help="Compression policy",
+    )
+    parser.add_argument(
         "--backend",
         choices=[backend.value for backend in BackendChoice],
         help="Encoder backend",
@@ -152,6 +162,13 @@ def _add_encode_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--parallel", action="store_true", help="Enable queue-level parallel transcoding")
     parser.add_argument("--parallel-backends", dest="parallel_backends", help="Comma-separated explicit backends")
     parser.add_argument("--ratio", type=float, help="Target video bitrate ratio")
+    parser.add_argument("--min-vmaf", dest="min_vmaf", type=float, help="Minimum VMAF for smart mode")
+    parser.add_argument(
+        "--max-output-ratio",
+        dest="max_output_ratio",
+        type=float,
+        help="Maximum final file size ratio for smart mode",
+    )
     parser.add_argument("--min-video-kbps", dest="min_video_kbps", type=int, help="Minimum target bitrate")
     parser.add_argument("--max-video-kbps", dest="max_video_kbps", type=int, help="Maximum target bitrate")
     parser.add_argument("--container", choices=["mkv", "mp4"], help="Output container")
@@ -203,6 +220,20 @@ def _validate_parallel_options(options: EncodeOptions, tr, *, allow_parallel: bo
         raise ValueError(tr.t("cli.parallel_two_pass_not_supported"))
     if options.encoder_preset:
         raise ValueError(tr.t("cli.parallel_preset_not_supported"))
+
+
+def _validate_compression_options(options: EncodeOptions, args: argparse.Namespace) -> None:
+    if not 0 < float(options.min_vmaf) <= 100:
+        raise ValueError("--min-vmaf must be greater than 0 and at most 100")
+    if options.max_output_ratio is not None and not 0 < float(options.max_output_ratio) <= 1:
+        raise ValueError("--max-output-ratio must be greater than 0 and at most 1")
+    if options.compression_mode == CompressionMode.SMART and getattr(args, "ratio", None) is not None:
+        raise ValueError("--ratio cannot be used with --compression-mode smart")
+    if options.compression_mode == CompressionMode.FIXED_BITRATE and (
+        getattr(args, "min_vmaf", None) is not None
+        or getattr(args, "max_output_ratio", None) is not None
+    ):
+        raise ValueError("--min-vmaf and --max-output-ratio require --compression-mode smart")
 
 
 def _resolve_encoder_info(options: EncodeOptions, args: argparse.Namespace):
@@ -294,6 +325,7 @@ def _first_valid_plan_item(plan):
 def _run_plan(args: argparse.Namespace, config_dir: Path) -> int:
     tr = _translator_for_args(args, config_dir)
     options = _options_from_args(args, config_dir)
+    _validate_compression_options(options, args)
     _validate_parallel_options(options, tr)
     _validate_encoder_preset(options, args)
     plan = build_encode_plan(
@@ -312,6 +344,7 @@ def _run_plan(args: argparse.Namespace, config_dir: Path) -> int:
 def _run_encode(args: argparse.Namespace, config_dir: Path) -> int:
     tr = _translator_for_args(args, config_dir)
     options = _options_from_args(args, config_dir)
+    _validate_compression_options(options, args)
     _validate_parallel_options(options, tr)
     _validate_encoder_preset(options, args)
     plan = build_encode_plan(
@@ -347,6 +380,7 @@ def _run_preview(args: argparse.Namespace, config_dir: Path) -> int:
         return 2
 
     options = _options_from_args(args, config_dir)
+    _validate_compression_options(options, args)
     _validate_parallel_options(options, tr, allow_parallel=False)
     _validate_encoder_preset(options, args)
     plan = build_encode_plan(
@@ -364,21 +398,29 @@ def _run_preview(args: argparse.Namespace, config_dir: Path) -> int:
         print_plan(plan, tr)
         return 2
 
-    preview_options = PreviewOptions(
-        sample_mode=PreviewSampleMode(args.sample_mode),
-        sample_duration_sec=args.sample_duration_sec,
-        custom_start_sec=args.custom_start_sec,
-    )
-    job = build_preview_job(
-        plan_item=item,
-        workdir=Path(args.workdir).expanduser().resolve() if args.workdir else _default_workdir(),
-        preview_options=preview_options,
-    )
-    result = execute_preview(
-        job=job,
-        ffmpeg_path=plan.ffmpeg_path,
-        workdir=Path(args.workdir).expanduser().resolve() if args.workdir else _default_workdir(),
-    )
+    workdir = Path(args.workdir).expanduser().resolve() if args.workdir else _default_workdir()
+    if options.compression_mode == CompressionMode.SMART:
+        result = execute_smart_preview(
+            item=item,
+            ffmpeg_path=plan.ffmpeg_path,
+            workdir=workdir,
+        )
+    else:
+        preview_options = PreviewOptions(
+            sample_mode=PreviewSampleMode(args.sample_mode),
+            sample_duration_sec=args.sample_duration_sec,
+            custom_start_sec=args.custom_start_sec,
+        )
+        job = build_preview_job(
+            plan_item=item,
+            workdir=workdir,
+            preview_options=preview_options,
+        )
+        result = execute_preview(
+            job=job,
+            ffmpeg_path=plan.ffmpeg_path,
+            workdir=workdir,
+        )
     print_preview_result(result, tr)
     return 0 if result.success else 2
 
@@ -406,6 +448,7 @@ def _run_preset(args: argparse.Namespace, config_dir: Path) -> int:
 
     if args.preset_command == "save":
         options = _options_from_args(args, config_dir)
+        _validate_compression_options(options, args)
         _validate_parallel_options(options, tr)
         _validate_encoder_preset(options, args)
         path = save_preset(args.name, options, config_dir)

@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 APP_DISPLAY_NAME = "Video Compressor"
+APP_ICON_RELATIVE_PATH = Path("assets") / "app.svg"
 
 
 def is_compiled() -> bool:
@@ -63,6 +64,18 @@ def config_dir() -> Path:
 
 def workdir_dir() -> Path:
     return app_root() / "workdir"
+
+
+def app_icon_path() -> Path | None:
+    """Return the canonical SVG icon in a source checkout or packaged build."""
+    candidates = (
+        bundle_root() / APP_ICON_RELATIVE_PATH,
+        source_root() / "packaging" / "assets" / "app.svg",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
 
 
 def _copy_tree_if_missing(source_dir: Path, target_dir: Path) -> None:

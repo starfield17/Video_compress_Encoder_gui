@@ -44,6 +44,8 @@ class ReleaseWorkflowMatrixTestCase(unittest.TestCase):
             )
         self.assertEqual(rows["windows-arm64"]["windows_compiler"], "clang")
         self.assertEqual(rows["windows-x86_64"]["windows_compiler"], "mingw64")
+        self.assertIn("scripts/build_icons.py --check", workflow)
+        self.assertIn("workdir/tmp", workflow)
 
     def test_release_matrix_and_publish_contract_cover_native_packages(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -52,10 +54,18 @@ class ReleaseWorkflowMatrixTestCase(unittest.TestCase):
         self.assertIn("architecture: ${{ matrix.architecture }}", workflow)
         self.assertIn("nuitka-report-${{ matrix.target }}", workflow)
         self.assertIn("packages/*.dmg", workflow)
-        self.assertIn("Expected 8 release packages", workflow)
-        self.assertIn("sha256sum *.zip *.tar.gz *.dmg", workflow)
+        self.assertIn("packages/*.msi", workflow)
+        self.assertIn("Expected 10 release packages", workflow)
+        self.assertIn("sha256sum *.zip *.tar.gz *.dmg *.msi", workflow)
         self.assertIn("macos-app-bundle", workflow)
         self.assertIn('tar -czf "video-compressor-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"', workflow)
+        self.assertIn("scripts/prepare_ffmpeg.py", workflow)
+        self.assertIn("--require-ffmpeg", workflow)
+        self.assertIn("scripts\\build_msi.py", workflow)
+        self.assertIn("scripts\\sign_windows.ps1", workflow)
+        self.assertIn("WINDOWS_CERTIFICATE_BASE64", workflow)
+        self.assertEqual(rows["windows-x86_64"]["msi_architecture"], "x86_64")
+        self.assertEqual(rows["windows-arm64"]["msi_architecture"], "arm64")
 
 
 if __name__ == "__main__":

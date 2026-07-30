@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from core.bitrate_policy import human_kbps
 from core.i18n import Translator
-from core.models import EncodePlan, EncodeResult, PreviewResult
+from core.models import CompressionMode, EncodePlan, EncodeResult, PreviewResult, SmartPreviewResult
 
 
 def _human_size(size_bytes: int) -> str:
@@ -31,7 +31,12 @@ def print_plan(plan: EncodePlan, tr: Translator) -> None:
         print(f"  {tr.t('cli.resolution')}: {wh}")
         print(f"  {tr.t('cli.fps')}: {fps}")
         print(f"  {tr.t('cli.source_bitrate')}: {human_kbps(media.video_bitrate_bps)}")
-        print(f"  {tr.t('cli.target_bitrate')}: {human_kbps(item.target_video_bitrate_bps)}")
+        target = (
+            tr.t("cli.pending_analysis")
+            if item.options.compression_mode == CompressionMode.SMART and item.target_video_bitrate_bps <= 0
+            else human_kbps(item.target_video_bitrate_bps)
+        )
+        print(f"  {tr.t('cli.target_bitrate')}: {target}")
         print(f"  {tr.t('cli.encoder')}: {encoder.encoder_name} ({encoder.backend.value})")
         print(f"  {tr.t('cli.output')}: {item.output_path}")
         for warning in item.warnings:
@@ -46,12 +51,19 @@ def print_encode_results(results: list[EncodeResult], tr: Translator) -> None:
         if result.skipped:
             print(f"[{tr.t('cli.result_skipped')}] {result.source_path}")
             print(f"  {tr.t('cli.reason')}: {result.error_message}")
-            continue
-        if result.success:
+        elif result.success:
             print(f"[{tr.t('cli.result_success')}] {result.source_path} -> {result.output_path}")
         else:
             print(f"[{tr.t('cli.result_failed')}] {result.source_path}")
             print(f"  {tr.t('cli.reason')}: {result.error_message}")
+        quality = result.quality_search_result
+        if quality is not None:
+            if quality.min_vmaf is not None:
+                print(f"  {tr.t('cli.minimum_vmaf')}: {quality.min_vmaf:.2f}")
+            if quality.predicted_output_ratio is not None:
+                print(f"  {tr.t('cli.predicted_ratio')}: {quality.predicted_output_ratio:.3f}")
+            if quality.required_output_ratio is not None:
+                print(f"  {tr.t('cli.required_ratio')}: {quality.required_output_ratio:.3f}")
         for copied_path in result.copied_external_subtitle_paths:
             print(f"  {tr.t('cli.external_subtitle_copied')}: {copied_path}")
         for warning in result.external_subtitle_warnings:
@@ -60,7 +72,25 @@ def print_encode_results(results: list[EncodeResult], tr: Translator) -> None:
             print(f"  {tr.t('cli.log_path')}: {result.log_path}")
 
 
-def print_preview_result(result: PreviewResult, tr: Translator) -> None:
+def print_preview_result(result: PreviewResult | SmartPreviewResult, tr: Translator) -> None:
+    if isinstance(result, SmartPreviewResult):
+        quality = result.quality_search_result
+        label = tr.t("cli.preview_success") if result.success else tr.t("cli.result_skipped")
+        print(f"[{label}] {result.source_path}")
+        if quality.selected_video_bitrate_bps:
+            print(f"  {tr.t('cli.target_bitrate')}: {human_kbps(quality.selected_video_bitrate_bps)}")
+        if quality.min_vmaf is not None:
+            print(f"  {tr.t('cli.minimum_vmaf')}: {quality.min_vmaf:.2f}")
+        if quality.predicted_output_ratio is not None:
+            print(f"  {tr.t('cli.predicted_ratio')}: {quality.predicted_output_ratio:.3f}")
+        if quality.required_output_ratio is not None:
+            print(f"  {tr.t('cli.required_ratio')}: {quality.required_output_ratio:.3f}")
+        if result.error_message:
+            print(f"  {tr.t('cli.reason')}: {result.error_message}")
+        if result.log_path:
+            print(f"  {tr.t('cli.log_path')}: {result.log_path}")
+        return
+
     if not result.success:
         print(f"[{tr.t('cli.result_failed')}] {result.job.source_path}")
         print(f"  {tr.t('cli.reason')}: {result.error_message}")

@@ -11,6 +11,7 @@ from core.models import (
     AudioMode,
     BackendChoice,
     CodecChoice,
+    CompressionMode,
     ContainerChoice,
     DecodeAcceleration,
     EncodeOptions,
@@ -44,11 +45,14 @@ def _preset_path(name: str, config_dir: Path) -> Path:
 def encode_options_to_preset_data(options: EncodeOptions) -> dict[str, Any]:
     return {
         "codec": options.codec.value,
+        "compression_mode": options.compression_mode.value,
         "backend": options.backend.value,
         "decode_acceleration": options.decode_acceleration.value,
         "parallel_enabled": options.parallel_enabled,
         "parallel_backends": [backend.value for backend in options.parallel_backends],
         "ratio": options.ratio,
+        "min_vmaf": options.min_vmaf,
+        "max_output_ratio": options.max_output_ratio,
         "min_video_kbps": options.min_video_kbps,
         "max_video_kbps": options.max_video_kbps,
         "container": options.container.value,
@@ -75,12 +79,21 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
         data["parallel_backends"] = []
     if "decode_acceleration" not in data:
         data["decode_acceleration"] = DecodeAcceleration.SOFTWARE.value
+    if "compression_mode" not in data:
+        data["compression_mode"] = CompressionMode.FIXED_BITRATE.value
+    if "min_vmaf" not in data:
+        data["min_vmaf"] = 95.0
+    if "max_output_ratio" not in data:
+        data["max_output_ratio"] = None
 
     required = {
         "codec",
+        "compression_mode",
         "backend",
         "decode_acceleration",
         "ratio",
+        "min_vmaf",
+        "max_output_ratio",
         "min_video_kbps",
         "max_video_kbps",
         "container",
@@ -100,6 +113,7 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
 
     # Constructing each enum validates the string value; raises ValueError on invalid input.
     CodecChoice(data["codec"])
+    CompressionMode(data["compression_mode"])
     BackendChoice(data["backend"])
     DecodeAcceleration(data["decode_acceleration"])
     for backend in data["parallel_backends"]:
@@ -108,6 +122,10 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
     AudioMode(data["audio_mode"])
     if data["ratio"] is not None and float(data["ratio"]) <= 0:
         raise ValueError("ratio must be greater than 0")
+    if not 0 < float(data["min_vmaf"]) <= 100:
+        raise ValueError("min_vmaf must be greater than 0 and at most 100")
+    if data["max_output_ratio"] is not None and not 0 < float(data["max_output_ratio"]) <= 1:
+        raise ValueError("max_output_ratio must be greater than 0 and at most 1")
     return data
 
 
@@ -117,11 +135,14 @@ def preset_data_to_encode_options(data: dict[str, Any]) -> EncodeOptions:
     normalized_preset = str(preset_value).strip() if preset_value is not None else ""
     return EncodeOptions(
         codec=CodecChoice(data["codec"]),
+        compression_mode=CompressionMode(data["compression_mode"]),
         backend=BackendChoice(data["backend"]),
         decode_acceleration=DecodeAcceleration(data["decode_acceleration"]),
         parallel_enabled=bool(data.get("parallel_enabled", False)),
         parallel_backends=tuple(BackendChoice(item) for item in data.get("parallel_backends", [])),
         ratio=None if data["ratio"] is None else float(data["ratio"]),
+        min_vmaf=float(data["min_vmaf"]),
+        max_output_ratio=None if data["max_output_ratio"] is None else float(data["max_output_ratio"]),
         min_video_kbps=int(data["min_video_kbps"]),
         max_video_kbps=int(data["max_video_kbps"]),
         container=ContainerChoice(data["container"]),

@@ -11,6 +11,11 @@ class CodecChoice(str, Enum):
     AV1 = "av1"
 
 
+class CompressionMode(str, Enum):
+    SMART = "smart"
+    FIXED_BITRATE = "fixed_bitrate"
+
+
 class BackendChoice(str, Enum):
     AUTO = "auto"
     CPU = "cpu"
@@ -62,11 +67,15 @@ class MediaInfo:
     fps: Optional[float]
     video_codec: str
     audio_codec: Optional[str]
+    audio_stream_count: int = 0
+    pix_fmt: Optional[str] = None
+    color_transfer: Optional[str] = None
 
 
 @dataclass(slots=True)
 class EncodeOptions:
     codec: CodecChoice = CodecChoice.HEVC
+    compression_mode: CompressionMode = CompressionMode.SMART
     backend: BackendChoice = BackendChoice.AUTO
     decode_acceleration: DecodeAcceleration = DecodeAcceleration.SOFTWARE
     parallel_enabled: bool = False
@@ -74,6 +83,9 @@ class EncodeOptions:
     parallel_backends: tuple[BackendChoice, ...] = ()
     # None means choose the default compression ratio for the selected codec.
     ratio: Optional[float] = None
+    min_vmaf: float = 95.0
+    # None means choose the smart output ratio for the selected codec.
+    max_output_ratio: Optional[float] = None
     min_video_kbps: int = 250
     # 0 means no upper cap on video bitrate.
     max_video_kbps: int = 0
@@ -114,6 +126,7 @@ class EncodePlanItem:
     target_video_bitrate_bps: int = 0
     warnings: list[str] = field(default_factory=list)
     skip_reason: Optional[str] = None
+    quality_search_result: Optional["QualitySearchResult"] = None
 
 
 @dataclass(slots=True)
@@ -138,6 +151,7 @@ class EncodeResult:
     skipped: bool = False
     copied_external_subtitle_paths: list[Path] = field(default_factory=list)
     external_subtitle_warnings: list[str] = field(default_factory=list)
+    quality_search_result: Optional["QualitySearchResult"] = None
 
 
 @dataclass(slots=True)
@@ -167,5 +181,56 @@ class PreviewResult:
     sample_compression_ratio: float = 0.0
     estimated_full_output_size: int = 0
     notes: list[str] = field(default_factory=list)
+    log_path: Optional[Path] = None
+    error_message: Optional[str] = None
+
+
+class QualitySearchStatus(str, Enum):
+    FOUND = "found"
+    CONSTRAINT_UNSATISFIED = "constraint_unsatisfied"
+    UNSUPPORTED = "unsupported"
+    FAILED = "failed"
+
+
+@dataclass(slots=True)
+class VmafCapabilities:
+    filter_available: bool
+    standard_model: bool
+    model_4k: bool
+    error_message: Optional[str] = None
+
+
+@dataclass(slots=True)
+class QualityCandidateResult:
+    video_bitrate_bps: int
+    segment_vmaf: list[float] = field(default_factory=list)
+    min_vmaf: float = 0.0
+
+
+@dataclass(slots=True)
+class QualitySearchResult:
+    status: QualitySearchStatus
+    encoder_name: str
+    backend: BackendChoice
+    candidates: list[QualityCandidateResult] = field(default_factory=list)
+    selected_video_bitrate_bps: int = 0
+    min_vmaf: Optional[float] = None
+    predicted_output_bytes: Optional[int] = None
+    predicted_output_ratio: Optional[float] = None
+    required_output_ratio: Optional[float] = None
+    max_output_bytes: Optional[int] = None
+    fingerprint: str = ""
+    reason: Optional[str] = None
+
+    @property
+    def success(self) -> bool:
+        return self.status == QualitySearchStatus.FOUND
+
+
+@dataclass(slots=True)
+class SmartPreviewResult:
+    source_path: Path
+    success: bool
+    quality_search_result: QualitySearchResult
     log_path: Optional[Path] = None
     error_message: Optional[str] = None

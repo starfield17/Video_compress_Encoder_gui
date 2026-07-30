@@ -6,6 +6,7 @@ This project refactors the original single-file compressor into a modular layout
 - reusable core planning and execution layers
 - preset save/load support
 - manual preview sampling before full encode
+- VMAF-guided smart compression with final-size enforcement
 - CLI and PySide6 GUI entrypoints
 - configurable English and Simplified Chinese language packs
 - optional copy of matching external subtitle sidecars such as `.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`, `.idx`, and `.sup`
@@ -26,7 +27,7 @@ workdir/
 
 ```bash
 python main.py --cli plan workdir/test.mp4
-python main.py --cli preview workdir/test.mp4 --backend cpu --sample-duration 5
+python main.py --cli preview workdir/test.mp4 --backend cpu
 python main.py --cli encode workdir/test.mp4 --backend qsv --overwrite
 python main.py --cli encode workdir/test.mp4 --backend cpu --overwrite
 python main.py --cli encode workdir/test.mp4 --copy-external-subtitles
@@ -38,6 +39,39 @@ Supported backend values are `auto`, `cpu`, `nvenc`, `qsv`, `amf`, and
 `videotoolbox`. When `auto` is selected, the planner prefers smoke-tested
 runtime encoders in this order: `nvenc`, `qsv`, `amf`, `videotoolbox`, then
 `cpu`.
+
+### Smart compression
+
+New jobs and the built-in HEVC/AV1 presets use smart compression. The default
+policy requires VMAF 95 and limits the final file to 70% of the source for
+HEVC or 50% for AV1. Smart preview runs the same automatic sample search
+without encoding the full video:
+
+```bash
+python main.py --cli preview input.mp4 \
+  --compression-mode smart \
+  --codec hevc \
+  --min-vmaf 95 \
+  --max-output-ratio 0.70
+```
+
+Smart mode requires an FFmpeg build whose `libvmaf` filter and required model
+can actually run. It analyzes one full clip for videos up to 30 seconds, or
+three 10-second windows for longer videos. If quality and final-size
+constraints cannot both be met, that file is skipped without creating an
+output. Full smart encodes are written to a temporary file beside the target
+and are published only after the actual size passes validation.
+
+Use the legacy fixed bitrate policy explicitly when VMAF is unavailable:
+
+```bash
+python main.py --cli encode input.mp4 \
+  --compression-mode fixed_bitrate \
+  --ratio 0.76
+```
+
+Presets created by older versions do not opt into smart mode automatically;
+they continue to load as fixed bitrate presets.
 
 ### macOS VideoToolbox acceleration
 
@@ -109,11 +143,13 @@ python main.py --gui --lang zh_cn
 
 The GUI now includes:
 
+- a project-specific film-and-quality-pulse application icon
 - explicit source file and source directory pickers
 - editable output, workdir, ffmpeg, and ffprobe paths
 - preset load/save/delete controls
 - plan summary, preview summary, and encode result summary panels
 - a detailed plan/result table with resolution, duration, bitrate, note, and status columns
+- smart-analysis stages, selected bitrate, minimum VMAF, and predicted size
 - English and Simplified Chinese language switching
 
 ## Notes
@@ -144,6 +180,33 @@ Build with a release version:
 ```bash
 python scripts/build_nuitka.py --clean --version 1.2.3
 ```
+
+Generate or verify the platform icon assets from the canonical SVG:
+
+```bash
+python scripts/build_icons.py
+python scripts/build_icons.py --check
+```
+
+Release builds prepare a pinned native FFmpeg 8.1.2 pair under the ignored
+project `workdir/` and require it during packaging:
+
+```bash
+python scripts/prepare_ffmpeg.py \
+  --target macos-arm64 \
+  --output workdir/ffmpeg/macos-arm64
+
+python scripts/build_nuitka.py \
+  --clean \
+  --version 1.2.3 \
+  --ffmpeg-dir workdir/ffmpeg/macos-arm64 \
+  --require-ffmpeg
+```
+
+The FFmpeg manifest pins URLs and SHA-256 values for Windows, Linux, and
+macOS on x86-64 and ARM64. Prepared bundles include FFmpeg, FFprobe, GPLv3
+license text, and exact source/build provenance. Downloads, extraction,
+signing material, and project-owned temporary files stay under `workdir/`.
 
 On Windows, the default build uses Nuitka-managed MinGW64:
 
@@ -221,10 +284,17 @@ Packaging uses Nuitka standalone directory mode. Builds run natively on each
 target platform; this is multi-platform release automation, not single-host
 cross-compilation.
 
-The package includes `config/` and `README.md`. `workdir/` is created at
-runtime and is not bundled. FFmpeg is included only when a complete compatible
-`ffmpeg`/`ffprobe` pair exists under `FFmpeg/`; otherwise the application
-continues to resolve an installed system FFmpeg.
+The package includes `config/`, the runtime SVG icon, and `README.md`.
+`workdir/` is created at runtime and is not bundled. Local builds bundle a
+complete compatible pair from `--ffmpeg-dir` or `FFmpeg/` when available.
+Tagged releases require and verify the pinned native FFmpeg/FFprobe pair.
+
+Windows tagged releases also produce a per-user MSI. It installs without
+administrator privileges, adds a Start menu shortcut, supports major upgrades,
+and includes the same FFmpeg bundle as the portable ZIP. Optional Authenticode
+signing uses the paired `WINDOWS_CERTIFICATE_BASE64` and
+`WINDOWS_CERTIFICATE_PASSWORD` repository secrets; when neither is configured,
+the Windows executable and MSI are published unsigned.
 
 ### Native release matrix
 
@@ -239,11 +309,13 @@ A tag such as `v1.2.3` produces six native builds:
 | macOS Intel | Native x86-64 `.app` bundle |
 | macOS Apple Silicon | Native arm64 `.app` bundle |
 
-Each tagged release publishes exactly eight platform packages:
+Each tagged release publishes exactly ten platform packages:
 
 ```text
 video-compressor-v1.2.3-windows-x86_64.zip
+video-compressor-v1.2.3-windows-x86_64.msi
 video-compressor-v1.2.3-windows-arm64.zip
+video-compressor-v1.2.3-windows-arm64.msi
 video-compressor-v1.2.3-linux-x86_64.tar.gz
 video-compressor-v1.2.3-linux-arm64.tar.gz
 video-compressor-v1.2.3-macos-x86_64.tar.gz
@@ -258,5 +330,5 @@ with `lipo`. Releases are ad-hoc signed; they are not Developer ID signed or
 notarized, so Gatekeeper may require using **Open** or right-clicking the app
 and choosing **Open**. Linux ARM64 requires a sufficiently recent glibc
 distribution. Windows ARM64 is a native ARM package rather than an x86
-executable relying on emulation. FFmpeg, when bundled, must also match the
-operating system and CPU architecture.
+executable relying on emulation. Every tagged package includes FFmpeg 8.1.2
+and FFprobe for its exact operating system and CPU architecture.

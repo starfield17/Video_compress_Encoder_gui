@@ -214,8 +214,14 @@ def final_package_dir(
     ).package_dir
 
 
-def _icon_path(root: Path) -> Path | None:
-    for relative_path in (Path("packaging/assets/app.ico"), Path("packaging/assets/icon.ico")):
+def _icon_path(root: Path, platform_name: str | None = None) -> Path | None:
+    names = (
+        ("app.ico", "icon.ico")
+        if _is_windows(platform_name)
+        else ("app.icns", "icon.icns", "app.png", "icon.png")
+    )
+    for name in names:
+        relative_path = Path("packaging") / "assets" / name
         candidate = root / relative_path
         if candidate.is_file():
             return candidate
@@ -293,11 +299,12 @@ def build_nuitka_command(
                 f"--file-version={normalized_version}",
             ]
         )
-        icon_path = _icon_path(paths.root)
+        icon_path = _icon_path(paths.root, platform_name)
         if icon_path is not None:
             command.append(f"--windows-icon-from-ico={icon_path}")
 
     if macos_app_bundle:
+        icon_path = _icon_path(paths.root, platform_name)
         command.extend(
             [
                 f"--macos-app-name={MACOS_APP_NAME}",
@@ -308,6 +315,8 @@ def build_nuitka_command(
                 "--macos-app-create-dmg",
             ]
         )
+        if icon_path is not None:
+            command.append(f"--macos-app-icon={icon_path}")
 
     command.append("main.py")
     return command
@@ -508,8 +517,10 @@ def stage_ffmpeg(
     *,
     resource_dir: Path | None = None,
     target_arch: str | None = None,
+    ffmpeg_dir: Path | None = None,
+    required: bool = False,
 ) -> bool:
-    source_dir = root / "FFmpeg"
+    source_dir = (ffmpeg_dir or root / "FFmpeg").resolve()
     resource_dir = (resource_dir or package_dir).resolve()
     target_dir = resource_dir / "FFmpeg"
     pair = find_ffmpeg_pair(source_dir, platform_name)
@@ -517,7 +528,10 @@ def stage_ffmpeg(
         if target_dir.exists():
             _remove_generated_path(target_dir)
         expected = "ffmpeg.exe and ffprobe.exe" if _is_windows(platform_name) else "ffmpeg and ffprobe"
-        print(f"Info: no complete compatible FFmpeg pair ({expected}) found under {source_dir}; skipping bundle.")
+        message = f"No complete compatible FFmpeg pair ({expected}) found under {source_dir}."
+        if required:
+            raise RuntimeError(message)
+        print(f"Info: {message} Skipping bundle.")
         return False
 
     if _is_macos(platform_name) and target_arch is not None:
@@ -527,6 +541,8 @@ def stage_ffmpeg(
         except RuntimeError as exc:
             if target_dir.exists():
                 _remove_generated_path(target_dir)
+            if required:
+                raise
             print(f"Info: skipping incompatible FFmpeg bundle: {exc}")
             return False
 
@@ -544,6 +560,8 @@ def stage_release_resources(
     platform_name: str | None = None,
     resource_dir: Path | None = None,
     target_arch: str | None = None,
+    ffmpeg_dir: Path | None = None,
+    require_ffmpeg: bool = False,
 ) -> None:
     root = (root or project_root()).resolve()
     package_dir = package_dir.resolve()
@@ -566,12 +584,20 @@ def stage_release_resources(
 
     shutil.copytree(config_source, resource_dir / "config", dirs_exist_ok=True)
     shutil.copy2(readme_source, resource_dir / "README.md")
+    icon_source = root / "packaging" / "assets" / "app.svg"
+    if not icon_source.is_file():
+        raise FileNotFoundError(f"Required release resource is missing: {icon_source}")
+    assets_dir = resource_dir / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(icon_source, assets_dir / "app.svg")
     stage_ffmpeg(
         root,
         package_dir,
         platform_name,
         resource_dir=resource_dir,
         target_arch=target_arch,
+        ffmpeg_dir=ffmpeg_dir,
+        required=require_ffmpeg,
     )
 
 
@@ -619,6 +645,8 @@ def _build_environment(root: Path, *, macos_app_bundle: bool = False) -> dict[st
     environment["PYTHONPATH"] = str(root) + (
         os.pathsep + existing_pythonpath if existing_pythonpath else ""
     )
+    environment["NUITKA_CACHE_DIR"] = str(root / "workdir" / "nuitka-cache")
+    environment["CCACHE_DIR"] = str(root / "workdir" / "ccache")
     if macos_app_bundle:
         # Nuitka's create-dmg helper runs a Finder AppleScript by default,
         # which can hang on headless CI runners. The repository shim creates a
@@ -695,12 +723,27 @@ def _argument_parser() -> argparse.ArgumentParser:
         default="native",
         help="Native target architecture for a macOS app build",
     )
+    parser.add_argument(
+        "--ffmpeg-dir",
+        type=Path,
+        help="Directory containing the FFmpeg/FFprobe pair to bundle (defaults to ./FFmpeg)",
+    )
+    parser.add_argument(
+        "--require-ffmpeg",
+        action="store_true",
+        help="Fail the build unless a complete compatible FFmpeg/FFprobe pair is bundled",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _argument_parser().parse_args(argv)
     root = project_root()
+    ffmpeg_dir = (
+        (root / args.ffmpeg_dir if not args.ffmpeg_dir.is_absolute() else args.ffmpeg_dir).resolve()
+        if args.ffmpeg_dir is not None
+        else None
+    )
     try:
         normalized_version = normalize_version(args.version)
         paths = build_paths(
@@ -771,6 +814,8 @@ def main(argv: list[str] | None = None) -> int:
             platform_name=sys.platform,
             resource_dir=paths.resources_dir,
             target_arch=paths.target_arch,
+            ffmpeg_dir=ffmpeg_dir,
+            require_ffmpeg=args.require_ffmpeg,
         )
         sign_macos_app(paths.package_dir)
         if paths.dmg_path is None:
@@ -786,7 +831,13 @@ def main(argv: list[str] | None = None) -> int:
         if paths.package_dir.exists():
             _remove_generated_path(paths.package_dir)
         shutil.move(str(distribution_dir), str(paths.package_dir))
-        stage_release_resources(paths.package_dir, root=root, platform_name=sys.platform)
+        stage_release_resources(
+            paths.package_dir,
+            root=root,
+            platform_name=sys.platform,
+            ffmpeg_dir=ffmpeg_dir,
+            require_ffmpeg=args.require_ffmpeg,
+        )
 
     if not paths.executable_path.is_file():
         raise RuntimeError(f"Nuitka build completed but executable was not found: {paths.executable_path}")

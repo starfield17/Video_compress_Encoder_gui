@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "ffmpeg_version": "8.1.2",
+  "licenses": [
+    {
+      "name": "LICENSE.md",
+      "url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.1.2/LICENSE.md",
+      "sha256": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af"
+    },
+    {
+      "name": "COPYING.GPLv3",
+      "url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.1.2/COPYING.GPLv3",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+    }
+  ],
+  "targets": {
+    "windows-x86_64": {
+      "platform": "windows",
+      "architecture": "x86_64",
+      "provider": "BtbN/FFmpeg-Builds",
+      "source_version": "n8.1.2-21-gce3c09c101",
+      "build_recipe": "https://github.com/BtbN/FFmpeg-Builds/tree/8c736b2",
+      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/ce3c09c101",
+      "archives": [
+        {
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-win64-gpl-8.1.zip",
+          "sha256": "682361e32c9631caec09e5d9f09077101c9ed90c14e275f62014fefa6d397990",
+          "format": "zip"
+        }
+      ]
+    },
+    "windows-arm64": {
+      "platform": "windows",
+      "architecture": "arm64",
+      "provider": "BtbN/FFmpeg-Builds",
+      "source_version": "n8.1.2-21-gce3c09c101",
+      "build_recipe": "https://github.com/BtbN/FFmpeg-Builds/tree/8c736b2",
+      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/ce3c09c101",
+      "archives": [
+        {
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-winarm64-gpl-8.1.zip",
+          "sha256": "e4a86d390c1ab524acf73be651915be34bb7f1151540ab22c9774184aab18fdf",
+          "format": "zip"
+        }
+      ]
+    },
+    "linux-x86_64": {
+      "platform": "linux",
+      "architecture": "x86_64",
+      "provider": "BtbN/FFmpeg-Builds",
+      "source_version": "n8.1.2-21-gce3c09c101",
+      "build_recipe": "https://github.com/BtbN/FFmpeg-Builds/tree/8c736b2",
+      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/ce3c09c101",
+      "archives": [
+        {
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-linux64-gpl-8.1.tar.xz",
+          "sha256": "0ba73bbd93472c7622f6dec26d334c5e62e64d858d072490b2844320970456cd",
+          "format": "tar.xz"
+        }
+      ]
+    },
+    "linux-arm64": {
+      "platform": "linux",
+      "architecture": "arm64",
+      "provider": "BtbN/FFmpeg-Builds",
+      "source_version": "n8.1.2-21-gce3c09c101",
+      "build_recipe": "https://github.com/BtbN/FFmpeg-Builds/tree/8c736b2",
+      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/ce3c09c101",
+      "archives": [
+        {
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-linuxarm64-gpl-8.1.tar.xz",
+          "sha256": "d3f90a71a38238466de2e4dc98537862d244e3307383435f94cbc4b8491033f8",
+          "format": "tar.xz"
+        }
+      ]
+    },
+    "macos-x86_64": {
+      "platform": "macos",
+      "architecture": "x86_64",
+      "provider": "Martin Riedl FFmpeg Build Server",
+      "source_version": "8.1.2",
+      "build_recipe": "https://git.martin-riedl.de/ffmpeg/build-script/src/commit/bb1d6db29c",
+      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/n8.1.2",
+      "archives": [
+        {
+          "url": "https://ffmpeg.martin-riedl.de/download/macos/amd64/1783018342_8.1.2/ffmpeg.zip",
+          "sha256": "a52ef43883f44c219766d4b3bdde4e635b35465d0b704c01c3a0566b59775df9",
+          "format": "zip"
+        },
+        {
+          "url": "https://ffmpeg.martin-riedl.de/download/macos/amd64/1783018342_8.1.2/ffprobe.zip",
+          "sha256": "5408ca588c8c72b0dde3afe676d0a7acf25ef97e55ae6eba5c7bede1cda42695",
+          "format": "zip"
+        }
+      ]
+    },
+    "macos-arm64": {
+      "platform": "macos",
+      "architecture": "arm64",
+      "provider": "Martin Riedl FFmpeg Build Server",
+      "source_version": "8.1.2",
+      "build_recipe": "https://git.martin-riedl.de/ffmpeg/build-script/src/commit/bb1d6db29c",
+      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/n8.1.2",
+      "archives": [
+        {
+          "url": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1783011502_8.1.2/ffmpeg.zip",
+          "sha256": "ef1aa60006c7b77ce170c1608c08d8e4ba1c30c5746f2ac986ded932d0ac2c3c",
+          "format": "zip"
+        },
+        {
+          "url": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1783011502_8.1.2/ffprobe.zip",
+          "sha256": "c39787f4af7a3932502d2d48db6f6feaaa836b48a73ef78c32cc3285df61dfaf",
+          "format": "zip"
+        }
+      ]
+    }
+  }
+}

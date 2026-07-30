@@ -1,9 +1,14 @@
-Place optional application icon files in this directory.
+`app.svg` is the canonical project icon. Regenerate the committed platform
+assets after editing it:
 
-Supported auto-detected names:
+```bash
+python scripts/build_icons.py
+```
 
-- Windows: `app.ico` or `icon.ico`
-- macOS: `app.icns` or `icon.icns`
-- Linux: `app.png` or `icon.png`
+- `app.ico`: Windows executable and MSI metadata.
+- `app.icns`: macOS application bundle icon.
+- `app.png`: high-resolution preview and fallback raster.
+- `app.svg`: runtime window icon on every platform.
 
-If no icon file is present, the build will use no custom icon.
+Use `python scripts/build_icons.py --check` in CI to detect stale generated
+assets.

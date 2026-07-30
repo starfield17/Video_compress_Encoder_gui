@@ -10,6 +10,7 @@ from core.discover_ffmpeg import discover_ffmpeg_tools
 from core.encoder_capability_cache import ensure_encoder_capabilities
 from core.encoder_caps import is_valid_preset, preset_choices_for_encoder, resolve_encoder
 from core.models import (
+    CompressionMode,
     DecodeAcceleration,
     EncodeOptions,
     EncodePlan,
@@ -146,18 +147,22 @@ def _successful_plan_item(
     file_item: VideoFileItem,
     default_output: Path,
     ffprobe: Path,
-    ratio: float,
+    ratio: float | None,
     options: EncodeOptions,
     encoder_info: EncoderInfo,
     workdir: Path,
 ) -> EncodePlanItem:
     media_info = probe_media_info(ffprobe, file_item.path)
-    target_bitrate = compute_target_video_bitrate(
-        media_info.video_bitrate_bps,
-        ratio,
-        options.min_video_kbps,
-        options.max_video_kbps,
-    )
+    target_bitrate = 0
+    if options.compression_mode == CompressionMode.FIXED_BITRATE:
+        if ratio is None:
+            raise ValueError("Fixed bitrate mode requires an effective ratio.")
+        target_bitrate = compute_target_video_bitrate(
+            media_info.video_bitrate_bps,
+            ratio,
+            options.min_video_kbps,
+            options.max_video_kbps,
+        )
     item = EncodePlanItem(
         source_path=file_item.path,
         output_path=default_output,
@@ -288,8 +293,12 @@ def build_encode_plan(
     output_root = choose_output_root(input_root, output_dir, options.codec)
     _emit(progress_callback, f"Output root: {output_root}")
     items: list[EncodePlanItem] = []
-    ratio = choose_ratio(options.codec, options.ratio)
-    _emit(progress_callback, f"Effective bitrate ratio: {ratio:.3f}")
+    ratio = None
+    if options.compression_mode == CompressionMode.FIXED_BITRATE:
+        ratio = choose_ratio(options.codec, options.ratio)
+        _emit(progress_callback, f"Effective bitrate ratio: {ratio:.3f}")
+    else:
+        _emit(progress_callback, "Smart compression: target bitrate will be selected during execution.")
     _emit(progress_callback, f"Discovered {len(file_items)} input item(s).")
 
     for index, file_item in enumerate(file_items, start=1):

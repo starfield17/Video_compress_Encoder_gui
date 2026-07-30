@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Video Compressor"
+    Manufacturer="starfield17"
+    Version="$(var.Version)"
+    UpgradeCode="4478BF58-30E3-5232-AE83-3E33254B3385"
+    Scope="perUser"
+    Language="1033"
+    InstallerVersion="500">
+
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of Video Compressor is already installed."
+      Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Files Include="$(var.SourceDir)\**" />
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Video Compressor">
+        <Component Id="ApplicationShortcut" Guid="64495D69-8A5D-583C-B6D8-0D3E8761BEA6">
+          <Shortcut
+            Id="StartMenuShortcut"
+            Name="Video Compressor"
+            Description="Compress and quality-check video files"
+            Target="[INSTALLFOLDER]video-compressor.exe"
+            WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+          <RegistryValue
+            Root="HKCU"
+            Key="Software\starfield17\Video Compressor"
+            Name="installed"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Icon Id="ProductIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/starfield17/Video_compress_Encoder_gui" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/starfield17/Video_compress_Encoder_gui/releases" />
+  </Package>
+</Wix>

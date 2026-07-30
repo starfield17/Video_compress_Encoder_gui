@@ -40,6 +40,14 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
+      - name: Configure project temp directory
+        shell: bash
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/workdir/tmp"
+          echo "TMPDIR=$GITHUB_WORKSPACE/workdir/tmp" >> "$GITHUB_ENV"
+          echo "TMP=$GITHUB_WORKSPACE/workdir/tmp" >> "$GITHUB_ENV"
+          echo "TEMP=$GITHUB_WORKSPACE/workdir/tmp" >> "$GITHUB_ENV"
+
       - name: Install Linux Qt runtime dependencies
         if: runner.os == 'Linux'
         run: |
@@ -52,6 +60,9 @@ jobs:
 
       - name: Install runtime dependencies
         run: python -m pip install -r requirements.txt
+
+      - name: Verify generated icon assets
+        run: python scripts/build_icons.py --check
 
       - name: Compile Python sources
         run: python -m compileall -q main.py cli core gui scripts test
@@ -115,6 +126,14 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-build.txt
 
+      - name: Configure project temp directory
+        shell: bash
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/workdir/tmp"
+          echo "TMPDIR=$GITHUB_WORKSPACE/workdir/tmp" >> "$GITHUB_ENV"
+          echo "TMP=$GITHUB_WORKSPACE/workdir/tmp" >> "$GITHUB_ENV"
+          echo "TEMP=$GITHUB_WORKSPACE/workdir/tmp" >> "$GITHUB_ENV"
+
       - name: Install Linux packaging dependencies
         if: runner.os == 'Linux'
         run: |
@@ -128,6 +147,9 @@ jobs:
 
       - name: Install build dependencies
         run: python -m pip install -r requirements-build.txt
+
+      - name: Verify generated icon assets
+        run: python scripts/build_icons.py --check
 
       - name: Diagnose packaging interpreter
         run: python -c "import platform, PySide6; print(platform.platform()); print(platform.machine()); print(PySide6.__version__)"

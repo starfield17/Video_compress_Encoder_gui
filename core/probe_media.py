@@ -130,4 +130,7 @@ def probe_media_info(ffprobe_path: Path, input_path: Path) -> MediaInfo:
         fps=fps,
         video_codec=video_codec,
         audio_codec=audio_codec,
+        audio_stream_count=len(audio_streams),
+        pix_fmt=str(video_stream.get("pix_fmt")) if video_stream.get("pix_fmt") else None,
+        color_transfer=str(video_stream.get("color_transfer")) if video_stream.get("color_transfer") else None,
     )

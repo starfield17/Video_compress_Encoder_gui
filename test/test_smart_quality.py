@@ -1,0 +1,541 @@
+from __future__ import annotations
+
+import contextlib
+import io
+import os
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtWidgets import QApplication
+
+from cli.cli_entry import run_cli
+from core.exec_encode import execute_plan_item
+from core.models import (
+    AudioMode,
+    BackendChoice,
+    CodecChoice,
+    CompressionMode,
+    EncodeOptions,
+    EncodePlan,
+    EncodePlanItem,
+    EncoderInfo,
+    MediaInfo,
+    OperationCancelledError,
+    QualityCandidateResult,
+    QualitySearchResult,
+    QualitySearchStatus,
+    VmafCapabilities,
+)
+from core.preset_store import encode_options_to_preset_data, preset_data_to_encode_options
+from core.parallel_queue_exec import execute_plan_parallel
+from core.smart_quality import (
+    analyze_quality,
+    calculate_smart_bitrate_budget,
+    choose_smart_sample_windows,
+    quality_configuration_fingerprint,
+    resolve_max_output_ratio,
+    search_bitrate_candidates,
+)
+from gui.gui_mainwindow import MainWindow
+from gui.queue_state import QueueItemStatus, create_queue_records
+
+
+def _media(path: Path, *, duration: float = 60.0, audio_streams: int = 1) -> MediaInfo:
+    return MediaInfo(
+        path=path,
+        duration=duration,
+        format_bitrate_bps=4_000_000,
+        video_bitrate_bps=3_000_000,
+        audio_bitrate_bps=128_000 * audio_streams,
+        width=1920,
+        height=1080,
+        fps=30.0,
+        video_codec="h264",
+        audio_codec="aac",
+        audio_stream_count=audio_streams,
+        pix_fmt="yuv420p",
+        color_transfer="bt709",
+    )
+
+
+def _item(source: Path, output: Path, options: EncodeOptions) -> EncodePlanItem:
+    return EncodePlanItem(
+        source_path=source,
+        output_path=output,
+        media_info=_media(source),
+        encoder_info=EncoderInfo(
+            codec=options.codec,
+            backend=BackendChoice.CPU,
+            encoder_name="libx265",
+            supports_two_pass=True,
+            default_preset="slow",
+        ),
+        options=options,
+    )
+
+
+class SmartConfigurationTestCase(unittest.TestCase):
+    def test_codec_default_output_ratios(self) -> None:
+        self.assertEqual(resolve_max_output_ratio(CodecChoice.HEVC, None), 0.70)
+        self.assertEqual(resolve_max_output_ratio(CodecChoice.AV1, None), 0.50)
+
+    def test_legacy_preset_loads_as_fixed_bitrate(self) -> None:
+        data = encode_options_to_preset_data(EncodeOptions(compression_mode=CompressionMode.FIXED_BITRATE))
+        data.pop("compression_mode")
+        data.pop("min_vmaf")
+        data.pop("max_output_ratio")
+        restored = preset_data_to_encode_options(data)
+        self.assertEqual(restored.compression_mode, CompressionMode.FIXED_BITRATE)
+        self.assertEqual(restored.min_vmaf, 95.0)
+
+    def test_new_options_default_to_smart(self) -> None:
+        self.assertEqual(EncodeOptions().compression_mode, CompressionMode.SMART)
+
+    def test_cli_rejects_fixed_ratio_flag_in_smart_mode(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            exit_code = run_cli(
+                [
+                    "plan",
+                    "missing.mov",
+                    "--compression-mode",
+                    "smart",
+                    "--ratio",
+                    "0.5",
+                ]
+            )
+        self.assertEqual(exit_code, 2)
+        self.assertIn("--ratio cannot be used", stderr.getvalue())
+
+
+class SmartSamplingAndBudgetTestCase(unittest.TestCase):
+    def test_short_video_uses_one_full_window(self) -> None:
+        windows = choose_smart_sample_windows(25.0)
+        self.assertEqual([(window.start_sec, window.duration_sec) for window in windows], [(0.0, 25.0)])
+
+    def test_just_over_thirty_seconds_has_three_non_overlapping_windows(self) -> None:
+        windows = choose_smart_sample_windows(31.0)
+        self.assertEqual(len(windows), 3)
+        for left, right in zip(windows, windows[1:]):
+            self.assertLessEqual(left.start_sec + left.duration_sec, right.start_sec)
+
+    def test_aac_budget_counts_each_audio_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source.mov"
+            source.write_bytes(b"x" * 10_000_000)
+            options = EncodeOptions(
+                audio_mode=AudioMode.AAC,
+                audio_bitrate="128k",
+                max_output_ratio=0.70,
+            )
+            item = _item(source, Path(temp_dir) / "out.mp4", options)
+            item.media_info = _media(source, audio_streams=2)
+            budget = calculate_smart_bitrate_budget(item)
+            self.assertEqual(budget.audio_bitrate_bps, 256_000)
+            self.assertGreater(budget.max_video_bitrate_bps, 0)
+
+    def test_missing_vmaf_is_reported_as_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"x" * 10_000_000)
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"binary")
+            item = _item(source, root / "out.mp4", EncodeOptions())
+            with patch(
+                "core.smart_quality.detect_vmaf_capabilities",
+                return_value=VmafCapabilities(False, False, False, "missing libvmaf"),
+            ):
+                result = analyze_quality(ffmpeg, item, root, root / "log.txt")
+            self.assertEqual(result.status, QualitySearchStatus.UNSUPPORTED)
+            self.assertIn("missing libvmaf", result.reason or "")
+
+    def test_hdr_input_is_reported_as_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"x" * 10_000_000)
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"binary")
+            item = _item(source, root / "out.mp4", EncodeOptions())
+            item.media_info.color_transfer = "smpte2084"
+            with patch(
+                "core.smart_quality.detect_vmaf_capabilities",
+                return_value=VmafCapabilities(True, True, True),
+            ):
+                result = analyze_quality(ffmpeg, item, root, root / "log.txt")
+            self.assertEqual(result.status, QualitySearchStatus.UNSUPPORTED)
+            self.assertIn("HDR", result.reason or "")
+
+
+class SmartSearchTestCase(unittest.TestCase):
+    def test_search_selects_lowest_tested_passing_candidate(self) -> None:
+        tested: list[int] = []
+
+        def evaluate(bitrate: int) -> QualityCandidateResult:
+            tested.append(bitrate)
+            return QualityCandidateResult(
+                video_bitrate_bps=bitrate,
+                min_vmaf=96.0 if bitrate >= 1_800_000 else 94.0,
+            )
+
+        candidates, selected, required = search_bitrate_candidates(
+            evaluate=evaluate,
+            min_bitrate_bps=500_000,
+            budget_bitrate_bps=3_000_000,
+            required_search_ceiling_bps=4_000_000,
+            min_vmaf=95.0,
+        )
+        self.assertEqual(selected, min(item.video_bitrate_bps for item in candidates if item.min_vmaf >= 95.0))
+        self.assertEqual(required, selected)
+        self.assertLessEqual(len(tested), 6)
+        self.assertEqual(len(tested), len(set(tested)))
+
+    def test_non_monotonic_scores_still_choose_lowest_tested_pass(self) -> None:
+        scores = {
+            3_000_000: 96.0,
+            500_000: 90.0,
+            1_750_000: 95.5,
+            1_125_000: 94.0,
+            1_437_000: 95.2,
+            1_281_000: 93.0,
+        }
+
+        def evaluate(bitrate: int) -> QualityCandidateResult:
+            return QualityCandidateResult(video_bitrate_bps=bitrate, min_vmaf=scores.get(bitrate, 94.0))
+
+        candidates, selected, _required = search_bitrate_candidates(
+            evaluate=evaluate,
+            min_bitrate_bps=500_000,
+            budget_bitrate_bps=3_000_000,
+            required_search_ceiling_bps=4_000_000,
+            min_vmaf=95.0,
+        )
+        passing = [candidate.video_bitrate_bps for candidate in candidates if candidate.min_vmaf >= 95.0]
+        self.assertEqual(selected, min(passing))
+
+    def test_failed_budget_candidate_estimates_required_bitrate_without_selecting_it(self) -> None:
+        def evaluate(bitrate: int) -> QualityCandidateResult:
+            return QualityCandidateResult(
+                video_bitrate_bps=bitrate,
+                min_vmaf=96.0 if bitrate >= 3_000_000 else 93.0,
+            )
+
+        candidates, selected, required = search_bitrate_candidates(
+            evaluate=evaluate,
+            min_bitrate_bps=500_000,
+            budget_bitrate_bps=2_000_000,
+            required_search_ceiling_bps=4_000_000,
+            min_vmaf=95.0,
+        )
+        self.assertIsNone(selected)
+        self.assertIsNotNone(required)
+        self.assertGreater(required or 0, 2_000_000)
+        self.assertIn(required, [candidate.video_bitrate_bps for candidate in candidates])
+
+
+class SmartExecutionSafetyTestCase(unittest.TestCase):
+    def _quality_result(self, max_bytes: int = 700) -> QualitySearchResult:
+        return QualitySearchResult(
+            status=QualitySearchStatus.FOUND,
+            encoder_name="libx265",
+            backend=BackendChoice.CPU,
+            selected_video_bitrate_bps=500_000,
+            min_vmaf=96.0,
+            predicted_output_bytes=600,
+            predicted_output_ratio=0.60,
+            max_output_bytes=max_bytes,
+            fingerprint="fingerprint",
+        )
+
+    def test_oversized_output_does_not_replace_existing_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"s" * 1_000)
+            output = root / "output.mp4"
+            output.write_bytes(b"original")
+            options = EncodeOptions(max_output_ratio=0.70, overwrite=True)
+            item = _item(source, output, options)
+
+            def fake_run(cmd, *_args, **_kwargs) -> None:
+                Path(cmd[-1]).write_bytes(b"x" * 800)
+
+            with (
+                patch("core.exec_encode.analyze_quality", return_value=self._quality_result()),
+                patch("core.exec_encode._run_logged_command", side_effect=fake_run),
+            ):
+                result = execute_plan_item(Path("ffmpeg"), item, root)
+
+            self.assertTrue(result.skipped)
+            self.assertEqual(output.read_bytes(), b"original")
+            self.assertFalse(list(root.glob(".*.smart-*")))
+
+    def test_late_existing_target_is_preserved_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"s" * 1_000)
+            output = root / "output.mp4"
+            output.write_bytes(b"existing")
+            item = _item(
+                source,
+                output,
+                EncodeOptions(max_output_ratio=0.70, overwrite=False),
+            )
+
+            def fake_run(cmd, *_args, **_kwargs) -> None:
+                Path(cmd[-1]).write_bytes(b"x" * 600)
+
+            with (
+                patch("core.exec_encode.analyze_quality", return_value=self._quality_result()),
+                patch("core.exec_encode._run_logged_command", side_effect=fake_run),
+            ):
+                result = execute_plan_item(Path("ffmpeg"), item, root)
+
+            self.assertFalse(result.success)
+            self.assertFalse(result.skipped)
+            self.assertEqual(output.read_bytes(), b"existing")
+            self.assertFalse(list(root.glob(".*.smart-*")))
+
+
+class SmartParallelExecutionTestCase(unittest.TestCase):
+    def _quality_result(self, max_bytes: int = 700) -> QualitySearchResult:
+        return QualitySearchResult(
+            status=QualitySearchStatus.FOUND,
+            encoder_name="libx265",
+            backend=BackendChoice.CPU,
+            selected_video_bitrate_bps=500_000,
+            min_vmaf=96.0,
+            predicted_output_bytes=600,
+            predicted_output_ratio=0.60,
+            max_output_bytes=max_bytes,
+            fingerprint="fingerprint",
+        )
+
+    def test_parallel_workers_bind_before_analysis_and_serialize_searches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            options = EncodeOptions(
+                parallel_enabled=True,
+                parallel_backends=(BackendChoice.CPU, BackendChoice.NVENC),
+                overwrite=True,
+            )
+            items: list[EncodePlanItem] = []
+            for index in range(2):
+                source = root / f"source-{index}.mov"
+                source.write_bytes(b"s" * 1_000)
+                items.append(_item(source, root / f"output-{index}.mp4", options))
+            plan = EncodePlan(
+                items=items,
+                ffmpeg_path=Path("ffmpeg"),
+                ffprobe_path=Path("ffprobe"),
+                input_root=root,
+                output_root=root,
+            )
+            encoders = {
+                BackendChoice.CPU: EncoderInfo(
+                    codec=CodecChoice.HEVC,
+                    backend=BackendChoice.CPU,
+                    encoder_name="libx265",
+                    supports_two_pass=True,
+                    default_preset=None,
+                ),
+                BackendChoice.NVENC: EncoderInfo(
+                    codec=CodecChoice.HEVC,
+                    backend=BackendChoice.NVENC,
+                    encoder_name="hevc_nvenc",
+                    supports_two_pass=False,
+                    default_preset=None,
+                ),
+            }
+            active = 0
+            max_active = 0
+            observed_backends: set[BackendChoice] = set()
+            counter_lock = threading.Lock()
+
+            def fake_analysis(_ffmpeg, item, _workdir, _log_path, **_kwargs):
+                nonlocal active, max_active
+                self.assertIsNotNone(item.encoder_info)
+                observed_backends.add(item.encoder_info.backend)
+                with counter_lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.03)
+                with counter_lock:
+                    active -= 1
+                return QualitySearchResult(
+                    status=QualitySearchStatus.FOUND,
+                    encoder_name=item.encoder_info.encoder_name,
+                    backend=item.encoder_info.backend,
+                    selected_video_bitrate_bps=500_000,
+                    min_vmaf=96.0,
+                    predicted_output_ratio=0.60,
+                    max_output_bytes=700,
+                    fingerprint=item.encoder_info.backend.value,
+                )
+
+            def fake_run(cmd, *_args, **_kwargs) -> None:
+                Path(cmd[-1]).write_bytes(b"x" * 600)
+
+            with (
+                patch("core.parallel_queue_exec.ensure_encoder_capabilities", return_value={"codecs": {}}),
+                patch(
+                    "core.parallel_queue_exec.resolve_encoder",
+                    side_effect=lambda _codec, backend, *_args, **_kwargs: encoders[backend],
+                ),
+                patch("core.exec_encode.analyze_quality", side_effect=fake_analysis),
+                patch("core.exec_encode._run_logged_command", side_effect=fake_run),
+            ):
+                results = execute_plan_parallel(
+                    plan,
+                    root,
+                    backends=(BackendChoice.CPU, BackendChoice.NVENC),
+                )
+
+            self.assertEqual(len(results), 2)
+            self.assertTrue(all(result.success for result in results))
+            self.assertEqual(observed_backends, {BackendChoice.CPU, BackendChoice.NVENC})
+            self.assertEqual(max_active, 1)
+
+    def test_successful_output_is_published_after_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"s" * 1_000)
+            output = root / "output.mp4"
+            options = EncodeOptions(max_output_ratio=0.70, overwrite=True)
+            item = _item(source, output, options)
+
+            def fake_run(cmd, *_args, **_kwargs) -> None:
+                Path(cmd[-1]).write_bytes(b"x" * 600)
+
+            with (
+                patch("core.exec_encode.analyze_quality", return_value=self._quality_result()),
+                patch("core.exec_encode._run_logged_command", side_effect=fake_run),
+            ):
+                result = execute_plan_item(Path("ffmpeg"), item, root)
+
+            self.assertTrue(result.success)
+            self.assertEqual(output.stat().st_size, 600)
+
+    def test_fingerprint_changes_when_backend_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"source")
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"binary")
+            item = _item(source, root / "output.mp4", EncodeOptions())
+            first = quality_configuration_fingerprint(ffmpeg, item)
+            item.encoder_info = EncoderInfo(
+                codec=CodecChoice.HEVC,
+                backend=BackendChoice.NVENC,
+                encoder_name="hevc_nvenc",
+                supports_two_pass=False,
+                default_preset="p6",
+            )
+            second = quality_configuration_fingerprint(ffmpeg, item)
+            self.assertNotEqual(first, second)
+
+    def test_matching_analysis_cache_is_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"source")
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"binary")
+            item = _item(source, root / "output.mp4", EncodeOptions())
+            cached = self._quality_result()
+            cached.fingerprint = quality_configuration_fingerprint(ffmpeg, item)
+            item.quality_search_result = cached
+            with patch("core.smart_quality.detect_vmaf_capabilities") as detect:
+                result = analyze_quality(ffmpeg, item, root, root / "log.txt")
+            self.assertIs(result, cached)
+            detect.assert_not_called()
+
+    def test_cancelled_output_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"s" * 1_000)
+            item = _item(source, root / "output.mp4", EncodeOptions(overwrite=True))
+
+            def fake_run(cmd, *_args, **_kwargs) -> None:
+                Path(cmd[-1]).write_bytes(b"partial")
+                raise OperationCancelledError("cancel")
+
+            with (
+                patch("core.exec_encode.analyze_quality", return_value=self._quality_result()),
+                patch("core.exec_encode._run_logged_command", side_effect=fake_run),
+                self.assertRaises(OperationCancelledError),
+            ):
+                execute_plan_item(Path("ffmpeg"), item, root)
+            self.assertFalse(list(root.glob(".*.smart-*")))
+
+
+class SmartGuiTestCase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+        cls.repo_root = Path(__file__).resolve().parent.parent
+
+    def test_smart_controls_and_queue_initial_state(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            smart_index = window.compression_mode_combo.findData(CompressionMode.SMART.value)
+            window.compression_mode_combo.setCurrentIndex(smart_index)
+            self.assertFalse(window.ratio_edit.isEnabled())
+            self.assertTrue(window.min_vmaf_spin.isEnabled())
+            self.assertFalse(window.sample_mode_combo.isEnabled())
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                source = root / "source.mov"
+                source.write_bytes(b"source")
+                item = _item(source, root / "output.mp4", EncodeOptions())
+                plan = EncodePlan(
+                    items=[item],
+                    ffmpeg_path=Path("ffmpeg"),
+                    ffprobe_path=Path("ffprobe"),
+                    input_root=root,
+                    output_root=root,
+                )
+                records = create_queue_records(plan, root)
+                self.assertEqual(records[0].status, QueueItemStatus.WAITING_ANALYSIS)
+        finally:
+            window.close()
+
+    def test_unavailable_vmaf_disables_smart_mode(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            window._on_encoder_capability_detection_completed(
+                {
+                    "codecs": {"hevc": [], "av1": []},
+                    "vmaf": {
+                        "filter_available": False,
+                        "standard_model": False,
+                        "model_4k": False,
+                        "error_message": "missing libvmaf",
+                    },
+                }
+            )
+            smart_index = window.compression_mode_combo.findData(CompressionMode.SMART.value)
+            smart_item = window.compression_mode_combo.model().item(smart_index)
+            self.assertFalse(smart_item.isEnabled())
+            self.assertEqual(
+                window.compression_mode_combo.currentData(),
+                CompressionMode.FIXED_BITRATE.value,
+            )
+        finally:
+            window.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

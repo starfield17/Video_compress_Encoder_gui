@@ -8,8 +8,20 @@ if [[ "$#" -lt 2 ]]; then
 fi
 
 arguments=("$@")
-output_path="${arguments[$(( $# - 2 ))]}"
-source_path="${arguments[$(( $# - 1 ))]}"
+output_path=""
+source_path=""
+for ((index = 0; index < ${#arguments[@]} - 1; index++)); do
+    if [[ "${arguments[$index]}" == *.dmg ]]; then
+        output_path="${arguments[$index]}"
+        source_path="${arguments[$(( index + 1 ))]}"
+        break
+    fi
+done
+
+if [[ -z "$output_path" || -z "$source_path" ]]; then
+    printf 'Could not locate output DMG and source folder in arguments.\n' >&2
+    exit 2
+fi
 
 # Nuitka invokes create-dmg with the temporary standalone directory as the
 # source argument. In app-dist mode the normalized .app is its sibling.
@@ -22,7 +34,10 @@ if [[ ! -d "$source_path" ]]; then
     exit 1
 fi
 
-temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/video-compressor-dmg.XXXXXXXX")"
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+temporary_root="${TMPDIR:-$project_root/workdir/tmp}"
+mkdir -p "$temporary_root"
+temporary_dir="$(mktemp -d "$temporary_root/video-compressor-dmg.XXXXXXXX")"
 temporary_path="$temporary_dir/image.dmg"
 cleanup() {
     rm -rf "$temporary_dir"

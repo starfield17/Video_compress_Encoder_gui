@@ -9,11 +9,12 @@ from PySide6.QtCore import QThread, Signal
 
 from core.discover_ffmpeg import find_binary
 from core.encoder_capability_cache import ensure_encoder_capabilities
-from core.exec_encode import execute_plan, execute_preview
-from core.models import EncodeOptions, OperationCancelledError, PreviewOptions, VideoFileItem
+from core.exec_encode import execute_plan, execute_preview, execute_smart_preview
+from core.models import CompressionMode, EncodeOptions, OperationCancelledError, PreviewOptions, VideoFileItem
 from core.plan_encode import build_encode_plan
 from core.preview_sample import build_preview_job
 from core.scan_videos import collect_video_files
+from core.smart_quality import detect_vmaf_capabilities
 
 
 def _safe_console_print(message: str) -> None:
@@ -73,6 +74,14 @@ class EncoderCapabilityDetectWorker(QThread):
                 force_refresh=self.force_refresh,
                 progress_callback=self._emit_log,
             )
+            vmaf = detect_vmaf_capabilities(ffmpeg)
+            capabilities = dict(capabilities)
+            capabilities["vmaf"] = {
+                "filter_available": vmaf.filter_available,
+                "standard_model": vmaf.standard_model,
+                "model_4k": vmaf.model_4k,
+                "error_message": vmaf.error_message,
+            }
             self.completed.emit(capabilities)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -204,16 +213,27 @@ class PreviewWorker(QThread):
             item = next((item for item in plan.items if not item.skip_reason), None)
             if item is None:
                 raise RuntimeError("No valid plan item is available for preview.")
-            job = build_preview_job(item, self.workdir, self.preview_options)
-            result = execute_preview(
-                job,
-                plan.ffmpeg_path,
-                self.workdir,
-                log_callback=self._emit_log,
-                progress_callback=self._emit_progress,
-                cancel_check=self._cancel_event.is_set,
-                process_callback=self._set_current_process,
-            )
+            if self.options.compression_mode == CompressionMode.SMART:
+                result = execute_smart_preview(
+                    item,
+                    plan.ffmpeg_path,
+                    self.workdir,
+                    log_callback=self._emit_log,
+                    progress_callback=self._emit_progress,
+                    cancel_check=self._cancel_event.is_set,
+                    process_callback=self._set_current_process,
+                )
+            else:
+                job = build_preview_job(item, self.workdir, self.preview_options)
+                result = execute_preview(
+                    job,
+                    plan.ffmpeg_path,
+                    self.workdir,
+                    log_callback=self._emit_log,
+                    progress_callback=self._emit_progress,
+                    cancel_check=self._cancel_event.is_set,
+                    process_callback=self._set_current_process,
+                )
             self.completed.emit(result)
         except OperationCancelledError as exc:
             self.cancelled.emit(str(exc))

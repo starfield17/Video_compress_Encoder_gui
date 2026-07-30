@@ -1,7 +1,10 @@
 {
   "codec": "hevc",
+  "compression_mode": "smart",
   "backend": "auto",
   "ratio": 0.76,
+  "min_vmaf": 95.0,
+  "max_output_ratio": 0.7,
   "min_video_kbps": 250,
   "max_video_kbps": 0,
   "container": "mp4",

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Callable, TextIO
 
@@ -12,17 +14,27 @@ from core.build_ffmpeg_cmd import (
 )
 from core.external_subtitles import copy_external_subtitles
 from core.models import (
+    CompressionMode,
     EncodePlan,
     EncodePlanItem,
     EncodeResult,
     OperationCancelledError,
     PreviewJob,
     PreviewResult,
+    QualitySearchResult,
+    QualitySearchStatus,
+    SmartPreviewResult,
 )
 from core.path_utils import log_file_path
 from core.preview_estimate import estimate_preview
 from core.safety_checks import validate_workdir
 from core.subprocess_utils import hidden_popen_kwargs
+from core.smart_quality import (
+    SMART_ANALYSIS_SEMAPHORE,
+    acquire_analysis_slot,
+    analyze_quality,
+    resolve_max_output_ratio,
+)
 
 
 def _emit(log_callback: Callable[[str], None] | None, message: str) -> None:
@@ -365,31 +377,100 @@ def execute_plan_item(
             progress_callback,
         )
 
-    commands, passlog = build_encode_commands(ffmpeg_path, item, workdir)
-    total_passes = max(len(commands), 1)
-    _emit(
-        log_callback,
-        f"[{queue_index}/{queue_total}] Encoding {item.source_path.name} -> {item.output_path}",
-    )
-    _emit_progress(
-        progress_callback,
-        state="starting_file",
-        percent=0.0,
-        pass_percent=0.0,
-        file_progress=0.0,
-        current_pass_index=1,
-        total_passes=total_passes,
-        **base_context,
-    )
     result = EncodeResult(
         source_path=item.source_path,
         output_path=item.output_path,
         success=True,
-        commands=commands,
         log_path=log_path,
     )
+    passlog: Path | None = None
+    temporary_output: Path | None = None
+    commands: list[list[str]] = []
+    total_passes = 1
     current_pass_index = 1
     try:
+        if item.options.compression_mode == CompressionMode.SMART:
+            _emit(log_callback, f"[{queue_index}/{queue_total}] Waiting for smart analysis: {item.source_path.name}")
+            _emit_progress(
+                progress_callback,
+                state="waiting_analysis",
+                percent=0.0,
+                file_progress=0.0,
+                **base_context,
+            )
+            acquire_analysis_slot(cancel_check)
+            try:
+                _emit(log_callback, f"[{queue_index}/{queue_total}] Smart analysis started: {item.source_path.name}")
+
+                def analysis_progress(event: dict[str, object]) -> None:
+                    _emit_progress(progress_callback, **{**base_context, **event})
+
+                quality_result = analyze_quality(
+                    ffmpeg_path,
+                    item,
+                    workdir,
+                    log_path,
+                    progress_callback=analysis_progress,
+                    cancel_check=cancel_check,
+                    process_callback=process_callback,
+                )
+            finally:
+                SMART_ANALYSIS_SEMAPHORE.release()
+            item.quality_search_result = quality_result
+            result.quality_search_result = quality_result
+            if not quality_result.success:
+                result.success = False
+                result.skipped = True
+                result.error_message = quality_result.reason or "Smart compression constraints could not be satisfied."
+                _emit(
+                    log_callback,
+                    f"[{queue_index}/{queue_total}] Smart analysis skipped {item.source_path.name}: {result.error_message}",
+                )
+                _emit_progress(
+                    progress_callback,
+                    state="skipped",
+                    percent=100.0,
+                    file_progress=100.0,
+                    message=result.error_message,
+                    quality_search_result=quality_result,
+                    **base_context,
+                )
+                return result
+            item.target_video_bitrate_bps = quality_result.selected_video_bitrate_bps
+            _emit_progress(
+                progress_callback,
+                state="analysis_finished",
+                quality_search_result=quality_result,
+                target_video_bitrate_bps=item.target_video_bitrate_bps,
+                **base_context,
+            )
+            item.output_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_output = item.output_path.parent / (
+                f".{item.output_path.stem}.smart-{uuid.uuid4().hex}{item.output_path.suffix}"
+            )
+
+        commands, passlog = build_encode_commands(
+            ffmpeg_path,
+            item,
+            workdir,
+            output_path=temporary_output,
+        )
+        result.commands = commands
+        total_passes = max(len(commands), 1)
+        _emit(
+            log_callback,
+            f"[{queue_index}/{queue_total}] Encoding {item.source_path.name} -> {item.output_path}",
+        )
+        _emit_progress(
+            progress_callback,
+            state="starting_file",
+            percent=0.0,
+            pass_percent=0.0,
+            file_progress=0.0,
+            current_pass_index=1,
+            total_passes=total_passes,
+            **base_context,
+        )
         for pass_index, cmd in enumerate(commands, start=1):
             current_pass_index = pass_index
             file_progress = ((pass_index - 1) / total_passes) * 100.0
@@ -416,6 +497,41 @@ def execute_plan_item(
                     "total_passes": total_passes,
                 },
             )
+        if temporary_output is not None:
+            _emit_progress(
+                progress_callback,
+                state="validating",
+                percent=100.0,
+                file_progress=100.0,
+                current_pass_index=total_passes,
+                total_passes=total_passes,
+                **base_context,
+            )
+            max_output_bytes = int(
+                item.source_path.stat().st_size
+                * resolve_max_output_ratio(item.options.codec, item.options.max_output_ratio)
+            )
+            actual_size = temporary_output.stat().st_size
+            if actual_size > max_output_bytes:
+                result.success = False
+                result.skipped = True
+                result.error_message = (
+                    f"Actual output size {actual_size} bytes exceeds the smart limit "
+                    f"of {max_output_bytes} bytes."
+                )
+                _emit(log_callback, f"[{queue_index}/{queue_total}] {result.error_message}")
+                _emit_progress(
+                    progress_callback,
+                    state="skipped",
+                    message=result.error_message,
+                    quality_search_result=result.quality_search_result,
+                    **base_context,
+                )
+                return result
+            if item.output_path.exists() and not item.options.overwrite:
+                raise FileExistsError(f"Output appeared during encoding and overwrite is disabled: {item.output_path}")
+            os.replace(temporary_output, item.output_path)
+            temporary_output = None
         _copy_external_subtitles_for_result(item, result, queue_index, queue_total, log_callback)
         _emit(
             log_callback,
@@ -442,14 +558,18 @@ def execute_plan_item(
             **base_context,
         )
         raise
-    except subprocess.CalledProcessError as exc:
+    except (subprocess.CalledProcessError, OSError, ValueError, RuntimeError) as exc:
         result.success = False
-        result.return_code = exc.returncode
-        result.error_message = exc.stderr or exc.stdout or str(exc)
-        _write_command_failure_log(log_path, exc)
+        if isinstance(exc, subprocess.CalledProcessError):
+            result.return_code = exc.returncode
+            result.error_message = exc.stderr or exc.stdout or str(exc)
+            _write_command_failure_log(log_path, exc)
+        else:
+            result.return_code = 1
+            result.error_message = str(exc)
         _emit(
             log_callback,
-            f"[{queue_index}/{queue_total}] Failed {item.source_path.name} (exit code {exc.returncode})",
+            f"[{queue_index}/{queue_total}] Failed {item.source_path.name} (exit code {result.return_code})",
         )
         _emit_progress(
             progress_callback,
@@ -462,6 +582,11 @@ def execute_plan_item(
         return result
     finally:
         _cleanup_passlog(passlog)
+        if temporary_output is not None:
+            try:
+                temporary_output.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _cleanup_passlog(passlog: Path | None) -> None:
@@ -621,3 +746,57 @@ def execute_preview(
         )
     finally:
         _cleanup_passlog(passlog)
+
+
+def execute_smart_preview(
+    item: EncodePlanItem,
+    ffmpeg_path: Path,
+    workdir: Path,
+    log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+    process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
+) -> SmartPreviewResult:
+    workdir = validate_workdir(workdir)
+    log_path = log_file_path(workdir, item.source_path, "smart-preview")
+    try:
+        acquire_analysis_slot(cancel_check)
+        try:
+            quality_result = analyze_quality(
+                ffmpeg_path,
+                item,
+                workdir,
+                log_path,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                process_callback=process_callback,
+            )
+        finally:
+            SMART_ANALYSIS_SEMAPHORE.release()
+        _emit(log_callback, f"Smart preview finished for {item.source_path.name}")
+        return SmartPreviewResult(
+            source_path=item.source_path,
+            success=quality_result.success,
+            quality_search_result=quality_result,
+            log_path=log_path,
+            error_message=None if quality_result.success else quality_result.reason,
+        )
+    except OperationCancelledError:
+        raise
+    except (subprocess.CalledProcessError, OSError, ValueError, RuntimeError) as exc:
+        encoder = item.encoder_info
+        failed_result = item.quality_search_result
+        if failed_result is None:
+            failed_result = QualitySearchResult(
+                status=QualitySearchStatus.FAILED,
+                encoder_name=encoder.encoder_name if encoder else "",
+                backend=encoder.backend if encoder else item.options.backend,
+                reason=str(exc),
+            )
+        return SmartPreviewResult(
+            source_path=item.source_path,
+            success=False,
+            quality_search_result=failed_result,
+            log_path=log_path,
+            error_message=str(exc),
+        )

@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Video Compressor</title>
+  <desc id="desc">A compact film frame crossed by a quality-analysis pulse.</desc>
+  <defs>
+    <linearGradient id="surface" x1="154" y1="116" x2="870" y2="908" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#142A4A"/>
+      <stop offset="0.55" stop-color="#0B172C"/>
+      <stop offset="1" stop-color="#070D19"/>
+    </linearGradient>
+    <linearGradient id="pulse" x1="248" y1="512" x2="776" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#45E6D1"/>
+      <stop offset="0.48" stop-color="#23C9C0"/>
+      <stop offset="1" stop-color="#67A8FF"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="72" y="72" width="880" height="880" rx="224" fill="url(#surface)"/>
+  <rect x="168" y="216" width="688" height="592" rx="112" fill="#0D1D35" stroke="#D8E9FA" stroke-width="48"/>
+
+  <g fill="#7CA5CC">
+    <rect x="136" y="300" width="96" height="88" rx="30"/>
+    <rect x="136" y="468" width="96" height="88" rx="30"/>
+    <rect x="136" y="636" width="96" height="88" rx="30"/>
+    <rect x="792" y="300" width="96" height="88" rx="30"/>
+    <rect x="792" y="468" width="96" height="88" rx="30"/>
+    <rect x="792" y="636" width="96" height="88" rx="30"/>
+  </g>
+
+  <path
+    d="M264 520H354L418 402L494 654L566 456L624 520H760"
+    fill="none"
+    stroke="#06101F"
+    stroke-width="88"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    opacity="0.72"
+  />
+  <path
+    d="M264 520H354L418 402L494 654L566 456L624 520H760"
+    fill="none"
+    stroke="url(#pulse)"
+    stroke-width="52"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <circle cx="760" cy="520" r="34" fill="#67A8FF"/>
+</svg>

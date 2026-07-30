@@ -1,7 +1,10 @@
 {
   "codec": "av1",
+  "compression_mode": "smart",
   "backend": "auto",
   "ratio": 0.64,
+  "min_vmaf": 95.0,
+  "max_output_ratio": 0.5,
   "min_video_kbps": 250,
   "max_video_kbps": 0,
   "container": "mp4",

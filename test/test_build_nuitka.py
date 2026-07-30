@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.build_nuitka import (
+    _build_environment,
     build_nuitka_command,
     build_paths,
     clean_generated_paths,
@@ -42,9 +43,19 @@ class NuitkaBuildCommandTestCase(unittest.TestCase):
                 any(option.startswith("--report=") for option in command)
             )
 
+    def test_build_caches_are_kept_under_project_workdir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            environment = _build_environment(root)
+        self.assertEqual(environment["NUITKA_CACHE_DIR"], str(root / "workdir" / "nuitka-cache"))
+        self.assertEqual(environment["CCACHE_DIR"], str(root / "workdir" / "ccache"))
+
     def test_windows_command_contains_metadata_and_console_options(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
+            icon = root / "packaging" / "assets" / "app.ico"
+            icon.parent.mkdir(parents=True)
+            icon.write_bytes(b"ico")
             command = build_nuitka_command(
                 "1.2.3",
                 root=root,
@@ -60,6 +71,7 @@ class NuitkaBuildCommandTestCase(unittest.TestCase):
             self.assertIn("--company-name=starfield17", command)
             self.assertIn("--product-version=1.2.3.0", command)
             self.assertIn("--file-version=1.2.3.0", command)
+            self.assertIn(f"--windows-icon-from-ico={icon}", command)
 
     def test_windows_command_can_select_msvc(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -158,6 +170,9 @@ class NuitkaBuildCommandTestCase(unittest.TestCase):
     def test_macos_app_command_and_paths_are_native(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
+            icon = root / "packaging" / "assets" / "app.icns"
+            icon.parent.mkdir(parents=True)
+            icon.write_bytes(b"png")
             command = build_nuitka_command(
                 "1.2.3",
                 root=root,
@@ -181,6 +196,7 @@ class NuitkaBuildCommandTestCase(unittest.TestCase):
         self.assertIn("--macos-app-version=1.2.3", command)
         self.assertIn("--macos-target-arch=arm64", command)
         self.assertIn("--macos-app-create-dmg", command)
+        self.assertIn(f"--macos-app-icon={icon}", command)
         self.assertEqual(paths.package_dir, root / "dist" / "Video Compressor.app")
         self.assertEqual(
             paths.executable_path,
@@ -225,6 +241,9 @@ class NuitkaStagingTestCase(unittest.TestCase):
         (root / "config" / "i18n").mkdir(parents=True)
         (root / "config" / "i18n" / "en.json").write_text("{}", encoding="utf-8")
         (root / "README.md").write_text("README", encoding="utf-8")
+        assets = root / "packaging" / "assets"
+        assets.mkdir(parents=True)
+        (assets / "app.svg").write_text("<svg/>", encoding="utf-8")
         (root / "workdir").mkdir()
         (root / "workdir" / "runtime-only.txt").write_text("not bundled", encoding="utf-8")
         package_dir = root / "dist" / "video-compressor"
@@ -238,6 +257,7 @@ class NuitkaStagingTestCase(unittest.TestCase):
 
             self.assertEqual((package_dir / "config" / "i18n" / "en.json").read_text(encoding="utf-8"), "{}")
             self.assertEqual((package_dir / "README.md").read_text(encoding="utf-8"), "README")
+            self.assertTrue((package_dir / "assets" / "app.svg").is_file())
             self.assertFalse((package_dir / "workdir").exists())
 
     def test_staging_copies_complete_matching_ffmpeg_pair(self) -> None:
@@ -262,6 +282,32 @@ class NuitkaStagingTestCase(unittest.TestCase):
             stage_release_resources(package_dir, root=root, platform_name="linux")
 
             self.assertFalse((package_dir / "FFmpeg").exists())
+
+    def test_staging_can_require_explicit_ffmpeg_directory(self) -> None:
+        temp_dir, root, package_dir = self._make_root()
+        with temp_dir:
+            explicit = root / "workdir" / "ffmpeg-release"
+            explicit.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "No complete compatible FFmpeg pair"):
+                stage_release_resources(
+                    package_dir,
+                    root=root,
+                    platform_name="linux",
+                    ffmpeg_dir=explicit,
+                    require_ffmpeg=True,
+                )
+
+            (explicit / "bin").mkdir()
+            (explicit / "bin" / "ffmpeg").write_text("ffmpeg", encoding="utf-8")
+            (explicit / "bin" / "ffprobe").write_text("ffprobe", encoding="utf-8")
+            stage_release_resources(
+                package_dir,
+                root=root,
+                platform_name="linux",
+                ffmpeg_dir=explicit,
+                require_ffmpeg=True,
+            )
+            self.assertTrue((package_dir / "FFmpeg" / "bin" / "ffmpeg").is_file())
 
     def test_staging_skips_wrong_platform_ffmpeg_pair(self) -> None:
         temp_dir, root, package_dir = self._make_root()

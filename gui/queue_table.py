@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QAbstractItemView, QHeaderView, QSty
 from core.bitrate_policy import human_kbps
 from core.i18n import Translator
 from gui.queue_state import (
+    ACTIVE_ITEM_STATUSES,
     QueueItemRecord,
     QueueItemStatus,
     QueueMetrics,
@@ -58,11 +59,12 @@ class QueueColumn(IntEnum):
     DURATION = 3
     SOURCE_BITRATE = 4
     TARGET_BITRATE = 5
-    ENCODER = 6
-    OUTPUT = 7
-    TAGS = 8
-    STATUS = 9
-    PROGRESS = 10
+    QUALITY = 6
+    ENCODER = 7
+    OUTPUT = 8
+    TAGS = 9
+    STATUS = 10
+    PROGRESS = 11
 
 
 COLUMN_COUNT = len(QueueColumn)
@@ -73,6 +75,7 @@ FIXED_COLUMN_WIDTHS: dict[QueueColumn, int] = {
     QueueColumn.DURATION: 84,
     QueueColumn.SOURCE_BITRATE: 110,
     QueueColumn.TARGET_BITRATE: 110,
+    QueueColumn.QUALITY: 126,
     QueueColumn.STATUS: 108,
     QueueColumn.PROGRESS: 92,
 }
@@ -325,6 +328,7 @@ class QueueTableModel(QAbstractTableModel):
             QueueColumn.DURATION: self.tr.t("gui.table.duration"),
             QueueColumn.SOURCE_BITRATE: self.tr.t("gui.table.source_bitrate"),
             QueueColumn.TARGET_BITRATE: self.tr.t("gui.table.target_bitrate"),
+            QueueColumn.QUALITY: self.tr.t("gui.table.quality"),
             QueueColumn.ENCODER: self.tr.t("gui.table.encoder"),
             QueueColumn.OUTPUT: self.tr.t("gui.table.output"),
             QueueColumn.TAGS: self.tr.t("gui.table.tags"),
@@ -355,6 +359,16 @@ class QueueTableModel(QAbstractTableModel):
                 return human_kbps(media.video_bitrate_bps) if media else "n/a"
             if column == QueueColumn.TARGET_BITRATE:
                 return human_kbps(record.plan_item.target_video_bitrate_bps) if record.plan_item.target_video_bitrate_bps else "n/a"
+            if column == QueueColumn.QUALITY:
+                quality = record.plan_item.quality_search_result
+                if quality is None or quality.min_vmaf is None:
+                    return "-"
+                ratio = quality.predicted_output_ratio or quality.required_output_ratio
+                return (
+                    f"{quality.min_vmaf:.1f} / {ratio * 100:.1f}%"
+                    if ratio is not None
+                    else f"{quality.min_vmaf:.1f}"
+                )
             if column == QueueColumn.ENCODER:
                 if record.assigned_encoder and record.assigned_backend:
                     return f"{record.assigned_encoder} ({record.assigned_backend})"
@@ -365,9 +379,18 @@ class QueueTableModel(QAbstractTableModel):
             if column == QueueColumn.TAGS:
                 return " ".join(build_tags(record))
             if column == QueueColumn.STATUS:
+                if record.status == QueueItemStatus.ANALYZING and record.analysis_candidate_limit:
+                    return (
+                        f"{self.tr.t(status_key(record.status))} "
+                        f"{record.analysis_candidate_index}/{record.analysis_candidate_limit}"
+                    )
                 return self.tr.t(status_key(record.status))
             if column == QueueColumn.PROGRESS:
-                if record.status in {QueueItemStatus.QUEUED, QueueItemStatus.DRAFT}:
+                if record.status in {
+                    QueueItemStatus.QUEUED,
+                    QueueItemStatus.WAITING_ANALYSIS,
+                    QueueItemStatus.DRAFT,
+                }:
                     return "-"
                 return f"{max(0.0, min(100.0, record.file_progress)):.1f}%"
         elif role == Qt.ToolTipRole:
@@ -384,6 +407,7 @@ class QueueTableModel(QAbstractTableModel):
                 QueueColumn.DURATION,
                 QueueColumn.SOURCE_BITRATE,
                 QueueColumn.TARGET_BITRATE,
+                QueueColumn.QUALITY,
                 QueueColumn.STATUS,
                 QueueColumn.PROGRESS,
             }:
@@ -391,6 +415,10 @@ class QueueTableModel(QAbstractTableModel):
         elif role == Qt.ForegroundRole and column in {QueueColumn.STATUS, QueueColumn.PROGRESS}:
             palette = {
                 QueueItemStatus.RUNNING: QColor("#0B5394"),
+                QueueItemStatus.WAITING_ANALYSIS: QColor("#666666"),
+                QueueItemStatus.ANALYZING: QColor("#674EA7"),
+                QueueItemStatus.ENCODING: QColor("#0B5394"),
+                QueueItemStatus.VALIDATING: QColor("#134F5C"),
                 QueueItemStatus.DONE: QColor("#38761D"),
                 QueueItemStatus.FAILED: QColor("#A61C00"),
                 QueueItemStatus.CANCELLED: QColor("#7F6000"),
@@ -402,7 +430,7 @@ class QueueTableModel(QAbstractTableModel):
             style = QApplication.style()
             if style is None:
                 return None
-            if record.status == QueueItemStatus.RUNNING:
+            if record.status in ACTIVE_ITEM_STATUSES:
                 return style.standardIcon(QStyle.SP_MediaPlay)
             if record.status == QueueItemStatus.DONE:
                 return style.standardIcon(QStyle.SP_DialogApplyButton)
@@ -423,7 +451,7 @@ class QueueTableModel(QAbstractTableModel):
         if not index.isValid():
             return default_flags | Qt.ItemIsDropEnabled
         record = self._records[index.row()]
-        if record.status != QueueItemStatus.RUNNING:
+        if record.status not in ACTIVE_ITEM_STATUSES:
             default_flags |= Qt.ItemIsDragEnabled
         return default_flags | Qt.ItemIsDropEnabled
 
@@ -449,7 +477,7 @@ class QueueTableModel(QAbstractTableModel):
         if destination_child >= source_row and destination_child <= source_row + count:
             return False
         moving = self._records[source_row : source_row + count]
-        if any(record.status == QueueItemStatus.RUNNING for record in moving):
+        if any(record.status in ACTIVE_ITEM_STATUSES for record in moving):
             return False
 
         self.beginMoveRows(source_parent, source_row, source_row + count - 1, destination_parent, destination_child)
@@ -502,7 +530,7 @@ class QueueTableModel(QAbstractTableModel):
         targets = sorted({row for row in rows if 0 <= row < len(self._records)}, reverse=True)
         removed = 0
         for row in targets:
-            if self._records[row].status == QueueItemStatus.RUNNING:
+            if self._records[row].status in ACTIVE_ITEM_STATUSES:
                 continue
             self.beginRemoveRows(QModelIndex(), row, row)
             del self._records[row]
@@ -541,14 +569,17 @@ class QueueTableModel(QAbstractTableModel):
             row, record = self.record_for_id(item_id)
             if row is None or record is None:
                 continue
-            if record.status == QueueItemStatus.QUEUED:
+            if record.status in {QueueItemStatus.QUEUED, QueueItemStatus.WAITING_ANALYSIS}:
                 record.last_speed = ""
                 record.elapsed_sec = None
                 changed_rows.append(row)
         self._emit_rows_changed(changed_rows)
 
     def execution_records(self) -> list[QueueItemRecord]:
-        return [record for record in self._records if record.status == QueueItemStatus.QUEUED]
+        return [
+            record for record in self._records
+            if record.status in {QueueItemStatus.QUEUED, QueueItemStatus.WAITING_ANALYSIS}
+        ]
 
     def mark_running(self, item_id: str) -> None:
         row, record = self.record_for_id(item_id)
@@ -587,8 +618,26 @@ class QueueTableModel(QAbstractTableModel):
                 backend if isinstance(backend, str) else record.assigned_backend,
                 encoder if isinstance(encoder, str) else record.assigned_encoder,
             )
-        if state in {"starting_file", "running_pass"} and record.status != QueueItemStatus.RUNNING:
-            record.status = QueueItemStatus.RUNNING
+        if state == "waiting_analysis":
+            record.status = QueueItemStatus.WAITING_ANALYSIS
+        elif state in {"analyzing", "candidate_finished"}:
+            record.status = QueueItemStatus.ANALYZING
+        elif state in {"starting_file", "running_pass"}:
+            record.status = QueueItemStatus.ENCODING
+        elif state == "validating":
+            record.status = QueueItemStatus.VALIDATING
+        candidate_index = event.get("candidate_index")
+        if isinstance(candidate_index, int):
+            record.analysis_candidate_index = candidate_index
+        candidate_limit = event.get("candidate_limit")
+        if isinstance(candidate_limit, int):
+            record.analysis_candidate_limit = candidate_limit
+        quality_result = event.get("quality_search_result")
+        if quality_result is not None:
+            record.plan_item.quality_search_result = quality_result
+        target_bitrate = event.get("target_video_bitrate_bps")
+        if isinstance(target_bitrate, int) and target_bitrate > 0:
+            record.plan_item.target_video_bitrate_bps = target_bitrate
         current_pass_index = event.get("current_pass_index")
         if isinstance(current_pass_index, int):
             record.current_pass_index = current_pass_index
@@ -632,7 +681,7 @@ class QueueTableModel(QAbstractTableModel):
     def can_remove_rows(self, rows: list[int]) -> bool:
         for row in rows:
             record = self.record_for_row(row)
-            if record is not None and record.status == QueueItemStatus.RUNNING:
+            if record is not None and record.status in ACTIVE_ITEM_STATUSES:
                 return False
         return True
 

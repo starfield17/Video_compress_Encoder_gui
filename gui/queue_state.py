@@ -8,13 +8,17 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from core.models import EncodePlan, EncodePlanItem, EncodeResult, MediaInfo
+from core.models import CompressionMode, EncodePlan, EncodePlanItem, EncodeResult, MediaInfo
 
 
 class QueueItemStatus(str, Enum):
     DRAFT = "draft"
     QUEUED = "queued"
     RUNNING = "running"
+    WAITING_ANALYSIS = "waiting_analysis"
+    ANALYZING = "analyzing"
+    ENCODING = "encoding"
+    VALIDATING = "validating"
     PAUSED = "paused"
     DONE = "done"
     FAILED = "failed"
@@ -26,11 +30,22 @@ STATUS_KEY_BY_VALUE = {
     QueueItemStatus.DRAFT: "gui.status.draft",
     QueueItemStatus.QUEUED: "gui.status.ready",
     QueueItemStatus.RUNNING: "gui.status.running",
+    QueueItemStatus.WAITING_ANALYSIS: "gui.status.waiting_analysis",
+    QueueItemStatus.ANALYZING: "gui.status.analyzing",
+    QueueItemStatus.ENCODING: "gui.status.encoding",
+    QueueItemStatus.VALIDATING: "gui.status.validating",
     QueueItemStatus.PAUSED: "gui.status.paused",
     QueueItemStatus.DONE: "gui.status.done",
     QueueItemStatus.FAILED: "gui.status.failed",
     QueueItemStatus.SKIPPED: "gui.status.skip",
     QueueItemStatus.CANCELLED: "gui.status.cancelled",
+}
+
+ACTIVE_ITEM_STATUSES = {
+    QueueItemStatus.RUNNING,
+    QueueItemStatus.ANALYZING,
+    QueueItemStatus.ENCODING,
+    QueueItemStatus.VALIDATING,
 }
 
 
@@ -61,6 +76,8 @@ class QueueItemRecord:
     assigned_backend: str | None = None
     assigned_encoder: str | None = None
     result: EncodeResult | None = None
+    analysis_candidate_index: int = 0
+    analysis_candidate_limit: int = 0
 
     @property
     def source_path(self) -> Path:
@@ -126,7 +143,12 @@ def create_queue_records(plan: EncodePlan, workdir: Path) -> list[QueueItemRecor
     records: list[QueueItemRecord] = []
     for item in plan.items:
         total_passes = 2 if item.options.two_pass and item.encoder_info and item.encoder_info.supports_two_pass else 1
-        status = QueueItemStatus.SKIPPED if item.skip_reason else QueueItemStatus.QUEUED
+        if item.skip_reason:
+            status = QueueItemStatus.SKIPPED
+        elif item.options.compression_mode == CompressionMode.SMART:
+            status = QueueItemStatus.WAITING_ANALYSIS
+        else:
+            status = QueueItemStatus.QUEUED
         file_progress = 100.0 if status == QueueItemStatus.SKIPPED else 0.0
         records.append(
             QueueItemRecord(
@@ -185,6 +207,16 @@ def build_tooltip(record: QueueItemRecord) -> str:
         lines.append("Warnings: " + "; ".join(record.plan_item.warnings))
     if record.error_summary:
         lines.append("Detail: " + record.error_summary)
+    quality = record.plan_item.quality_search_result
+    if quality is not None:
+        if quality.min_vmaf is not None:
+            lines.append(f"Minimum VMAF: {quality.min_vmaf:.2f}")
+        if quality.predicted_output_ratio is not None:
+            lines.append(f"Predicted output: {quality.predicted_output_ratio * 100:.2f}%")
+        if quality.required_output_ratio is not None:
+            lines.append(f"Estimated required output: {quality.required_output_ratio * 100:.2f}%")
+        if quality.reason:
+            lines.append("Smart analysis: " + quality.reason)
     return "\n".join(lines)
 
 
@@ -258,9 +290,9 @@ def compute_metrics(records: list[QueueItemRecord]) -> QueueMetrics:
         weight = record.effective_weight
         total_weight += weight
         completed_weight += processed_weight(record)
-        if record.status == QueueItemStatus.QUEUED:
+        if record.status in {QueueItemStatus.QUEUED, QueueItemStatus.WAITING_ANALYSIS}:
             metrics.queued_items += 1
-        elif record.status == QueueItemStatus.RUNNING:
+        elif record.status in ACTIVE_ITEM_STATUSES:
             metrics.running_items += 1
             running_record = record
         elif record.status == QueueItemStatus.FAILED:
@@ -292,11 +324,17 @@ def compute_metrics(records: list[QueueItemRecord]) -> QueueMetrics:
 
 
 def mark_started(record: QueueItemRecord) -> None:
-    record.status = QueueItemStatus.RUNNING
+    record.status = (
+        QueueItemStatus.WAITING_ANALYSIS
+        if record.plan_item.options.compression_mode == CompressionMode.SMART
+        else QueueItemStatus.ENCODING
+    )
     record.started_at = time.time()
     record.finished_at = None
     record.error_summary = None
     record.result = None
+    record.analysis_candidate_index = 0
+    record.analysis_candidate_limit = 0
     record.log_path = None
     record.current_pass_index = 1
     record.pass_percent = 0.0
@@ -304,7 +342,11 @@ def mark_started(record: QueueItemRecord) -> None:
 
 
 def reset_for_retry(record: QueueItemRecord) -> None:
-    record.status = QueueItemStatus.QUEUED
+    record.status = (
+        QueueItemStatus.WAITING_ANALYSIS
+        if record.plan_item.options.compression_mode == CompressionMode.SMART
+        else QueueItemStatus.QUEUED
+    )
     record.current_pass_index = 0
     record.pass_percent = 0.0
     record.file_progress = 0.0
@@ -317,12 +359,18 @@ def reset_for_retry(record: QueueItemRecord) -> None:
     record.assigned_backend = None
     record.assigned_encoder = None
     record.result = None
+    record.analysis_candidate_index = 0
+    record.analysis_candidate_limit = 0
 
 
 def mark_finished(record: QueueItemRecord, result: EncodeResult) -> None:
     record.result = result
     record.log_path = result.log_path
     record.finished_at = time.time()
+    if result.quality_search_result is not None:
+        record.plan_item.quality_search_result = result.quality_search_result
+        if result.quality_search_result.selected_video_bitrate_bps > 0:
+            record.plan_item.target_video_bitrate_bps = result.quality_search_result.selected_video_bitrate_bps
     if result.skipped:
         record.status = QueueItemStatus.SKIPPED
         record.file_progress = 100.0

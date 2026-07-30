@@ -28,6 +28,15 @@ class AppPathsCompiledEnvironmentTestCase(unittest.TestCase):
                 self.assertEqual(app_paths.bundle_root(), executable.parent.resolve())
                 self.assertEqual(app_paths.app_root(), executable.parent.resolve())
 
+    def test_icon_path_prefers_packaged_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            packaged_icon = root / "assets" / "app.svg"
+            packaged_icon.parent.mkdir(parents=True)
+            packaged_icon.write_text("<svg/>", encoding="utf-8")
+            with patch.object(app_paths, "bundle_root", return_value=root):
+                self.assertEqual(app_paths.app_icon_path(), packaged_icon.resolve())
+
     def test_nuitka_compiled_marker_uses_executable_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             executable = Path(temp_dir) / "video-compressor"
