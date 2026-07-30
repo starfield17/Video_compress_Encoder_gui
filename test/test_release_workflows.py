@@ -44,7 +44,11 @@ class ReleaseWorkflowMatrixTestCase(unittest.TestCase):
             )
         self.assertEqual(rows["windows-arm64"]["windows_compiler"], "clang")
         self.assertEqual(rows["windows-x86_64"]["windows_compiler"], "mingw64")
+        self.assertEqual(rows["windows-x86_64"]["msi_architecture"], "x86_64")
+        self.assertEqual(rows["windows-arm64"]["msi_architecture"], "arm64")
         self.assertIn("scripts/build_icons.py --check", workflow)
+        self.assertIn("scripts\\build_msi.py", workflow)
+        self.assertIn("msi-smoke-expanded", workflow)
         self.assertIn("workdir/tmp", workflow)
 
     def test_release_matrix_and_publish_contract_cover_native_packages(self) -> None:

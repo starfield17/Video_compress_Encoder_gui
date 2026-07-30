@@ -84,12 +84,14 @@ jobs:
           - os: windows-2022
             target: windows-x86_64
             architecture: x64
+            msi_architecture: x86_64
             package_kind: standalone
             windows_compiler: mingw64
 
           - os: windows-11-arm
             target: windows-arm64
             architecture: arm64
+            msi_architecture: arm64
             package_kind: standalone
             windows_compiler: clang
 
@@ -195,6 +197,50 @@ jobs:
 
           if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
+          }
+
+      - name: Install pinned WiX Toolset for MSI smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install `
+            --tool-path ".\workdir\wix-tool" `
+            wix `
+            --version 6.0.2
+
+      - name: Build and inspect Windows MSI smoke package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $source = ".\workdir\msi-smoke-source"
+          $ffmpeg = Join-Path $source "FFmpeg\bin"
+          New-Item -ItemType Directory -Force -Path $ffmpeg | Out-Null
+          Copy-Item ".\dist\video-compressor\video-compressor.exe" $source
+          Set-Content -Path (Join-Path $ffmpeg "ffmpeg.exe") -Value "smoke"
+          Set-Content -Path (Join-Path $ffmpeg "ffprobe.exe") -Value "smoke"
+
+          $msi = ".\workdir\video-compressor-smoke-${{ matrix.target }}.msi"
+          python .\scripts\build_msi.py `
+            --version "0.0.0" `
+            --architecture "${{ matrix.msi_architecture }}" `
+            --source-dir $source `
+            --output $msi `
+            --wix ".\workdir\wix-tool\wix.exe"
+
+          $expanded = Join-Path $env:GITHUB_WORKSPACE "workdir\msi-smoke-expanded"
+          New-Item -ItemType Directory -Force -Path $expanded | Out-Null
+          $resolvedMsi = (Resolve-Path $msi).Path
+          $process = Start-Process msiexec.exe `
+            -Wait `
+            -PassThru `
+            -ArgumentList @("/a", "`"$resolvedMsi`"", "/qn", "TARGETDIR=`"$expanded`"")
+          if ($process.ExitCode -ne 0) {
+              throw "MSI smoke extraction failed with exit code $($process.ExitCode)"
+          }
+          foreach ($name in @("video-compressor.exe", "ffmpeg.exe", "ffprobe.exe")) {
+              if (-not (Get-ChildItem -Path $expanded -Recurse -File -Filter $name)) {
+                  throw "MSI smoke package does not contain $name"
+              }
           }
 
       - name: Verify packaged executable on Linux
