@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -11,6 +13,16 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class WindowsMsiTestCase(unittest.TestCase):
+    def test_script_entrypoint_imports_from_an_isolated_interpreter(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-I", str(ROOT / "scripts" / "build_msi.py"), "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_wix_source_is_per_user_and_has_upgrade_and_shortcut_metadata(self) -> None:
         source = (ROOT / "packaging" / "windows" / "Product.wxs").read_text(encoding="utf-8")
         self.assertIn('Scope="perUser"', source)
