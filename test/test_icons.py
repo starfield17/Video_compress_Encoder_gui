@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import struct
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -33,6 +34,17 @@ class IconAssetTestCase(unittest.TestCase):
             self.assertEqual(width, height)
             sizes.append(256 if width == 0 else width)
         self.assertEqual(tuple(sizes), ICO_SIZES)
+
+    def test_asset_check_accepts_windows_svg_line_endings(self) -> None:
+        source_dir = ROOT / "packaging" / "assets"
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            for name in ("app-assets.json", "app.icns", "app.ico", "app.png"):
+                (output_dir / name).write_bytes((source_dir / name).read_bytes())
+            svg_path = output_dir / "app.svg"
+            svg_path.write_bytes((source_dir / "app.svg").read_bytes().replace(b"\n", b"\r\n"))
+
+            self.assertTrue(write_assets(svg_path, output_dir, check=True))
 
     def test_icns_contains_expected_png_chunks(self) -> None:
         payload = (ROOT / "packaging" / "assets" / "app.icns").read_bytes()

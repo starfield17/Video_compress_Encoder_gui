@@ -94,6 +94,13 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _asset_sha256(path: Path) -> str:
+    payload = path.read_bytes()
+    if path.suffix.lower() == ".svg":
+        payload = payload.replace(b"\r\n", b"\n")
+    return _sha256(payload)
+
+
 def write_assets(svg_path: Path, output_dir: Path, *, check: bool = False) -> bool:
     manifest_path = output_dir / MANIFEST_NAME
     if check:
@@ -111,7 +118,7 @@ def write_assets(svg_path: Path, output_dir: Path, *, check: bool = False) -> bo
             name
             for name, digest in expected.items()
             if not (output_dir / name).is_file()
-            or _sha256((output_dir / name).read_bytes()) != digest
+            or _asset_sha256(output_dir / name) != digest
         ]
         if mismatches:
             print(
@@ -128,7 +135,7 @@ def write_assets(svg_path: Path, output_dir: Path, *, check: bool = False) -> bo
         path.write_bytes(payload)
 
     manifest = {
-        "app.svg": _sha256(svg_path.read_bytes()),
+        "app.svg": _asset_sha256(svg_path),
         "generated": {name: _sha256(payload) for name, payload in expected.items()},
     }
     manifest_path.write_text(
