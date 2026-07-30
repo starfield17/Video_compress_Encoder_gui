@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import struct
 import sys
 from pathlib import Path
@@ -20,6 +22,7 @@ ICNS_SIZES = (
     (512, b"ic09"),
     (1024, b"ic10"),
 )
+MANIFEST_NAME = "app-assets.json"
 
 
 def project_root() -> Path:
@@ -87,24 +90,51 @@ def generated_assets(svg_path: Path) -> dict[str, bytes]:
     }
 
 
+def _sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
 def write_assets(svg_path: Path, output_dir: Path, *, check: bool = False) -> bool:
+    manifest_path = output_dir / MANIFEST_NAME
+    if check:
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            expected = {
+                "app.svg": manifest["app.svg"],
+                **manifest["generated"],
+            }
+        except (FileNotFoundError, KeyError, TypeError, json.JSONDecodeError):
+            print(f"Icon asset manifest is missing or invalid: {manifest_path}", file=sys.stderr)
+            return False
+
+        mismatches = [
+            name
+            for name, digest in expected.items()
+            if not (output_dir / name).is_file()
+            or _sha256((output_dir / name).read_bytes()) != digest
+        ]
+        if mismatches:
+            print(
+                "Icon assets are stale or modified: " + ", ".join(mismatches),
+                file=sys.stderr,
+            )
+            return False
+        return True
+
     expected = generated_assets(svg_path)
-    mismatches: list[str] = []
     for name, payload in expected.items():
         path = output_dir / name
-        if check:
-            if not path.is_file() or path.read_bytes() != payload:
-                mismatches.append(name)
-            continue
         output_dir.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
 
-    if mismatches:
-        print(
-            "Generated icon assets are stale or missing: " + ", ".join(mismatches),
-            file=sys.stderr,
-        )
-        return False
+    manifest = {
+        "app.svg": _sha256(svg_path.read_bytes()),
+        "generated": {name: _sha256(payload) for name, payload in expected.items()},
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return True
 
 

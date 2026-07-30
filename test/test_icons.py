@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtSvg import QSvgRenderer
 
-from scripts.build_icons import ICNS_SIZES, ICO_SIZES, generated_assets
+from scripts.build_icons import ICNS_SIZES, ICO_SIZES, write_assets
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -20,8 +20,7 @@ class IconAssetTestCase(unittest.TestCase):
         self.assertEqual(renderer.viewBox().width(), 1024)
         self.assertEqual(renderer.viewBox().height(), 1024)
 
-        for name, expected in generated_assets(svg_path).items():
-            self.assertEqual((svg_path.parent / name).read_bytes(), expected)
+        self.assertTrue(write_assets(svg_path, svg_path.parent, check=True))
 
     def test_ico_contains_expected_sizes(self) -> None:
         payload = (ROOT / "packaging" / "assets" / "app.ico").read_bytes()
