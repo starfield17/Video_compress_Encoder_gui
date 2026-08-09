@@ -205,6 +205,15 @@ class QualityCandidateResult:
     video_bitrate_bps: int
     segment_vmaf: list[float] = field(default_factory=list)
     min_vmaf: float = 0.0
+    # Smart analysis measures each encoded sample instead of assuming that
+    # the requested -b:v value is the bitrate the encoder will produce.  The
+    # defaults keep this result backwards-compatible with callers that only
+    # provide VMAF scores.
+    encoded_bytes: list[int] = field(default_factory=list)
+    encoded_durations_sec: list[float] = field(default_factory=list)
+    observed_video_bitrate_bps: int = 0
+    predicted_output_bytes: Optional[int] = None
+    predicted_output_ratio: Optional[float] = None
 
 
 @dataclass(slots=True)
