@@ -32,9 +32,45 @@ DEFAULT_MAX_OUTPUT_RATIO = {
     CodecChoice.HEVC: 0.70,
     CodecChoice.AV1: 0.50,
 }
-MAX_SEARCH_CANDIDATES = 6
+MAX_SEARCH_CANDIDATES = 8
 CONTAINER_BUDGET_FACTOR = 0.98
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}
+SMART_ERROR_TAIL_CHARS = 4_000
+
+
+class SmartCommandError(subprocess.CalledProcessError):
+    """A failed Smart command with enough context to diagnose its phase.
+
+    Smart analysis runs several FFmpeg commands for every candidate.  The
+    normal ``CalledProcessError`` text only exposes an exit code, which makes
+    a Windows path/filtergraph failure especially difficult to identify.  We
+    retain the ``CalledProcessError`` shape for existing callers while adding
+    a bounded output tail and the phase that failed.
+    """
+
+    def __init__(self, returncode: int, cmd: list[str], phase: str, output: str) -> None:
+        self.phase = phase
+        self.output_tail = output[-SMART_ERROR_TAIL_CHARS:]
+        command = " ".join(str(part) for part in cmd)
+        tail = self.output_tail.strip() or "(no command output)"
+        diagnostic = (
+            f"Smart {phase} failed with exit code {returncode}: {command}\n"
+            f"Output tail (last {SMART_ERROR_TAIL_CHARS} characters):\n{tail}"
+        )
+        super().__init__(
+            returncode,
+            cmd,
+            output=diagnostic,
+            stderr=diagnostic,
+        )
+
+    def __str__(self) -> str:
+        command = " ".join(str(part) for part in self.cmd)
+        tail = self.output_tail.strip() or "(no command output)"
+        return (
+            f"Smart {self.phase} failed with exit code {self.returncode}: {command}\n"
+            f"Output tail (last {SMART_ERROR_TAIL_CHARS} characters):\n{tail}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +165,14 @@ def predicted_output_size(
     return int(math.ceil(media_bytes / CONTAINER_BUDGET_FACTOR))
 
 
+def _measured_prediction_ratio(candidate: QualityCandidateResult, source_bytes: int) -> float | None:
+    if candidate.predicted_output_ratio is not None:
+        return candidate.predicted_output_ratio
+    if candidate.predicted_output_bytes is not None and source_bytes > 0:
+        return candidate.predicted_output_bytes / source_bytes
+    return None
+
+
 def _floor_candidate(value: int) -> int:
     return max(1_000, int(value // 1_000) * 1_000)
 
@@ -145,13 +189,42 @@ def search_bitrate_candidates(
     required_search_ceiling_bps: int,
     min_vmaf: float,
     max_candidates: int = MAX_SEARCH_CANDIDATES,
+    max_output_bytes: int | None = None,
 ) -> tuple[list[QualityCandidateResult], int | None, int | None]:
-    """Return tested candidates, selected in-budget bitrate, and required bitrate."""
+    """Return tested candidates, a selectable bitrate, and required bitrate.
+
+    When ``max_output_bytes`` is supplied, a candidate is selectable only when
+    both its VMAF and its measured output estimate satisfy the constraints.
+    ``required_bitrate`` intentionally remains the lowest *quality-passing*
+    candidate, even when that candidate is too large.  The caller can then
+    report the measured ratio that explains why the joint constraints are
+    unsatisfiable.
+    """
     cache: dict[int, QualityCandidateResult] = {}
+    candidate_limit = min(MAX_SEARCH_CANDIDATES, max(0, int(max_candidates)))
+
+    def quality_passes(result: QualityCandidateResult) -> bool:
+        return result.min_vmaf >= min_vmaf
+
+    def constraints_pass(result: QualityCandidateResult) -> bool:
+        if not quality_passes(result):
+            return False
+        if max_output_bytes is None:
+            return True
+        predicted_bytes = result.predicted_output_bytes
+        return predicted_bytes is not None and predicted_bytes <= max_output_bytes
+
+    def summarize(*, allow_selected: bool) -> tuple[int | None, int | None]:
+        quality_passing = [result.video_bitrate_bps for result in cache.values() if quality_passes(result)]
+        required = min(quality_passing) if quality_passing else None
+        if not allow_selected:
+            return None, required
+        selectable = [result.video_bitrate_bps for result in cache.values() if constraints_pass(result)]
+        return (min(selectable) if selectable else None), required
 
     def test(value: int) -> QualityCandidateResult | None:
         bitrate = _floor_candidate(value)
-        if bitrate in cache or len(cache) >= max_candidates:
+        if bitrate in cache or len(cache) >= candidate_limit:
             return cache.get(bitrate)
         cache[bitrate] = evaluate(bitrate)
         return cache[bitrate]
@@ -162,46 +235,51 @@ def search_bitrate_candidates(
     if upper_score is None:
         return list(cache.values()), None, None
 
-    if upper_score.min_vmaf >= min_vmaf:
+    if quality_passes(upper_score):
         low_score = test(minimum)
-        if low_score is not None and low_score.min_vmaf >= min_vmaf:
-            return list(cache.values()), minimum, minimum
+        if low_score is not None and quality_passes(low_score):
+            selected, required = summarize(allow_selected=True)
+            return list(cache.values()), selected, required
         low = minimum
         high = budget
-        while len(cache) < max_candidates and high - low > 1_000:
+        while len(cache) < candidate_limit and high - low > 1_000:
             middle = _floor_candidate((low + high) // 2)
             if middle in cache:
                 break
             score = test(middle)
             if score is None:
                 break
-            if score.min_vmaf >= min_vmaf:
+            if quality_passes(score):
                 high = middle
             else:
                 low = middle
-        passing = [result.video_bitrate_bps for result in cache.values() if result.min_vmaf >= min_vmaf]
-        return list(cache.values()), min(passing), min(passing)
+        selected, required = summarize(allow_selected=True)
+        return list(cache.values()), selected, required
 
     ceiling = _floor_candidate(max(required_search_ceiling_bps, budget))
     ceiling_score = test(ceiling) if ceiling > budget else upper_score
-    if ceiling_score is None or ceiling_score.min_vmaf < min_vmaf:
+    if ceiling_score is None or not quality_passes(ceiling_score):
         return list(cache.values()), None, None
 
     low = budget
     high = ceiling
-    while len(cache) < max_candidates and high - low > 1_000:
+    while len(cache) < candidate_limit and high - low > 1_000:
         middle = _floor_candidate((low + high) // 2)
         if middle in cache:
             break
         score = test(middle)
         if score is None:
             break
-        if score.min_vmaf >= min_vmaf:
+        if quality_passes(score):
             high = middle
         else:
             low = middle
-    passing = [result.video_bitrate_bps for result in cache.values() if result.min_vmaf >= min_vmaf]
-    return list(cache.values()), None, min(passing) if passing else None
+    # Without a size constraint, preserve the historical behavior: a quality
+    # target requiring more than the initial budget is reported as required,
+    # never selected.  Smart analysis enables selection for this branch only
+    # when the candidate's measured output also proves it fits the limit.
+    selected, required = summarize(allow_selected=max_output_bytes is not None)
+    return list(cache.values()), selected, required
 
 
 def quality_configuration_fingerprint(ffmpeg_path: Path, item: EncodePlanItem) -> str:
@@ -310,7 +388,7 @@ def _is_4k(item: EncodePlanItem) -> bool:
 
 def _unsupported_reason(item: EncodePlanItem, capabilities: VmafCapabilities) -> str | None:
     media = item.media_info
-    if not capabilities.standard_model:
+    if not capabilities.filter_available or not capabilities.standard_model:
         return capabilities.error_message or "libvmaf standard model is unavailable."
     if _is_4k(item) and not capabilities.model_4k:
         return capabilities.error_message or "The VMAF 4K model is unavailable."
@@ -325,26 +403,36 @@ def _run_logged(
     *,
     cancel_check: Callable[[], bool] | None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None,
+    cwd: Path | None = None,
+    phase: str = "command",
 ) -> None:
     log_file.write("$ " + " ".join(cmd) + "\n")
     log_file.flush()
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-        **hidden_popen_kwargs(),
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            cwd=cwd,
+            **hidden_popen_kwargs(),
+        )
+    except OSError as exc:
+        command = " ".join(str(part) for part in cmd)
+        raise RuntimeError(
+            f"Smart {phase} failed to start (exit code unavailable): {command}\n"
+            f"Output tail: {str(exc)[-SMART_ERROR_TAIL_CHARS:]}"
+        ) from exc
     if process_callback is not None:
         process_callback(proc)
-    output: list[str] = []
+    output_tail = ""
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
-            output.append(line)
+            output_tail = (output_tail + line)[-SMART_ERROR_TAIL_CHARS:]
             log_file.write(line)
             if cancel_check is not None and cancel_check():
                 proc.terminate()
@@ -358,7 +446,13 @@ def _run_logged(
         if process_callback is not None:
             process_callback(None)
     if return_code != 0:
-        raise subprocess.CalledProcessError(return_code, cmd, output="".join(output))
+        failure = SmartCommandError(return_code, cmd, phase, output_tail)
+        log_file.write(
+            f"[smart command failed] phase={phase} exit_code={return_code}\n"
+            f"{failure.output_tail}\n"
+        )
+        log_file.flush()
+        raise failure
 
 
 def _build_reference(
@@ -414,8 +508,13 @@ def _score_candidate(
     *,
     cancel_check: Callable[[], bool] | None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None,
+    window_durations_sec: list[float] | None = None,
+    audio_bitrate_bps: int = 0,
+    source_bytes: int | None = None,
 ) -> QualityCandidateResult:
     scores: list[float] = []
+    encoded_bytes: list[int] = []
+    encoded_durations_sec: list[float] = []
     candidate_options = replace(
         item.options,
         decode_acceleration=DecodeAcceleration.SOFTWARE,
@@ -447,6 +546,7 @@ def _score_candidate(
                     log_file,
                     cancel_check=cancel_check,
                     process_callback=process_callback,
+                    phase="candidate encode",
                 )
         finally:
             if passlog:
@@ -455,17 +555,32 @@ def _score_candidate(
                         candidate.unlink()
                     except OSError:
                         pass
-        json_path = temp_root / f"vmaf-{bitrate_bps}-{index}.json"
-        escaped_json_path = (
-            json_path.as_posix()
-            .replace("\\", "\\\\")
-            .replace(":", "\\:")
-            .replace("'", "\\'")
+        try:
+            encoded_size = candidate_path.stat().st_size
+        except OSError as exc:
+            raise RuntimeError(
+                f"Smart candidate encode did not produce its sample output: {candidate_path}"
+            ) from exc
+        duration = (
+            window_durations_sec[index]
+            if window_durations_sec is not None and index < len(window_durations_sec)
+            else (item.media_info.duration if item.media_info is not None else 0.0)
         )
+        if duration <= 0:
+            raise RuntimeError(f"Smart candidate encode produced an invalid sample duration: {duration}")
+        encoded_bytes.append(encoded_size)
+        encoded_durations_sec.append(float(duration))
+        json_path = temp_root / f"vmaf-{bitrate_bps}-{index}.json"
+        # FFmpeg's filtergraph parser has its own escaping rules.  A Windows
+        # drive-qualified absolute path can therefore be interpreted as a
+        # malformed option even when it is correctly escaped for Python.  The
+        # scoring process runs in the analysis temp directory, so a generated
+        # basename is both safe and unambiguous.
+        json_name = json_path.name
         filter_graph = (
             "[0:v]setpts=PTS-STARTPTS[dist];"
             "[1:v]setpts=PTS-STARTPTS[ref];"
-            f"[dist][ref]libvmaf=model=version={model}:log_fmt=json:log_path='{escaped_json_path}'"
+            f"[dist][ref]libvmaf=model=version={model}:log_fmt=json:log_path='{json_name}'"
         )
         score_command = [
             str(ffmpeg_path),
@@ -487,12 +602,32 @@ def _score_candidate(
             log_file,
             cancel_check=cancel_check,
             process_callback=process_callback,
+            cwd=temp_root,
+            phase="VMAF scoring",
         )
         scores.append(_parse_vmaf_json(json_path))
+
+    observed_video_bitrate_bps = max(
+        int(math.ceil(encoded_size * 8.0 / duration))
+        for encoded_size, duration in zip(encoded_bytes, encoded_durations_sec)
+    )
+    predicted_bytes = predicted_output_size(
+        observed_video_bitrate_bps,
+        audio_bitrate_bps,
+        item.media_info.duration if item.media_info is not None else 0.0,
+    )
+    predicted_ratio = None
+    if source_bytes is not None and source_bytes > 0:
+        predicted_ratio = predicted_bytes / source_bytes
     return QualityCandidateResult(
         video_bitrate_bps=bitrate_bps,
         segment_vmaf=scores,
         min_vmaf=min(scores),
+        encoded_bytes=encoded_bytes,
+        encoded_durations_sec=encoded_durations_sec,
+        observed_video_bitrate_bps=observed_video_bitrate_bps,
+        predicted_output_bytes=predicted_bytes,
+        predicted_output_ratio=predicted_ratio,
     )
 
 
@@ -543,14 +678,16 @@ def analyze_quality(
     with tempfile.TemporaryDirectory(prefix="smart-analysis-", dir=workdir) as temp_dir:
         temp_root = Path(temp_dir)
         references: list[Path] = []
+        windows = choose_smart_sample_windows(item.media_info.duration)
         with log_path.open("a", encoding="utf-8") as log_file:
-            for index, window in enumerate(choose_smart_sample_windows(item.media_info.duration)):
+            for index, window in enumerate(windows):
                 reference_path = temp_root / f"reference-{index}.mkv"
                 _run_logged(
                     _build_reference(ffmpeg_path, item, window, reference_path),
                     log_file,
                     cancel_check=cancel_check,
                     process_callback=process_callback,
+                    phase="reference extraction",
                 )
                 references.append(reference_path)
 
@@ -579,6 +716,9 @@ def analyze_quality(
                     temp_root,
                     workdir,
                     log_file,
+                    window_durations_sec=[window.duration_sec for window in windows],
+                    audio_bitrate_bps=budget.audio_bitrate_bps,
+                    source_bytes=budget.source_bytes,
                     cancel_check=cancel_check,
                     process_callback=process_callback,
                 )
@@ -607,39 +747,44 @@ def analyze_quality(
                 budget_bitrate_bps=budget.max_video_bitrate_bps,
                 required_search_ceiling_bps=required_ceiling,
                 min_vmaf=float(item.options.min_vmaf),
+                max_output_bytes=budget.max_output_bytes,
             )
 
     if selected_bitrate is not None:
         chosen = next(
             candidate for candidate in candidates
-            if candidate.video_bitrate_bps == selected_bitrate and candidate.min_vmaf >= item.options.min_vmaf
-        )
-        predicted_bytes = predicted_output_size(
-            selected_bitrate,
-            budget.audio_bitrate_bps,
-            item.media_info.duration,
+            if candidate.video_bitrate_bps == selected_bitrate
+            and candidate.min_vmaf >= item.options.min_vmaf
         )
         return QualitySearchResult(
             status=QualitySearchStatus.FOUND,
             candidates=candidates,
             selected_video_bitrate_bps=selected_bitrate,
             min_vmaf=chosen.min_vmaf,
-            predicted_output_bytes=predicted_bytes,
-            predicted_output_ratio=predicted_bytes / budget.source_bytes,
+            predicted_output_bytes=chosen.predicted_output_bytes,
+            predicted_output_ratio=_measured_prediction_ratio(chosen, budget.source_bytes),
             **base,
         )
 
     required_ratio = None
     if required_bitrate is not None:
-        required_bytes = predicted_output_size(
-            required_bitrate,
-            budget.audio_bitrate_bps,
-            item.media_info.duration,
+        required_candidate = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.video_bitrate_bps == required_bitrate
+                and candidate.min_vmaf >= item.options.min_vmaf
+            ),
+            None,
         )
-        required_ratio = required_bytes / budget.source_bytes
+        if required_candidate is not None:
+            required_ratio = _measured_prediction_ratio(required_candidate, budget.source_bytes)
     cap_candidate = next(
         (candidate for candidate in candidates if candidate.video_bitrate_bps == _floor_candidate(budget.max_video_bitrate_bps)),
         None,
+    )
+    size_blocked = required_ratio is not None and required_ratio > (
+        budget.max_output_bytes / budget.source_bytes
     )
     return QualitySearchResult(
         status=QualitySearchStatus.CONSTRAINT_UNSATISFIED,
@@ -647,7 +792,12 @@ def analyze_quality(
         min_vmaf=cap_candidate.min_vmaf if cap_candidate else None,
         required_output_ratio=required_ratio,
         reason=(
-            f"Maximum allowed output cannot reach VMAF {item.options.min_vmaf:.1f}."
+            (
+                f"VMAF {item.options.min_vmaf:.1f} requires an estimated output ratio of "
+                f"{required_ratio:.3f}, above the configured size limit."
+            )
+            if size_blocked
+            else f"Maximum allowed output cannot reach VMAF {item.options.min_vmaf:.1f}."
             if required_ratio is not None
             else f"The bound encoder cannot reach VMAF {item.options.min_vmaf:.1f} within the search ceiling."
         ),

@@ -59,8 +59,11 @@ Smart mode requires an FFmpeg build whose `libvmaf` filter and required model
 can actually run. It analyzes one full clip for videos up to 30 seconds, or
 three 10-second windows for longer videos. If quality and final-size
 constraints cannot both be met, that file is skipped without creating an
-output. Full smart encodes are written to a temporary file beside the target
-and are published only after the actual size passes validation.
+output. Candidate sizes are estimated from the largest measured encoded sample
+bitrate (including the existing container safety factor) plus the audio
+budget; the requested video bitrate is not treated as an observed size. Full
+smart encodes are written to a temporary file beside the target and are
+published only after the actual size passes validation.
 
 Use the legacy fixed bitrate policy explicitly when VMAF is unavailable:
 

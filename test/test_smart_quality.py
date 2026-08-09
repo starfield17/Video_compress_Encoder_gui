@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -35,6 +37,10 @@ from core.models import (
 from core.preset_store import encode_options_to_preset_data, preset_data_to_encode_options
 from core.parallel_queue_exec import execute_plan_parallel
 from core.smart_quality import (
+    SMART_ERROR_TAIL_CHARS,
+    SmartCommandError,
+    _run_logged,
+    _score_candidate,
     analyze_quality,
     calculate_smart_bitrate_budget,
     choose_smart_sample_windows,
@@ -156,6 +162,22 @@ class SmartSamplingAndBudgetTestCase(unittest.TestCase):
             self.assertEqual(result.status, QualitySearchStatus.UNSUPPORTED)
             self.assertIn("missing libvmaf", result.reason or "")
 
+    def test_unavailable_vmaf_filter_is_not_treated_as_a_runnable_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"x" * 10_000_000)
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"binary")
+            item = _item(source, root / "out.mp4", EncodeOptions())
+            with patch(
+                "core.smart_quality.detect_vmaf_capabilities",
+                return_value=VmafCapabilities(False, True, True, "libvmaf filter unavailable"),
+            ):
+                result = analyze_quality(ffmpeg, item, root, root / "log.txt")
+            self.assertEqual(result.status, QualitySearchStatus.UNSUPPORTED)
+            self.assertIn("filter unavailable", result.reason or "")
+
     def test_hdr_input_is_reported_as_unsupported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -194,7 +216,7 @@ class SmartSearchTestCase(unittest.TestCase):
         )
         self.assertEqual(selected, min(item.video_bitrate_bps for item in candidates if item.min_vmaf >= 95.0))
         self.assertEqual(required, selected)
-        self.assertLessEqual(len(tested), 6)
+        self.assertLessEqual(len(tested), 8)
         self.assertEqual(len(tested), len(set(tested)))
 
     def test_non_monotonic_scores_still_choose_lowest_tested_pass(self) -> None:
@@ -238,6 +260,159 @@ class SmartSearchTestCase(unittest.TestCase):
         self.assertIsNotNone(required)
         self.assertGreater(required or 0, 2_000_000)
         self.assertIn(required, [candidate.video_bitrate_bps for candidate in candidates])
+
+    def test_size_constraint_uses_measured_prediction_for_selection(self) -> None:
+        tested: list[int] = []
+
+        def evaluate(bitrate: int) -> QualityCandidateResult:
+            tested.append(bitrate)
+            return QualityCandidateResult(
+                video_bitrate_bps=bitrate,
+                min_vmaf=96.0 if bitrate >= 1_800_000 else 94.0,
+                predicted_output_bytes=bitrate // 1_000,
+                predicted_output_ratio=bitrate / 10_000_000,
+            )
+
+        candidates, selected, required = search_bitrate_candidates(
+            evaluate=evaluate,
+            min_bitrate_bps=500_000,
+            budget_bitrate_bps=3_000_000,
+            required_search_ceiling_bps=4_000_000,
+            min_vmaf=95.0,
+            max_output_bytes=2_000,
+        )
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected, min(candidate.video_bitrate_bps for candidate in candidates if candidate.min_vmaf >= 95.0 and (candidate.predicted_output_bytes or 0) <= 2_000))
+        self.assertEqual(required, min(candidate.video_bitrate_bps for candidate in candidates if candidate.min_vmaf >= 95.0))
+        self.assertLessEqual(len(tested), 8)
+
+    def test_size_constraint_rejects_quality_passing_candidates(self) -> None:
+        def evaluate(bitrate: int) -> QualityCandidateResult:
+            return QualityCandidateResult(
+                video_bitrate_bps=bitrate,
+                min_vmaf=96.0 if bitrate >= 1_800_000 else 94.0,
+                predicted_output_bytes=10_000,
+                predicted_output_ratio=1.0,
+            )
+
+        candidates, selected, required = search_bitrate_candidates(
+            evaluate=evaluate,
+            min_bitrate_bps=500_000,
+            budget_bitrate_bps=3_000_000,
+            required_search_ceiling_bps=4_000_000,
+            min_vmaf=95.0,
+            max_output_bytes=2_000,
+        )
+        self.assertIsNone(selected)
+        self.assertIsNotNone(required)
+        required_candidate = next(candidate for candidate in candidates if candidate.video_bitrate_bps == required)
+        self.assertEqual(required_candidate.predicted_output_ratio, 1.0)
+
+    def test_search_never_tests_more_than_eight_unique_candidates(self) -> None:
+        tested: list[int] = []
+
+        def evaluate(bitrate: int) -> QualityCandidateResult:
+            tested.append(bitrate)
+            return QualityCandidateResult(video_bitrate_bps=bitrate, min_vmaf=94.0)
+
+        search_bitrate_candidates(
+            evaluate=evaluate,
+            min_bitrate_bps=1_000,
+            budget_bitrate_bps=10_000_000,
+            required_search_ceiling_bps=20_000_000,
+            min_vmaf=95.0,
+            max_output_bytes=1,
+        )
+        self.assertLessEqual(len(tested), 8)
+        self.assertEqual(len(tested), len(set(tested)))
+
+
+class SmartCommandAndMeasurementTestCase(unittest.TestCase):
+    def test_smart_command_failure_identifies_phase_command_and_bounded_tail(self) -> None:
+        class FailedProcess:
+            stdout = iter(["initial output\n", "x" * (SMART_ERROR_TAIL_CHARS + 100) + "\n"])
+
+            def wait(self, *_args, **_kwargs) -> int:
+                return 17
+
+            def terminate(self) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "smart.log"
+            with (
+                patch("core.smart_quality.subprocess.Popen", return_value=FailedProcess()),
+                log_path.open("w", encoding="utf-8") as log_file,
+                self.assertRaises(SmartCommandError) as raised,
+            ):
+                _run_logged(
+                    ["ffmpeg", "-i", "input.mp4"],
+                    log_file,
+                    cancel_check=None,
+                    process_callback=None,
+                    phase="VMAF scoring",
+                )
+        self.assertIn("VMAF scoring", str(raised.exception))
+        self.assertIn("exit code 17", str(raised.exception))
+        self.assertIn("ffmpeg -i input.mp4", str(raised.exception))
+        self.assertLessEqual(len(raised.exception.output_tail), SMART_ERROR_TAIL_CHARS)
+
+    def test_vmaf_scoring_uses_relative_log_path_and_measured_sample_size(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"s" * 100_000)
+            item = _item(source, root / "output.mp4", EncodeOptions())
+            reference = root / "reference.mkv"
+            reference.write_bytes(b"reference")
+            log_path = root / "smart.log"
+            log_path.write_text("", encoding="utf-8")
+            score_calls: list[dict[str, object]] = []
+
+            def fake_run(command: list[str], _log_file: object, **kwargs: object) -> None:
+                phase = kwargs.get("phase")
+                if phase == "candidate encode":
+                    Path(command[-1]).write_bytes(b"c" * 1_000)
+                elif phase == "VMAF scoring":
+                    score_calls.append({"command": command, **kwargs})
+                    filter_graph = command[command.index("-filter_complex") + 1]
+                    match = re.search(r"log_path='([^']+)'", filter_graph)
+                    self.assertIsNotNone(match)
+                    json_name = match.group(1) if match else ""
+                    self.assertEqual(Path(json_name).name, json_name)
+                    self.assertNotIn(str(root), filter_graph)
+                    cwd = kwargs["cwd"]
+                    self.assertIsInstance(cwd, Path)
+                    (cwd / json_name).write_text(
+                        json.dumps({"pooled_metrics": {"vmaf": {"mean": 96.0}}}),
+                        encoding="utf-8",
+                    )
+
+            with (
+                patch("core.smart_quality._run_logged", side_effect=fake_run),
+                log_path.open("a", encoding="utf-8") as smart_log,
+            ):
+                result = _score_candidate(
+                    Path("ffmpeg"),
+                    item,
+                    [reference],
+                    1_000_000,
+                    root,
+                    root,
+                    smart_log,
+                    window_durations_sec=[10.0],
+                    audio_bitrate_bps=128_000,
+                    source_bytes=source.stat().st_size,
+                    cancel_check=None,
+                    process_callback=None,
+                )
+
+            self.assertEqual(len(score_calls), 1)
+            self.assertEqual(result.encoded_bytes, [1_000])
+            self.assertEqual(result.encoded_durations_sec, [10.0])
+            self.assertEqual(result.observed_video_bitrate_bps, 800)
+            self.assertIsNotNone(result.predicted_output_bytes)
+            self.assertIsNotNone(result.predicted_output_ratio)
 
 
 class SmartExecutionSafetyTestCase(unittest.TestCase):
