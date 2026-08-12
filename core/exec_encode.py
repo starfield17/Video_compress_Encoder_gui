@@ -567,14 +567,15 @@ def execute_plan_item(
         else:
             result.return_code = 1
             result.error_message = str(exc)
-        _emit(
-            log_callback,
-            f"[{queue_index}/{queue_total}] Failed {item.source_path.name} (exit code {result.return_code})",
+        failure_activity = (
+            f"[{queue_index}/{queue_total}] Failed {item.source_path.name} "
+            f"(exit code {result.return_code}); see log: {log_path}"
         )
+        _emit(log_callback, failure_activity)
         _emit_progress(
             progress_callback,
             state="failed_file",
-            message=result.error_message or "",
+            message=failure_activity,
             current_pass_index=total_passes,
             total_passes=total_passes,
             **base_context,

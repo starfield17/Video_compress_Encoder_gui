@@ -411,6 +411,7 @@ def _run_logged(
     try:
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -421,10 +422,16 @@ def _run_logged(
             **hidden_popen_kwargs(),
         )
     except OSError as exc:
+        os_error = str(exc)[:SMART_ERROR_TAIL_CHARS]
+        log_file.write(
+            f"[smart process start failed] phase={phase}\n"
+            f"OS error: {os_error}\n"
+        )
+        log_file.flush()
         command = " ".join(str(part) for part in cmd)
         raise RuntimeError(
             f"Smart {phase} failed to start (exit code unavailable): {command}\n"
-            f"Output tail: {str(exc)[-SMART_ERROR_TAIL_CHARS:]}"
+            f"Output tail: {os_error}"
         ) from exc
     if process_callback is not None:
         process_callback(proc)

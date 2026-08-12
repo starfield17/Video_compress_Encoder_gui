@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import tempfile
 import threading
 import time
@@ -328,6 +329,71 @@ class SmartSearchTestCase(unittest.TestCase):
 
 
 class SmartCommandAndMeasurementTestCase(unittest.TestCase):
+    def test_smart_process_uses_devnull_stdin_and_preserves_process_kwargs(self) -> None:
+        class SuccessfulProcess:
+            stdout = iter(["ok\n"])
+
+            def wait(self, *_args, **_kwargs) -> int:
+                return 0
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            log_path = root / "smart.log"
+            with (
+                patch(
+                    "core.smart_quality.hidden_popen_kwargs",
+                    return_value={"creationflags": 0x08000000},
+                ),
+                patch("core.smart_quality.subprocess.Popen", return_value=SuccessfulProcess()) as popen,
+                log_path.open("w", encoding="utf-8") as log_file,
+            ):
+                _run_logged(
+                    ["ffmpeg", "-i", "input.mp4"],
+                    log_file,
+                    cancel_check=None,
+                    process_callback=None,
+                    cwd=root,
+                    phase="reference extraction",
+                )
+
+        kwargs = popen.call_args.kwargs
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(kwargs["stdout"], subprocess.PIPE)
+        self.assertIs(kwargs["stderr"], subprocess.STDOUT)
+        self.assertEqual(kwargs["cwd"], root)
+        self.assertEqual(kwargs["creationflags"], 0x08000000)
+
+    def test_smart_process_start_oserror_is_flushed_to_log_with_phase(self) -> None:
+        class FlushTrackingLog(io.StringIO):
+            flush_count = 0
+
+            def flush(self) -> None:
+                self.flush_count += 1
+                super().flush()
+
+        os_error = "cannot launch ffmpeg: " + ("x" * (SMART_ERROR_TAIL_CHARS + 100))
+        log_file = FlushTrackingLog()
+        with (
+            patch("core.smart_quality.subprocess.Popen", side_effect=OSError(os_error)),
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            _run_logged(
+                ["ffmpeg", "-i", "input.mp4"],
+                log_file,
+                cancel_check=None,
+                process_callback=None,
+                phase="reference extraction",
+            )
+
+        contents = log_file.getvalue()
+        self.assertIn("ffmpeg -i input.mp4", contents)
+        self.assertIn("reference extraction", contents)
+        self.assertIn("cannot launch ffmpeg", contents)
+        self.assertIn("[smart process start failed]", contents)
+        self.assertLessEqual(contents.count("x"), SMART_ERROR_TAIL_CHARS)
+        self.assertGreaterEqual(log_file.flush_count, 2)
+        self.assertIn("reference extraction", str(raised.exception))
+
     def test_smart_command_failure_identifies_phase_command_and_bounded_tail(self) -> None:
         class FailedProcess:
             stdout = iter(["initial output\n", "x" * (SMART_ERROR_TAIL_CHARS + 100) + "\n"])
@@ -428,6 +494,30 @@ class SmartExecutionSafetyTestCase(unittest.TestCase):
             max_output_bytes=max_bytes,
             fingerprint="fingerprint",
         )
+
+    def test_smart_failure_activity_message_points_to_log_without_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"s" * 1_000)
+            item = _item(source, root / "output.mp4", EncodeOptions())
+            activity_messages: list[str] = []
+            long_error = "Smart reference extraction failed: " + ("x" * SMART_ERROR_TAIL_CHARS)
+
+            with patch("core.exec_encode.analyze_quality", side_effect=RuntimeError(long_error)):
+                result = execute_plan_item(
+                    Path("ffmpeg"),
+                    item,
+                    root,
+                    log_callback=activity_messages.append,
+                )
+
+        self.assertFalse(result.success)
+        self.assertIsNotNone(result.log_path)
+        failure_messages = [message for message in activity_messages if "Failed source.mov" in message]
+        self.assertEqual(len(failure_messages), 1)
+        self.assertIn(str(result.log_path), failure_messages[0])
+        self.assertNotIn("x" * 100, failure_messages[0])
 
     def test_oversized_output_does_not_replace_existing_target(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
