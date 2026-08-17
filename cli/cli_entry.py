@@ -22,6 +22,7 @@ from core.models import (
     ConstraintPolicy,
     QualityUnreachablePolicy,
     SizeBlockedPolicy,
+    SkippedOutputPolicy,
     ContainerChoice,
     DecodeAcceleration,
     EncodeOptions,
@@ -38,9 +39,11 @@ from core.preset_store import (
     load_preset,
     parse_quality_unreachable_policy,
     parse_size_blocked_policy,
+    parse_skipped_output_policy,
     save_preset,
 )
 from core.smart_quality import constraint_policy_from_size_blocked, size_blocked_from_constraint_policy
+from core.skipped_outputs import publish_skipped_sources
 from core.preview_sample import build_preview_job
 
 
@@ -126,6 +129,9 @@ def _merge_options(base: EncodeOptions, args: argparse.Namespace) -> EncodeOptio
     unreachable = getattr(args, "quality_unreachable_policy", None)
     if unreachable is not None:
         updates["quality_unreachable_policy"] = parse_quality_unreachable_policy(unreachable)
+    skipped_output = getattr(args, "skipped_output_policy", None)
+    if skipped_output is not None:
+        updates["skipped_output_policy"] = parse_skipped_output_policy(skipped_output)
 
     return replace(base, **updates)
 
@@ -314,6 +320,12 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=[policy.value for policy in ConstraintPolicy],
         help="Deprecated alias of --size-blocked-policy (fail means ask)",
     )
+    encode_parser.add_argument(
+        "--skipped-output-policy",
+        dest="skipped_output_policy",
+        choices=[policy.value for policy in SkippedOutputPolicy],
+        help="What to do with skipped sources after encode (default: copy)",
+    )
 
     preview_parser = subparsers.add_parser("preview", help="Run a manual preview sample")
     _add_runtime_flags(preview_parser)
@@ -410,6 +422,18 @@ def _run_encode(args: argparse.Namespace, config_dir: Path) -> int:
             constraint_policy=constraint_policy_from_size_blocked(options.size_blocked_policy),
         )
     print_encode_results(results, tr)
+    if options.skipped_output_policy == SkippedOutputPolicy.COPY:
+        by_source = {result.source_path: result for result in results}
+        published = publish_skipped_sources(
+            [(item, by_source[item.source_path]) for item in plan.items if item.source_path in by_source]
+        )
+        for item in published:
+            if item.copied:
+                print(f"Copied skipped source {item.source_path.name} -> {item.output_path}")
+            elif item.reason:
+                print(f"Did not copy skipped source {item.source_path.name}: {item.reason}")
+    elif options.skipped_output_policy == SkippedOutputPolicy.ASK:
+        print("Skipped-output policy is ask; CLI leaves skipped sources in place.")
     if any(result.needs_decision for result in results):
         return 3
     return 0 if all(result.success or result.skipped for result in results) else 2

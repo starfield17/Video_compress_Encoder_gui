@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.i18n import Translator
-from core.models import QualityUnreachablePolicy, SizeBlockedPolicy
+from core.models import QualityUnreachablePolicy, SizeBlockedPolicy, SkippedOutputPolicy
 from core.preset_store import smart_policies_from_config
 
 
@@ -27,7 +27,7 @@ class SettingsDialog(QDialog):
         self.apply_translations(tr)
 
     def _build_ui(self) -> None:
-        self.resize(720, 280)
+        self.resize(720, 360)
         layout = QGridLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setHorizontalSpacing(10)
@@ -59,6 +59,8 @@ class SettingsDialog(QDialog):
         self.size_blocked_policy_combo = QComboBox()
         self.quality_unreachable_policy_label = QLabel()
         self.quality_unreachable_policy_combo = QComboBox()
+        self.skipped_output_policy_label = QLabel()
+        self.skipped_output_policy_combo = QComboBox()
         self.redetect_button = QPushButton()
 
         layout.addWidget(self.language_label, 0, 0)
@@ -84,10 +86,12 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.size_blocked_policy_combo, 6, 1, 1, 2)
         layout.addWidget(self.quality_unreachable_policy_label, 7, 0)
         layout.addWidget(self.quality_unreachable_policy_combo, 7, 1, 1, 2)
-        layout.addWidget(self.redetect_button, 8, 0, 1, 3)
+        layout.addWidget(self.skipped_output_policy_label, 8, 0)
+        layout.addWidget(self.skipped_output_policy_combo, 8, 1, 1, 2)
+        layout.addWidget(self.redetect_button, 9, 0, 1, 3)
 
         self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        layout.addWidget(self.button_box, 9, 0, 1, 3)
+        layout.addWidget(self.button_box, 10, 0, 1, 3)
 
         self.workdir_button.clicked.connect(self._browse_workdir)
         self.ffmpeg_button.clicked.connect(self._browse_ffmpeg)
@@ -113,13 +117,20 @@ class SettingsDialog(QDialog):
         self.quality_unreachable_policy_combo.clear()
         self.quality_unreachable_policy_combo.addItem("", QualityUnreachablePolicy.SKIP.value)
         self.quality_unreachable_policy_combo.addItem("", QualityUnreachablePolicy.ASK.value)
-        size_policy, unreachable_policy = smart_policies_from_config(settings)
+        self.skipped_output_policy_combo.clear()
+        self.skipped_output_policy_combo.addItem("", SkippedOutputPolicy.COPY.value)
+        self.skipped_output_policy_combo.addItem("", SkippedOutputPolicy.ASK.value)
+        self.skipped_output_policy_combo.addItem("", SkippedOutputPolicy.IGNORE.value)
+        size_policy, unreachable_policy, skipped_policy = smart_policies_from_config(settings)
         size_index = self.size_blocked_policy_combo.findData(size_policy.value)
         if size_index >= 0:
             self.size_blocked_policy_combo.setCurrentIndex(size_index)
         unreachable_index = self.quality_unreachable_policy_combo.findData(unreachable_policy.value)
         if unreachable_index >= 0:
             self.quality_unreachable_policy_combo.setCurrentIndex(unreachable_index)
+        skipped_index = self.skipped_output_policy_combo.findData(skipped_policy.value)
+        if skipped_index >= 0:
+            self.skipped_output_policy_combo.setCurrentIndex(skipped_index)
 
     def apply_translations(self, tr: Translator) -> None:
         self.tr = tr
@@ -152,6 +163,19 @@ class SettingsDialog(QDialog):
             self.quality_unreachable_policy_combo.findData(QualityUnreachablePolicy.ASK.value),
             self.tr.t("gui.value.quality_unreachable_ask"),
         )
+        self.skipped_output_policy_label.setText(self.tr.t("gui.label.skipped_output_policy"))
+        self.skipped_output_policy_combo.setItemText(
+            self.skipped_output_policy_combo.findData(SkippedOutputPolicy.COPY.value),
+            self.tr.t("gui.value.skipped_output_copy"),
+        )
+        self.skipped_output_policy_combo.setItemText(
+            self.skipped_output_policy_combo.findData(SkippedOutputPolicy.ASK.value),
+            self.tr.t("gui.value.skipped_output_ask"),
+        )
+        self.skipped_output_policy_combo.setItemText(
+            self.skipped_output_policy_combo.findData(SkippedOutputPolicy.IGNORE.value),
+            self.tr.t("gui.value.skipped_output_ignore"),
+        )
         self.workdir_button.setText(self.tr.t("gui.button.browse_dir"))
         self.ffmpeg_button.setText(self.tr.t("gui.button.browse_exe"))
         self.ffprobe_button.setText(self.tr.t("gui.button.browse_exe"))
@@ -173,6 +197,8 @@ class SettingsDialog(QDialog):
             or SizeBlockedPolicy.RELAX_SIZE.value,
             "quality_unreachable_policy": self.quality_unreachable_policy_combo.currentData()
             or QualityUnreachablePolicy.SKIP.value,
+            "skipped_output_policy": self.skipped_output_policy_combo.currentData()
+            or SkippedOutputPolicy.COPY.value,
         }
 
     def _browse_workdir(self) -> None:

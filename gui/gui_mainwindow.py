@@ -47,6 +47,7 @@ from core.models import (
     PreviewOptions,
     PreviewSampleMode,
     SizeBlockedPolicy,
+    SkippedOutputPolicy,
     SmartPreviewResult,
     VideoFileItem,
 )
@@ -66,6 +67,7 @@ from core.preset_store import (
     smart_policies_from_config,
     update_app_config,
 )
+from core.skipped_outputs import is_eligible_skipped_item, publish_skipped_source
 from core.smart_quality import resolve_max_output_ratio
 from gui.activity_log_window import ActivityLogWindow
 from gui.constraint_decision_dialog import (
@@ -552,11 +554,15 @@ class MainWindow(QMainWindow):
         self.size_blocked_policy_combo = QComboBox()
         self.quality_unreachable_policy_label = QLabel()
         self.quality_unreachable_policy_combo = QComboBox()
+        self.skipped_output_policy_label = QLabel()
+        self.skipped_output_policy_combo = QComboBox()
         self._fill_policy_combos()
         layout.addWidget(self.size_blocked_policy_label, 4, 0)
         layout.addWidget(self.size_blocked_policy_combo, 4, 1)
         layout.addWidget(self.quality_unreachable_policy_label, 4, 2)
-        layout.addWidget(self.quality_unreachable_policy_combo, 4, 3, 1, 3)
+        layout.addWidget(self.quality_unreachable_policy_combo, 4, 3)
+        layout.addWidget(self.skipped_output_policy_label, 4, 4)
+        layout.addWidget(self.skipped_output_policy_combo, 4, 5)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
         layout.setColumnStretch(5, 1)
@@ -739,15 +745,21 @@ class MainWindow(QMainWindow):
         self.quality_unreachable_policy_combo.clear()
         self.quality_unreachable_policy_combo.addItem("", QualityUnreachablePolicy.SKIP.value)
         self.quality_unreachable_policy_combo.addItem("", QualityUnreachablePolicy.ASK.value)
+        self.skipped_output_policy_combo.addItem("", SkippedOutputPolicy.COPY.value)
+        self.skipped_output_policy_combo.addItem("", SkippedOutputPolicy.ASK.value)
+        self.skipped_output_policy_combo.addItem("", SkippedOutputPolicy.IGNORE.value)
 
     def _apply_policy_settings(self) -> None:
-        size_policy, unreachable_policy = smart_policies_from_config(self.app_config)
+        size_policy, unreachable_policy, skipped_policy = smart_policies_from_config(self.app_config)
         size_index = self.size_blocked_policy_combo.findData(size_policy.value)
         if size_index >= 0:
             self.size_blocked_policy_combo.setCurrentIndex(size_index)
         unreachable_index = self.quality_unreachable_policy_combo.findData(unreachable_policy.value)
         if unreachable_index >= 0:
             self.quality_unreachable_policy_combo.setCurrentIndex(unreachable_index)
+        skipped_index = self.skipped_output_policy_combo.findData(skipped_policy.value)
+        if skipped_index >= 0:
+            self.skipped_output_policy_combo.setCurrentIndex(skipped_index)
 
     def _current_size_blocked_policy(self) -> SizeBlockedPolicy:
         return SizeBlockedPolicy(
@@ -757,6 +769,11 @@ class MainWindow(QMainWindow):
     def _current_quality_unreachable_policy(self) -> QualityUnreachablePolicy:
         return QualityUnreachablePolicy(
             self.quality_unreachable_policy_combo.currentData() or QualityUnreachablePolicy.SKIP.value
+        )
+
+    def _current_skipped_output_policy(self) -> SkippedOutputPolicy:
+        return SkippedOutputPolicy(
+            self.skipped_output_policy_combo.currentData() or SkippedOutputPolicy.COPY.value
         )
 
     def _apply_translations(self) -> None:
@@ -826,6 +843,19 @@ class MainWindow(QMainWindow):
         self.quality_unreachable_policy_combo.setItemText(
             self.quality_unreachable_policy_combo.findData(QualityUnreachablePolicy.ASK.value),
             self.tr.t("gui.value.quality_unreachable_ask"),
+        )
+        self.skipped_output_policy_label.setText(self.tr.t("gui.label.skipped_output_policy"))
+        self.skipped_output_policy_combo.setItemText(
+            self.skipped_output_policy_combo.findData(SkippedOutputPolicy.COPY.value),
+            self.tr.t("gui.value.skipped_output_copy"),
+        )
+        self.skipped_output_policy_combo.setItemText(
+            self.skipped_output_policy_combo.findData(SkippedOutputPolicy.ASK.value),
+            self.tr.t("gui.value.skipped_output_ask"),
+        )
+        self.skipped_output_policy_combo.setItemText(
+            self.skipped_output_policy_combo.findData(SkippedOutputPolicy.IGNORE.value),
+            self.tr.t("gui.value.skipped_output_ignore"),
         )
         self.overwrite_check.setText(self.tr.t("gui.checkbox.overwrite"))
         self.recursive_check.setText(self.tr.t("gui.checkbox.recursive"))
@@ -1180,6 +1210,7 @@ class MainWindow(QMainWindow):
             recursive=self.recursive_check.isChecked(),
             size_blocked_policy=self._current_size_blocked_policy(),
             quality_unreachable_policy=self._current_quality_unreachable_policy(),
+            skipped_output_policy=self._current_skipped_output_policy(),
         )
 
     def _apply_options(self, options: EncodeOptions) -> None:
@@ -1398,6 +1429,7 @@ class MainWindow(QMainWindow):
         self.max_output_ratio_spin.setEnabled(smart_mode)
         self.size_blocked_policy_combo.setEnabled(smart_mode)
         self.quality_unreachable_policy_combo.setEnabled(smart_mode)
+        self.skipped_output_policy_combo.setEnabled(smart_mode)
         self.sample_mode_combo.setEnabled(not smart_mode)
         self.sample_duration_spin.setEnabled(not smart_mode)
         custom_sample = (
@@ -1543,6 +1575,7 @@ class MainWindow(QMainWindow):
         self.app_config.setdefault("log_level", "info")
         self.app_config["size_blocked_policy"] = self._current_size_blocked_policy().value
         self.app_config["quality_unreachable_policy"] = self._current_quality_unreachable_policy().value
+        self.app_config["skipped_output_policy"] = self._current_skipped_output_policy().value
 
         recent_paths = list(self.app_config.get("recent_paths", []))
         if source_text:
@@ -1650,6 +1683,58 @@ class MainWindow(QMainWindow):
             self._append_log(self.tr.t("gui.log.queue_awaiting_decision"))
         elif state == "idle":
             self._append_log(self.tr.t("gui.log.encode_done"))
+            self._maybe_publish_skipped_sources()
+
+    def _eligible_skipped_records(self) -> list[QueueItemRecord]:
+        eligible: list[QueueItemRecord] = []
+        for record in self.queue_model.records():
+            if record.result is None:
+                continue
+            if is_eligible_skipped_item(record.plan_item, record.result):
+                eligible.append(record)
+        return eligible
+
+    def _publish_skipped_records(self, records: list[QueueItemRecord]) -> None:
+        for record in records:
+            published = publish_skipped_source(record.plan_item)
+            if published.copied:
+                self._append_log(
+                    self.tr.t(
+                        "gui.log.skipped_source_copied",
+                        source=published.source_path.name,
+                        output=str(published.output_path),
+                    )
+                )
+            else:
+                self._append_log(
+                    self.tr.t(
+                        "gui.log.skipped_source_not_copied",
+                        source=record.source_path.name,
+                        reason=published.reason or "",
+                    )
+                )
+
+    def _maybe_publish_skipped_sources(self) -> None:
+        records = self._eligible_skipped_records()
+        if not records:
+            return
+        policy = records[0].plan_item.options.skipped_output_policy
+        if policy == SkippedOutputPolicy.IGNORE:
+            return
+        if policy == SkippedOutputPolicy.ASK:
+            listing = "\n".join(
+                f"{record.source_path.name} → {record.output_path.name}" for record in records
+            )
+            answer = QMessageBox.question(
+                self,
+                self.tr.t("gui.dialog.copy_skipped_title"),
+                self.tr.t("gui.dialog.copy_skipped_text", files=listing),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        self._publish_skipped_records(records)
 
     def _on_queue_error(self, message: str) -> None:
         self._append_log(f"{self.tr.t('gui.message.error')}: {message}")

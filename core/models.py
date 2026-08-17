@@ -27,6 +27,12 @@ class QualityUnreachablePolicy(str, Enum):
     ASK = "ask"
 
 
+class SkippedOutputPolicy(str, Enum):
+    COPY = "copy"
+    ASK = "ask"
+    IGNORE = "ignore"
+
+
 class BackendChoice(str, Enum):
     AUTO = "auto"
     CPU = "cpu"
@@ -118,6 +124,7 @@ class EncodeOptions:
     dry_run: bool = False
     size_blocked_policy: SizeBlockedPolicy = SizeBlockedPolicy.RELAX_SIZE
     quality_unreachable_policy: QualityUnreachablePolicy = QualityUnreachablePolicy.SKIP
+    skipped_output_policy: SkippedOutputPolicy = SkippedOutputPolicy.COPY
 
 
 @dataclass(slots=True)

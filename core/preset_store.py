@@ -17,6 +17,7 @@ from core.models import (
     EncodeOptions,
     QualityUnreachablePolicy,
     SizeBlockedPolicy,
+    SkippedOutputPolicy,
 )
 
 
@@ -196,6 +197,7 @@ def _default_app_config() -> dict[str, Any]:
         "language": "en",
         "size_blocked_policy": SizeBlockedPolicy.RELAX_SIZE.value,
         "quality_unreachable_policy": QualityUnreachablePolicy.SKIP.value,
+        "skipped_output_policy": SkippedOutputPolicy.COPY.value,
     }
 
 
@@ -213,12 +215,22 @@ def parse_quality_unreachable_policy(value: object) -> QualityUnreachablePolicy:
         return QualityUnreachablePolicy.SKIP
 
 
-def smart_policies_from_config(data: dict[str, Any]) -> tuple[SizeBlockedPolicy, QualityUnreachablePolicy]:
+def parse_skipped_output_policy(value: object) -> SkippedOutputPolicy:
+    try:
+        return SkippedOutputPolicy(str(value))
+    except ValueError:
+        return SkippedOutputPolicy.COPY
+
+
+def smart_policies_from_config(
+    data: dict[str, Any],
+) -> tuple[SizeBlockedPolicy, QualityUnreachablePolicy, SkippedOutputPolicy]:
     return (
         parse_size_blocked_policy(data.get("size_blocked_policy", SizeBlockedPolicy.RELAX_SIZE.value)),
         parse_quality_unreachable_policy(
             data.get("quality_unreachable_policy", QualityUnreachablePolicy.SKIP.value)
         ),
+        parse_skipped_output_policy(data.get("skipped_output_policy", SkippedOutputPolicy.COPY.value)),
     )
 
 

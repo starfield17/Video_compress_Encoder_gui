@@ -180,12 +180,14 @@ class ConstraintDecisionTestCase(unittest.TestCase):
         data = {"language": "en"}
         for key, value in _default_app_config().items():
             data.setdefault(key, value)
-        size_policy, unreachable_policy = smart_policies_from_config(data)
+        size_policy, unreachable_policy, skipped_policy = smart_policies_from_config(data)
         self.assertEqual(size_policy, SizeBlockedPolicy.RELAX_SIZE)
         self.assertEqual(unreachable_policy, QualityUnreachablePolicy.SKIP)
-        empty_size, empty_unreachable = smart_policies_from_config({})
+        self.assertEqual(skipped_policy.value, "copy")
+        empty_size, empty_unreachable, empty_skipped = smart_policies_from_config({})
         self.assertEqual(empty_size, SizeBlockedPolicy.RELAX_SIZE)
         self.assertEqual(empty_unreachable, QualityUnreachablePolicy.SKIP)
+        self.assertEqual(empty_skipped.value, "copy")
 
     def test_policy_changes_do_not_invalidate_measurements(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
