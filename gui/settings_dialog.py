@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
 )
 
 from core.i18n import Translator
+from core.models import QualityUnreachablePolicy, SizeBlockedPolicy
+from core.preset_store import smart_policies_from_config
 
 
 class SettingsDialog(QDialog):
@@ -53,6 +55,10 @@ class SettingsDialog(QDialog):
         self.log_level_combo.addItems(["info", "debug"])
 
         self.keep_preview_temp_check = QCheckBox()
+        self.size_blocked_policy_label = QLabel()
+        self.size_blocked_policy_combo = QComboBox()
+        self.quality_unreachable_policy_label = QLabel()
+        self.quality_unreachable_policy_combo = QComboBox()
         self.redetect_button = QPushButton()
 
         layout.addWidget(self.language_label, 0, 0)
@@ -74,10 +80,14 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.log_level_combo, 4, 1, 1, 2)
 
         layout.addWidget(self.keep_preview_temp_check, 5, 0, 1, 3)
-        layout.addWidget(self.redetect_button, 6, 0, 1, 3)
+        layout.addWidget(self.size_blocked_policy_label, 6, 0)
+        layout.addWidget(self.size_blocked_policy_combo, 6, 1, 1, 2)
+        layout.addWidget(self.quality_unreachable_policy_label, 7, 0)
+        layout.addWidget(self.quality_unreachable_policy_combo, 7, 1, 1, 2)
+        layout.addWidget(self.redetect_button, 8, 0, 1, 3)
 
         self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        layout.addWidget(self.button_box, 7, 0, 1, 3)
+        layout.addWidget(self.button_box, 9, 0, 1, 3)
 
         self.workdir_button.clicked.connect(self._browse_workdir)
         self.ffmpeg_button.clicked.connect(self._browse_ffmpeg)
@@ -96,6 +106,20 @@ class SettingsDialog(QDialog):
         self.ffprobe_edit.setText(str(settings.get("ffprobe_path", "")))
         self.log_level_combo.setCurrentText(str(settings.get("log_level", "info")))
         self.keep_preview_temp_check.setChecked(bool(settings.get("keep_preview_temp", True)))
+        self.size_blocked_policy_combo.clear()
+        self.size_blocked_policy_combo.addItem("", SizeBlockedPolicy.RELAX_SIZE.value)
+        self.size_blocked_policy_combo.addItem("", SizeBlockedPolicy.RELAX_QUALITY.value)
+        self.size_blocked_policy_combo.addItem("", SizeBlockedPolicy.ASK.value)
+        self.quality_unreachable_policy_combo.clear()
+        self.quality_unreachable_policy_combo.addItem("", QualityUnreachablePolicy.SKIP.value)
+        self.quality_unreachable_policy_combo.addItem("", QualityUnreachablePolicy.ASK.value)
+        size_policy, unreachable_policy = smart_policies_from_config(settings)
+        size_index = self.size_blocked_policy_combo.findData(size_policy.value)
+        if size_index >= 0:
+            self.size_blocked_policy_combo.setCurrentIndex(size_index)
+        unreachable_index = self.quality_unreachable_policy_combo.findData(unreachable_policy.value)
+        if unreachable_index >= 0:
+            self.quality_unreachable_policy_combo.setCurrentIndex(unreachable_index)
 
     def apply_translations(self, tr: Translator) -> None:
         self.tr = tr
@@ -106,6 +130,28 @@ class SettingsDialog(QDialog):
         self.ffprobe_label.setText(self.tr.t("gui.label.ffprobe"))
         self.log_level_label.setText(self.tr.t("gui.label.log_level"))
         self.keep_preview_temp_check.setText(self.tr.t("gui.checkbox.keep_preview_temp"))
+        self.size_blocked_policy_label.setText(self.tr.t("gui.label.size_blocked_policy"))
+        self.quality_unreachable_policy_label.setText(self.tr.t("gui.label.quality_unreachable_policy"))
+        self.size_blocked_policy_combo.setItemText(
+            self.size_blocked_policy_combo.findData(SizeBlockedPolicy.RELAX_SIZE.value),
+            self.tr.t("gui.value.size_blocked_relax_size"),
+        )
+        self.size_blocked_policy_combo.setItemText(
+            self.size_blocked_policy_combo.findData(SizeBlockedPolicy.RELAX_QUALITY.value),
+            self.tr.t("gui.value.size_blocked_relax_quality"),
+        )
+        self.size_blocked_policy_combo.setItemText(
+            self.size_blocked_policy_combo.findData(SizeBlockedPolicy.ASK.value),
+            self.tr.t("gui.value.size_blocked_ask"),
+        )
+        self.quality_unreachable_policy_combo.setItemText(
+            self.quality_unreachable_policy_combo.findData(QualityUnreachablePolicy.SKIP.value),
+            self.tr.t("gui.value.quality_unreachable_skip"),
+        )
+        self.quality_unreachable_policy_combo.setItemText(
+            self.quality_unreachable_policy_combo.findData(QualityUnreachablePolicy.ASK.value),
+            self.tr.t("gui.value.quality_unreachable_ask"),
+        )
         self.workdir_button.setText(self.tr.t("gui.button.browse_dir"))
         self.ffmpeg_button.setText(self.tr.t("gui.button.browse_exe"))
         self.ffprobe_button.setText(self.tr.t("gui.button.browse_exe"))
@@ -123,6 +169,10 @@ class SettingsDialog(QDialog):
             "ffprobe_path": self.ffprobe_edit.text().strip(),
             "log_level": self.log_level_combo.currentText(),
             "keep_preview_temp": self.keep_preview_temp_check.isChecked(),
+            "size_blocked_policy": self.size_blocked_policy_combo.currentData()
+            or SizeBlockedPolicy.RELAX_SIZE.value,
+            "quality_unreachable_policy": self.quality_unreachable_policy_combo.currentData()
+            or QualityUnreachablePolicy.SKIP.value,
         }
 
     def _browse_workdir(self) -> None:

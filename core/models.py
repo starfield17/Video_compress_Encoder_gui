@@ -16,6 +16,17 @@ class CompressionMode(str, Enum):
     FIXED_BITRATE = "fixed_bitrate"
 
 
+class SizeBlockedPolicy(str, Enum):
+    RELAX_SIZE = "relax_size"
+    RELAX_QUALITY = "relax_quality"
+    ASK = "ask"
+
+
+class QualityUnreachablePolicy(str, Enum):
+    SKIP = "skip"
+    ASK = "ask"
+
+
 class BackendChoice(str, Enum):
     AUTO = "auto"
     CPU = "cpu"
@@ -105,6 +116,8 @@ class EncodeOptions:
     overwrite: bool = False
     recursive: bool = False
     dry_run: bool = False
+    size_blocked_policy: SizeBlockedPolicy = SizeBlockedPolicy.RELAX_SIZE
+    quality_unreachable_policy: QualityUnreachablePolicy = QualityUnreachablePolicy.SKIP
 
 
 @dataclass(slots=True)

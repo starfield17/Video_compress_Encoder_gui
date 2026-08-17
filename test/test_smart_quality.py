@@ -39,6 +39,7 @@ from core.models import (
 )
 from core.preset_store import encode_options_to_preset_data, preset_data_to_encode_options
 from core.parallel_queue_exec import execute_plan_parallel
+from core.exec_encode import execute_plan
 from core.smart_quality import (
     SMART_ERROR_TAIL_CHARS,
     SmartCommandError,
@@ -151,13 +152,26 @@ class SmartConfigurationTestCase(unittest.TestCase):
                 exit_code = run_cli(["encode", str(source), "--lang", "en"])
 
             self.assertEqual(exit_code, 3)
-            self.assertEqual(execute.call_args.kwargs["constraint_policy"], ConstraintPolicy.FAIL)
+            self.assertEqual(execute.call_args.kwargs["constraint_policy"], ConstraintPolicy.RELAX_SIZE)
 
 
 class SmartSamplingAndBudgetTestCase(unittest.TestCase):
     def test_short_video_uses_one_full_window(self) -> None:
-        windows = choose_smart_sample_windows(25.0)
-        self.assertEqual([(window.start_sec, window.duration_sec) for window in windows], [(0.0, 25.0)])
+        windows = choose_smart_sample_windows(8.0)
+        self.assertEqual([(window.start_sec, window.duration_sec) for window in windows], [(0.0, 8.0)])
+        ten = choose_smart_sample_windows(10.0)
+        self.assertEqual([(window.start_sec, window.duration_sec) for window in ten], [(0.0, 10.0)])
+
+    def test_videos_longer_than_ten_seconds_use_three_five_second_windows(self) -> None:
+        for duration in (15.0, 30.0, 7200.0):
+            windows = choose_smart_sample_windows(duration)
+            self.assertEqual(len(windows), 3)
+            for window in windows:
+                self.assertAlmostEqual(window.duration_sec, 5.0)
+                self.assertGreaterEqual(window.start_sec, 0.0)
+                self.assertLessEqual(window.start_sec + window.duration_sec, duration + 1e-9)
+            for left, right in zip(windows, windows[1:]):
+                self.assertLessEqual(left.start_sec + left.duration_sec, right.start_sec + 1e-9)
 
     def test_just_over_thirty_seconds_has_three_non_overlapping_windows(self) -> None:
         windows = choose_smart_sample_windows(31.0)
@@ -360,6 +374,29 @@ class SmartSearchTestCase(unittest.TestCase):
         self.assertLessEqual(len(tested), 8)
         self.assertEqual(len(tested), len(set(tested)))
 
+    def test_coarse_search_stops_at_four_candidates_and_wide_tolerance(self) -> None:
+        tested: list[int] = []
+
+        def evaluate(bitrate: int) -> QualityCandidateResult:
+            tested.append(bitrate)
+            return QualityCandidateResult(video_bitrate_bps=bitrate, min_vmaf=94.0)
+
+        from core.analysis_runtime import COARSE_MAX_CANDIDATES, search_tolerance_bps
+
+        search_bitrate_candidates(
+            evaluate=evaluate,
+            min_bitrate_bps=1_000,
+            budget_bitrate_bps=10_000_000,
+            required_search_ceiling_bps=20_000_000,
+            min_vmaf=95.0,
+            max_candidates=COARSE_MAX_CANDIDATES,
+            max_output_bytes=1,
+            tolerance_bps=search_tolerance_bps(20_000_000),
+        )
+        self.assertLessEqual(len(tested), 4)
+        self.assertGreaterEqual(search_tolerance_bps(1_000_000), 50_000)
+        self.assertEqual(search_tolerance_bps(10_000_000), 300_000)
+
 
 class SmartCommandAndMeasurementTestCase(unittest.TestCase):
     def test_smart_process_uses_devnull_stdin_and_preserves_process_kwargs(self) -> None:
@@ -507,6 +544,10 @@ class SmartCommandAndMeasurementTestCase(unittest.TestCase):
                 )
 
             self.assertEqual(len(score_calls), 1)
+            filter_graph = str(score_calls[0]["command"][score_calls[0]["command"].index("-filter_complex") + 1])
+            self.assertIn("settb=AVTB,setpts=PTS-STARTPTS", filter_graph)
+            self.assertIn("n_threads=", filter_graph)
+            self.assertIn("n_subsample=1", filter_graph)
             self.assertEqual(result.encoded_bytes, [1_000])
             self.assertEqual(result.encoded_durations_sec, [10.0])
             self.assertEqual(result.observed_video_bitrate_bps, 800)
@@ -725,7 +766,50 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
             self.assertEqual(len(results), 2)
             self.assertTrue(all(result.success for result in results))
             self.assertEqual(observed_backends, {BackendChoice.CPU, BackendChoice.NVENC})
-            self.assertEqual(max_active, 1)
+            self.assertGreaterEqual(max_active, 1)
+            self.assertLessEqual(max_active, 2)
+
+    def test_queue_analyzes_every_item_before_any_encode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            items: list[EncodePlanItem] = []
+            for index in range(3):
+                source = root / f"source-{index}.mov"
+                source.write_bytes(b"s" * 1_000)
+                items.append(_item(source, root / f"output-{index}.mp4", EncodeOptions(overwrite=True)))
+            plan = EncodePlan(
+                items=items,
+                ffmpeg_path=Path("ffmpeg"),
+                ffprobe_path=Path("ffprobe"),
+                input_root=root,
+                output_root=root,
+            )
+            events: list[str] = []
+
+            def fake_analysis(_ffmpeg, item, _workdir, _log_path, **_kwargs):
+                events.append(f"analyze:{item.source_path.name}")
+                time.sleep(0.01)
+                return self._quality_result()
+
+            def fake_run(cmd, *_args, **_kwargs) -> None:
+                events.append(f"encode:{Path(cmd[-1]).name}")
+                Path(cmd[-1]).write_bytes(b"x" * 600)
+
+            with (
+                patch("core.exec_encode.analyze_quality", side_effect=fake_analysis),
+                patch("core.exec_encode._run_logged_command", side_effect=fake_run),
+            ):
+                results = execute_plan(plan, root)
+
+            self.assertEqual(len(results), 3)
+            self.assertTrue(all(result.success for result in results))
+            analyze_events = [event for event in events if event.startswith("analyze:")]
+            encode_events = [event for event in events if event.startswith("encode:")]
+            self.assertEqual(len(analyze_events), 3)
+            self.assertTrue(encode_events)
+            last_analyze = max(index for index, event in enumerate(events) if event.startswith("analyze:"))
+            first_encode = min(index for index, event in enumerate(events) if event.startswith("encode:"))
+            self.assertLess(last_analyze, first_encode)
 
     def test_successful_output_is_published_after_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

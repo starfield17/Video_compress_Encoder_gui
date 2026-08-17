@@ -61,6 +61,7 @@ class NuitkaBuildCommandTestCase(unittest.TestCase):
                 root=root,
                 platform_name="win32",
                 machine="x86_64",
+                windows_compiler="mingw64",
             )
 
             self.assertIn("--mingw64", command)
@@ -104,8 +105,18 @@ class NuitkaBuildCommandTestCase(unittest.TestCase):
         self.assertEqual(normalized_machine("x86_64"), "x86_64")
         self.assertEqual(normalized_machine("ARM64"), "arm64")
         self.assertEqual(normalized_machine("aarch64"), "arm64")
-        self.assertEqual(resolve_windows_compiler("auto", machine="AMD64"), "mingw64")
-        self.assertEqual(resolve_windows_compiler("auto", machine="x86_64"), "mingw64")
+        self.assertEqual(
+            resolve_windows_compiler("auto", machine="AMD64", python_version=(3, 12)),
+            "mingw64",
+        )
+        self.assertEqual(
+            resolve_windows_compiler("auto", machine="x86_64", python_version=(3, 12)),
+            "mingw64",
+        )
+        self.assertEqual(
+            resolve_windows_compiler("auto", machine="x86_64", python_version=(3, 13)),
+            "msvc",
+        )
         self.assertEqual(resolve_windows_compiler("auto", machine="ARM64"), "clang")
         self.assertEqual(resolve_windows_compiler("auto", machine="aarch64"), "clang")
         self.assertEqual(resolve_windows_compiler("msvc", machine="arm64"), "msvc")

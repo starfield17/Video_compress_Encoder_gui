@@ -755,6 +755,8 @@ class QueueTableModel(QAbstractTableModel):
             record.status = QueueItemStatus.WAITING_ANALYSIS
         elif state in {"analyzing", "candidate_finished"}:
             record.status = QueueItemStatus.ANALYZING
+        elif state == "analysis_finished":
+            record.status = QueueItemStatus.QUEUED
         elif state in {"starting_file", "running_pass"}:
             record.status = QueueItemStatus.ENCODING
         elif state == "validating":

@@ -238,8 +238,8 @@ python scripts/build_nuitka.py `
 ```
 
 MSVC mode requires Visual Studio 2022 C++ Build Tools or later. MinGW64
-packaging must use Python 3.12 or older; CI and Release currently use Python
-3.12.
+packaging must use Python 3.12 or older. CI and Release use Python 3.13, so
+Windows x86-64 packaging selects MSVC instead of MinGW64.
 
 Windows ARM64 packaging is native and uses the LLVM/Clang backend:
 
@@ -249,8 +249,9 @@ python scripts/build_nuitka.py `
   --windows-compiler clang
 ```
 
-The wrapper's `auto` compiler choice selects Clang on ARM64 and MinGW64 on
-x86-64. It never cross-compiles a Windows ARM64 package from an x86 runner.
+The wrapper's `auto` compiler choice selects Clang on ARM64, MSVC on Python
+3.13+ x86-64, and MinGW64 on older x86-64 interpreters. It never
+cross-compiles a Windows ARM64 package from an x86 runner.
 
 Build a native macOS application bundle and DMG on the matching Mac:
 

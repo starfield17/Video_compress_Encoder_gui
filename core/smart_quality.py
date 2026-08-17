@@ -6,20 +6,38 @@ import math
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from functools import lru_cache
 from pathlib import Path
 from typing import Callable, TextIO, cast
 
+from core.analysis_concurrency import analysis_concurrency_limit
 from core.analysis_receipts import ANALYSIS_RECEIPT_SCHEMA_VERSION, load_analysis_receipt, save_analysis_receipt
-from core.build_ffmpeg_cmd import build_encode_commands, build_input_acceleration_args
+from core.analysis_runtime import (
+    COARSE_MAX_CANDIDATES,
+    EXACT_MAX_CANDIDATES,
+    SOURCE_DECODE_SOFTWARE,
+    AnalysisDecodePolicy,
+    AnalysisExecutionPlan,
+    AnalysisTier,
+    VmafBackend,
+    build_analysis_execution_plan,
+    cpu_vmaf_plan,
+    detect_analysis_capabilities,
+    legacy_loopback_plan,
+    search_tolerance_bps,
+    software_source_plan,
+    source_decode_args,
+)
+from core.build_ffmpeg_cmd import build_encode_commands, build_video_args
 from core.models import (
     AnalysisReceipt,
     AudioMode,
     CodecChoice,
     CompressionMode,
     ConstraintFailureKind,
+    ConstraintPolicy,
     ContainerChoice,
     DecisionActionCode,
     DecisionOption,
@@ -30,9 +48,20 @@ from core.models import (
     QualityCandidateResult,
     QualitySearchResult,
     QualitySearchStatus,
+    SizeBlockedPolicy,
     VmafCapabilities,
 )
-from core.subprocess_utils import hidden_popen_kwargs, noninteractive_run_kwargs
+from core.subprocess_utils import hidden_popen_kwargs
+from core.vmaf_runtime import (
+    EXACT_VMAF_SUBSAMPLE,
+    PTS_RESET_FILTER,
+    build_cpu_vmaf_command,
+    build_cuda_vmaf_command,
+    build_libvmaf_option,
+    detect_vmaf_capabilities,
+    parse_vmaf_json,
+    vmaf_model_name,
+)
 
 
 DEFAULT_MAX_OUTPUT_RATIO = {
@@ -43,7 +72,11 @@ MAX_SEARCH_CANDIDATES = 8
 CONTAINER_BUDGET_FACTOR = 0.98
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}
 SMART_ERROR_TAIL_CHARS = 4_000
-SMART_SAMPLE_SCHEME_VERSION = 1
+SMART_SAMPLE_SCHEME_VERSION = 2
+SMART_ANALYSIS_ALGORITHM_VERSION = 2
+SMART_WHOLE_VIDEO_MAX_SEC = 10.0
+SMART_SAMPLE_DURATION_SEC = 5.0
+SMART_SAMPLE_CENTERS = (0.20, 0.50, 0.80)
 
 
 class SmartCommandError(subprocess.CalledProcessError):
@@ -110,16 +143,16 @@ def resolve_max_output_ratio(codec: CodecChoice, configured: float | None) -> fl
 def choose_smart_sample_windows(duration_sec: float) -> list[SampleWindow]:
     if duration_sec <= 0:
         raise ValueError("Source duration must be greater than 0.")
-    if duration_sec <= 30.0:
+    if duration_sec <= SMART_WHOLE_VIDEO_MAX_SEC:
         return [SampleWindow(0.0, duration_sec)]
 
-    sample_duration = 10.0
-    max_start = duration_sec - sample_duration
+    sample_duration = min(SMART_SAMPLE_DURATION_SEC, duration_sec / 3.0)
+    max_start = max(0.0, duration_sec - sample_duration)
     starts = [
         max(0.0, min(max_start, duration_sec * fraction - sample_duration / 2.0))
-        for fraction in (0.20, 0.50, 0.80)
+        for fraction in SMART_SAMPLE_CENTERS
     ]
-    if any(starts[index + 1] < starts[index] + sample_duration for index in range(2)):
+    if any(starts[index + 1] < starts[index] + sample_duration for index in range(len(starts) - 1)):
         starts = [0.0, max_start / 2.0, max_start]
     return [SampleWindow(start, sample_duration) for start in starts]
 
@@ -195,6 +228,7 @@ def search_bitrate_candidates(
     max_candidates: int = MAX_SEARCH_CANDIDATES,
     max_output_bytes: int | None = None,
     initial_candidates: list[QualityCandidateResult] | None = None,
+    tolerance_bps: int | None = None,
 ) -> tuple[list[QualityCandidateResult], int | None, int | None]:
     """Return tested candidates, a selectable bitrate, and required bitrate.
 
@@ -209,6 +243,7 @@ def search_bitrate_candidates(
         candidate.video_bitrate_bps: candidate for candidate in (initial_candidates or [])
     }
     candidate_limit = min(MAX_SEARCH_CANDIDATES, max(0, int(max_candidates)))
+    stop_delta = max(1_000, int(tolerance_bps) if tolerance_bps is not None else 1_000)
     evaluated = 0
 
     def quality_passes(result: QualityCandidateResult) -> bool:
@@ -254,7 +289,7 @@ def search_bitrate_candidates(
             return list(cache.values()), selected, required
         low = minimum
         high = budget
-        while evaluated < candidate_limit and high - low > 1_000:
+        while evaluated < candidate_limit and high - low > stop_delta:
             middle = _floor_candidate((low + high) // 2)
             if middle in cache:
                 break
@@ -275,7 +310,7 @@ def search_bitrate_candidates(
 
     low = budget
     high = ceiling
-    while evaluated < candidate_limit and high - low > 1_000:
+    while evaluated < candidate_limit and high - low > stop_delta:
         middle = _floor_candidate((low + high) // 2)
         if middle in cache:
             break
@@ -306,7 +341,13 @@ def _path_identity(path: Path) -> dict[str, object]:
         return {"path": str(path), "size": None, "mtime_ns": None}
 
 
-def measurement_configuration_payload(ffmpeg_path: Path, item: EncodePlanItem) -> dict[str, object]:
+def measurement_configuration_payload(
+    ffmpeg_path: Path,
+    item: EncodePlanItem,
+    *,
+    vmaf_backend: VmafBackend = VmafBackend.CPU,
+    vmaf_subsample: int = EXACT_VMAF_SUBSAMPLE,
+) -> dict[str, object]:
     if item.encoder_info is None:
         raise ValueError("Smart analysis requires a bound encoder.")
     options = item.options
@@ -316,27 +357,51 @@ def measurement_configuration_payload(ffmpeg_path: Path, item: EncodePlanItem) -
         "codec": options.codec.value,
         "encoder": item.encoder_info.encoder_name,
         "backend": item.encoder_info.backend.value,
-        "decode_acceleration": options.decode_acceleration.value,
         "preset": options.encoder_preset,
         "pix_fmt": options.pix_fmt,
         "two_pass": options.two_pass,
         "maxrate_factor": options.maxrate_factor,
         "bufsize_factor": options.bufsize_factor,
         "sample_scheme_version": SMART_SAMPLE_SCHEME_VERSION,
-        "vmaf_model": "vmaf_4k_v0.6.1" if _is_4k(item) else "vmaf_v0.6.1",
+        "vmaf_model": vmaf_model_name(is_4k=_is_4k(item)),
+        "vmaf_subsample": int(vmaf_subsample),
+        "vmaf_backend": vmaf_backend.value,
+        "analysis_algorithm_version": SMART_ANALYSIS_ALGORITHM_VERSION,
     }
 
 
-def measurement_configuration_fingerprint(ffmpeg_path: Path, item: EncodePlanItem) -> str:
-    payload = measurement_configuration_payload(ffmpeg_path, item)
+def measurement_configuration_fingerprint(
+    ffmpeg_path: Path,
+    item: EncodePlanItem,
+    *,
+    vmaf_backend: VmafBackend = VmafBackend.CPU,
+    vmaf_subsample: int = EXACT_VMAF_SUBSAMPLE,
+) -> str:
+    payload = measurement_configuration_payload(
+        ffmpeg_path,
+        item,
+        vmaf_backend=vmaf_backend,
+        vmaf_subsample=vmaf_subsample,
+    )
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
-def quality_configuration_fingerprint(ffmpeg_path: Path, item: EncodePlanItem) -> str:
+def quality_configuration_fingerprint(
+    ffmpeg_path: Path,
+    item: EncodePlanItem,
+    *,
+    vmaf_backend: VmafBackend = VmafBackend.CPU,
+    vmaf_subsample: int = EXACT_VMAF_SUBSAMPLE,
+) -> str:
     options = item.options
     payload = {
-        "measurement_fingerprint": measurement_configuration_fingerprint(ffmpeg_path, item),
+        "measurement_fingerprint": measurement_configuration_fingerprint(
+            ffmpeg_path,
+            item,
+            vmaf_backend=vmaf_backend,
+            vmaf_subsample=vmaf_subsample,
+        ),
         "min_vmaf": options.min_vmaf,
         "max_output_ratio": resolve_max_output_ratio(options.codec, options.max_output_ratio),
         "audio_mode": options.audio_mode.value,
@@ -347,69 +412,6 @@ def quality_configuration_fingerprint(ffmpeg_path: Path, item: EncodePlanItem) -
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-
-
-def _run_capture(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        cmd,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **noninteractive_run_kwargs(),
-    )
-
-
-@lru_cache(maxsize=8)
-def _detect_vmaf_cached(ffmpeg_path: str, size: int | None, mtime_ns: int | None) -> VmafCapabilities:
-    del size, mtime_ns
-
-    def model_works(model: str) -> tuple[bool, str]:
-        cmd = [
-            ffmpeg_path,
-            "-hide_banner",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=64x64:rate=5:duration=0.4",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=64x64:rate=5:duration=0.4",
-            "-lavfi",
-            f"libvmaf=model=version={model}",
-            "-f",
-            "null",
-            "-",
-        ]
-        proc = _run_capture(cmd)
-        return proc.returncode == 0 and "VMAF score:" in proc.stderr, proc.stderr
-
-    standard, standard_error = model_works("vmaf_v0.6.1")
-    if not standard:
-        return VmafCapabilities(
-            filter_available=False,
-            standard_model=False,
-            model_4k=False,
-            error_message=standard_error.strip() or "libvmaf standard model could not run.",
-        )
-    model_4k, model_4k_error = model_works("vmaf_4k_v0.6.1")
-    return VmafCapabilities(
-        filter_available=True,
-        standard_model=True,
-        model_4k=model_4k,
-        error_message=None if model_4k else (model_4k_error.strip() or "VMAF 4K model could not run."),
-    )
-
-
-def detect_vmaf_capabilities(ffmpeg_path: Path) -> VmafCapabilities:
-    try:
-        stat = ffmpeg_path.stat()
-        size, mtime_ns = stat.st_size, stat.st_mtime_ns
-    except OSError:
-        size, mtime_ns = None, None
-    return _detect_vmaf_cached(str(ffmpeg_path), size, mtime_ns)
 
 
 def _is_4k(item: EncodePlanItem) -> bool:
@@ -496,17 +498,24 @@ def _run_logged(
         raise failure
 
 
+def _log_timing(log_file: TextIO, message: str) -> None:
+    log_file.write(f"[smart timing] {message}\n")
+    log_file.flush()
+
+
 def _build_reference(
     ffmpeg_path: Path,
     item: EncodePlanItem,
     window: SampleWindow,
     output_path: Path,
+    *,
+    decode_acceleration: str = SOURCE_DECODE_SOFTWARE,
 ) -> list[str]:
     return [
         str(ffmpeg_path),
         "-hide_banner",
         "-y",
-        *build_input_acceleration_args(item),
+        *source_decode_args(decode_acceleration),
         "-ss",
         f"{window.start_sec:.3f}",
         "-t",
@@ -519,7 +528,7 @@ def _build_reference(
         "-sn",
         "-dn",
         "-vf",
-        "setpts=PTS-STARTPTS",
+        PTS_RESET_FILTER,
         "-c:v",
         "ffv1",
         "-level",
@@ -530,124 +539,131 @@ def _build_reference(
     ]
 
 
-def _parse_vmaf_json(path: Path) -> float:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    try:
-        return float(data["pooled_metrics"]["vmaf"]["mean"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError(f"VMAF JSON did not contain a pooled mean: {path}") from exc
+def _loopback_decoder_name(encoder_name: str) -> str:
+    lowered = encoder_name.lower()
+    if "av1" in lowered:
+        return "av1"
+    if "hevc" in lowered or "x265" in lowered:
+        return "hevc"
+    if "h264" in lowered or "x264" in lowered:
+        return "h264"
+    return "hevc"
 
 
-def _score_candidate(
+def _build_loopback_score_command(
     ffmpeg_path: Path,
     item: EncodePlanItem,
-    references: list[Path],
-    bitrate_bps: int,
-    temp_root: Path,
-    workdir: Path,
-    log_file: TextIO,
+    window: SampleWindow,
+    output_path: Path,
+    plan: AnalysisExecutionPlan,
     *,
-    cancel_check: Callable[[], bool] | None,
-    process_callback: Callable[[subprocess.Popen[str] | None], None] | None,
-    window_durations_sec: list[float] | None = None,
-    audio_bitrate_bps: int = 0,
-    source_bytes: int | None = None,
-) -> QualityCandidateResult:
-    scores: list[float] = []
-    encoded_bytes: list[int] = []
-    encoded_durations_sec: list[float] = []
-    candidate_options = replace(
-        item.options,
-        decode_acceleration=DecodeAcceleration.SOFTWARE,
-        container=ContainerChoice.MKV,
-        copy_subtitles=False,
-        copy_external_subtitles=False,
-        overwrite=True,
+    model: str,
+    log_name: str,
+) -> list[str]:
+    video_args = build_video_args(item, extra_args=plan.encoder_extra_args)
+    filter_name = "libvmaf_cuda" if plan.vmaf_backend == VmafBackend.CUDA else "libvmaf"
+    dist_prefix = "scale_cuda=format=yuv420p," if plan.vmaf_backend == VmafBackend.CUDA else ""
+    libvmaf = build_libvmaf_option(
+        model=model,
+        log_path=log_name,
+        n_threads=plan.vmaf_threads,
+        n_subsample=plan.vmaf_subsample,
+        filter_name=filter_name,
     )
-    candidate_item = replace(
+    filter_graph = (
+        f"[0:v]{PTS_RESET_FILTER}[ref];"
+        f"[dec:v]{dist_prefix}{PTS_RESET_FILTER}[dist];"
+        f"[dist][ref]{libvmaf}"
+    )
+    return [
+        str(ffmpeg_path),
+        "-hide_banner",
+        "-y",
+        *source_decode_args(plan.source_decode_acceleration),
+        "-ss",
+        f"{window.start_sec:.3f}",
+        "-t",
+        f"{window.duration_sec:.3f}",
+        "-i",
+        str(item.source_path),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-sn",
+        "-dn",
+        *video_args,
+        "-dec:v",
+        _loopback_decoder_name(plan.encoder_name),
+        str(output_path),
+        "-filter_complex",
+        filter_graph,
+        "-an",
+        "-f",
+        "null",
+        "-",
+    ]
+
+
+def _bind_candidate_item(item: EncodePlanItem, bitrate_bps: int, plan: AnalysisExecutionPlan) -> EncodePlanItem:
+    encoder_info = item.encoder_info
+    if encoder_info is not None and encoder_info.encoder_name != plan.encoder_name:
+        encoder_info = replace(encoder_info, encoder_name=plan.encoder_name)
+    return replace(
         item,
-        options=candidate_options,
+        encoder_info=encoder_info,
+        options=replace(
+            item.options,
+            decode_acceleration=DecodeAcceleration.SOFTWARE,
+            container=ContainerChoice.MKV,
+            copy_subtitles=False,
+            copy_external_subtitles=False,
+            overwrite=True,
+            encoder_preset=plan.encoder_preset,
+            two_pass=plan.two_pass,
+        ),
         target_video_bitrate_bps=bitrate_bps,
     )
-    model = "vmaf_4k_v0.6.1" if _is_4k(item) else "vmaf_v0.6.1"
-    for index, reference in enumerate(references):
-        candidate_path = temp_root / f"candidate-{bitrate_bps}-{index}.mkv"
-        commands, passlog = build_encode_commands(
-            ffmpeg_path,
-            candidate_item,
-            workdir,
-            input_path=reference,
-            output_path=candidate_path,
-            stage=f"smart-{bitrate_bps}-{index}",
-        )
-        try:
-            for command in commands:
-                _run_logged(
-                    command,
-                    log_file,
-                    cancel_check=cancel_check,
-                    process_callback=process_callback,
-                    phase="candidate encode",
-                )
-        finally:
-            if passlog:
-                for candidate in passlog.parent.glob(passlog.name + "*"):
-                    try:
-                        candidate.unlink()
-                    except OSError:
-                        pass
-        try:
-            encoded_size = candidate_path.stat().st_size
-        except OSError as exc:
-            raise RuntimeError(
-                f"Smart candidate encode did not produce its sample output: {candidate_path}"
-            ) from exc
-        duration = (
-            window_durations_sec[index]
-            if window_durations_sec is not None and index < len(window_durations_sec)
-            else (item.media_info.duration if item.media_info is not None else 0.0)
-        )
-        if duration <= 0:
-            raise RuntimeError(f"Smart candidate encode produced an invalid sample duration: {duration}")
-        encoded_bytes.append(encoded_size)
-        encoded_durations_sec.append(float(duration))
-        json_path = temp_root / f"vmaf-{bitrate_bps}-{index}.json"
-        # FFmpeg's filtergraph parser has its own escaping rules.  A Windows
-        # drive-qualified absolute path can therefore be interpreted as a
-        # malformed option even when it is correctly escaped for Python.  The
-        # scoring process runs in the analysis temp directory, so a generated
-        # basename is both safe and unambiguous.
-        json_name = json_path.name
-        filter_graph = (
-            "[0:v]setpts=PTS-STARTPTS[dist];"
-            "[1:v]setpts=PTS-STARTPTS[ref];"
-            f"[dist][ref]libvmaf=model=version={model}:log_fmt=json:log_path='{json_name}'"
-        )
-        score_command = [
-            str(ffmpeg_path),
-            "-hide_banner",
-            "-y",
-            "-i",
-            str(candidate_path),
-            "-i",
-            str(reference),
-            "-filter_complex",
-            filter_graph,
-            "-an",
-            "-f",
-            "null",
-            "-",
-        ]
-        _run_logged(
-            score_command,
-            log_file,
-            cancel_check=cancel_check,
-            process_callback=process_callback,
-            cwd=temp_root,
-            phase="VMAF scoring",
-        )
-        scores.append(_parse_vmaf_json(json_path))
 
+
+def _vmaf_command(
+    ffmpeg_path: Path,
+    plan: AnalysisExecutionPlan,
+    *,
+    candidate_path: Path,
+    reference_path: Path,
+    model: str,
+    log_name: str,
+) -> list[str]:
+    if plan.vmaf_backend == VmafBackend.CUDA:
+        return build_cuda_vmaf_command(
+            ffmpeg_path,
+            distorted_path=candidate_path,
+            reference_path=reference_path,
+            model=model,
+            log_name=log_name,
+            n_threads=plan.vmaf_threads,
+            n_subsample=plan.vmaf_subsample,
+        )
+    return build_cpu_vmaf_command(
+        ffmpeg_path,
+        distorted_path=candidate_path,
+        reference_path=reference_path,
+        model=model,
+        log_name=log_name,
+        n_threads=plan.vmaf_threads,
+        n_subsample=plan.vmaf_subsample,
+    )
+
+
+def _candidate_result(
+    item: EncodePlanItem,
+    bitrate_bps: int,
+    scores: list[float],
+    encoded_bytes: list[int],
+    encoded_durations_sec: list[float],
+    audio_bitrate_bps: int,
+    source_bytes: int | None,
+) -> QualityCandidateResult:
     observed_video_bitrate_bps = max(
         int(math.ceil(encoded_size * 8.0 / duration))
         for encoded_size, duration in zip(encoded_bytes, encoded_durations_sec)
@@ -669,6 +685,216 @@ def _score_candidate(
         observed_video_bitrate_bps=observed_video_bitrate_bps,
         predicted_output_bytes=predicted_bytes,
         predicted_output_ratio=predicted_ratio,
+    )
+
+
+def _score_candidate_loopback(
+    ffmpeg_path: Path,
+    item: EncodePlanItem,
+    windows: list[SampleWindow],
+    bitrate_bps: int,
+    temp_root: Path,
+    log_file: TextIO,
+    plan: AnalysisExecutionPlan,
+    *,
+    cancel_check: Callable[[], bool] | None,
+    process_callback: Callable[[subprocess.Popen[str] | None], None] | None,
+    audio_bitrate_bps: int = 0,
+    source_bytes: int | None = None,
+    min_vmaf_target: float | None = None,
+    window_order: list[int] | None = None,
+) -> QualityCandidateResult:
+    candidate_item = _bind_candidate_item(item, bitrate_bps, plan)
+    model = vmaf_model_name(is_4k=_is_4k(item))
+    order = window_order or list(range(len(windows)))
+    scores: dict[int, float] = {}
+    encoded_bytes: dict[int, int] = {}
+    encoded_durations: dict[int, float] = {}
+    for window_index in order:
+        window = windows[window_index]
+        candidate_path = temp_root / f"loopback-{plan.tier.value}-{bitrate_bps}-{window_index}.mkv"
+        json_path = temp_root / f"vmaf-{plan.tier.value}-{bitrate_bps}-{window_index}.json"
+        started = time.perf_counter()
+        _run_logged(
+            _build_loopback_score_command(
+                ffmpeg_path,
+                candidate_item,
+                window,
+                candidate_path,
+                plan,
+                model=model,
+                log_name=json_path.name,
+            ),
+            log_file,
+            cancel_check=cancel_check,
+            process_callback=process_callback,
+            cwd=temp_root,
+            phase="loopback score",
+        )
+        elapsed = time.perf_counter() - started
+        _log_timing(
+            log_file,
+            f"{plan.tier.value} candidate {bitrate_bps} window {window_index + 1} loopback={elapsed:.2f}s",
+        )
+        try:
+            encoded_size = candidate_path.stat().st_size
+        except OSError as exc:
+            raise RuntimeError(
+                f"Smart loopback encode did not produce its sample output: {candidate_path}"
+            ) from exc
+        if window.duration_sec <= 0:
+            raise RuntimeError(f"Smart candidate encode produced an invalid sample duration: {window.duration_sec}")
+        score = parse_vmaf_json(json_path)
+        scores[window_index] = score
+        encoded_bytes[window_index] = encoded_size
+        encoded_durations[window_index] = float(window.duration_sec)
+        if min_vmaf_target is not None and score < min_vmaf_target:
+            _log_timing(
+                log_file,
+                f"{plan.tier.value} candidate {bitrate_bps}: window {window_index + 1} VMAF={score:.3f} early rejected",
+            )
+            break
+    measured = sorted(scores)
+    return _candidate_result(
+        item,
+        bitrate_bps,
+        [scores[index] for index in measured],
+        [encoded_bytes[index] for index in measured],
+        [encoded_durations[index] for index in measured],
+        audio_bitrate_bps,
+        source_bytes,
+    )
+
+
+def _score_candidate(
+    ffmpeg_path: Path,
+    item: EncodePlanItem,
+    references: list[Path],
+    bitrate_bps: int,
+    temp_root: Path,
+    workdir: Path,
+    log_file: TextIO,
+    *,
+    cancel_check: Callable[[], bool] | None,
+    process_callback: Callable[[subprocess.Popen[str] | None], None] | None,
+    window_durations_sec: list[float] | None = None,
+    audio_bitrate_bps: int = 0,
+    source_bytes: int | None = None,
+    plan: AnalysisExecutionPlan | None = None,
+    min_vmaf_target: float | None = None,
+    window_order: list[int] | None = None,
+) -> QualityCandidateResult:
+    if plan is None:
+        if item.encoder_info is None:
+            raise ValueError("Smart analysis requires a bound encoder.")
+        plan = AnalysisExecutionPlan(
+            tier=AnalysisTier.EXACT,
+            source_decode_acceleration=SOURCE_DECODE_SOFTWARE,
+            encoder_name=item.encoder_info.encoder_name,
+            encoder_preset=item.options.encoder_preset,
+            encoder_extra_args=(),
+            two_pass=bool(item.options.two_pass and item.encoder_info.supports_two_pass),
+            vmaf_backend=VmafBackend.CPU,
+            vmaf_threads=1,
+            vmaf_subsample=EXACT_VMAF_SUBSAMPLE,
+            use_loopback=False,
+        )
+    scores: dict[int, float] = {}
+    encoded_bytes: dict[int, int] = {}
+    encoded_durations: dict[int, float] = {}
+    candidate_item = _bind_candidate_item(item, bitrate_bps, plan)
+    model = vmaf_model_name(is_4k=_is_4k(item))
+    order = window_order or list(range(len(references)))
+    for window_index in order:
+        reference = references[window_index]
+        candidate_path = temp_root / f"candidate-{plan.tier.value}-{bitrate_bps}-{window_index}.mkv"
+        commands, passlog = build_encode_commands(
+            ffmpeg_path,
+            candidate_item,
+            workdir,
+            input_path=reference,
+            output_path=candidate_path,
+            stage=f"smart-{plan.tier.value}-{bitrate_bps}-{window_index}",
+            extra_video_args=plan.encoder_extra_args,
+        )
+        encode_started = time.perf_counter()
+        try:
+            for command in commands:
+                _run_logged(
+                    command,
+                    log_file,
+                    cancel_check=cancel_check,
+                    process_callback=process_callback,
+                    phase="candidate encode",
+                )
+        finally:
+            if passlog:
+                for leftover in passlog.parent.glob(passlog.name + "*"):
+                    try:
+                        leftover.unlink()
+                    except OSError:
+                        pass
+        encode_elapsed = time.perf_counter() - encode_started
+        try:
+            encoded_size = candidate_path.stat().st_size
+        except OSError as exc:
+            raise RuntimeError(
+                f"Smart candidate encode did not produce its sample output: {candidate_path}"
+            ) from exc
+        duration = (
+            window_durations_sec[window_index]
+            if window_durations_sec is not None and window_index < len(window_durations_sec)
+            else (item.media_info.duration if item.media_info is not None else 0.0)
+        )
+        if duration <= 0:
+            raise RuntimeError(f"Smart candidate encode produced an invalid sample duration: {duration}")
+        json_path = temp_root / f"vmaf-{plan.tier.value}-{bitrate_bps}-{window_index}.json"
+        json_name = json_path.name
+        score_command = _vmaf_command(
+            ffmpeg_path,
+            plan,
+            candidate_path=candidate_path,
+            reference_path=reference,
+            model=model,
+            log_name=json_name,
+        )
+        vmaf_started = time.perf_counter()
+        _run_logged(
+            score_command,
+            log_file,
+            cancel_check=cancel_check,
+            process_callback=process_callback,
+            cwd=temp_root,
+            phase="VMAF scoring",
+        )
+        vmaf_elapsed = time.perf_counter() - vmaf_started
+        score = parse_vmaf_json(json_path)
+        scores[window_index] = score
+        encoded_bytes[window_index] = encoded_size
+        encoded_durations[window_index] = float(duration)
+        _log_timing(
+            log_file,
+            (
+                f"{plan.tier.value} candidate {bitrate_bps} window {window_index + 1}: "
+                f"encode={encode_elapsed:.2f}s vmaf={vmaf_elapsed:.2f}s VMAF={score:.3f}"
+            ),
+        )
+        if min_vmaf_target is not None and score < min_vmaf_target:
+            _log_timing(
+                log_file,
+                f"{plan.tier.value} candidate {bitrate_bps}: window {window_index + 1} VMAF={score:.3f} early rejected",
+            )
+            break
+
+    measured = sorted(scores)
+    return _candidate_result(
+        item,
+        bitrate_bps,
+        [scores[index] for index in measured],
+        [encoded_bytes[index] for index in measured],
+        [encoded_durations[index] for index in measured],
+        audio_bitrate_bps,
+        source_bytes,
     )
 
 
@@ -842,6 +1068,22 @@ def build_decision_options(result: QualitySearchResult) -> list[DecisionOption]:
     return options
 
 
+def constraint_policy_from_size_blocked(policy: SizeBlockedPolicy) -> ConstraintPolicy:
+    if policy == SizeBlockedPolicy.RELAX_SIZE:
+        return ConstraintPolicy.RELAX_SIZE
+    if policy == SizeBlockedPolicy.RELAX_QUALITY:
+        return ConstraintPolicy.RELAX_QUALITY
+    return ConstraintPolicy.FAIL
+
+
+def size_blocked_from_constraint_policy(policy: ConstraintPolicy) -> SizeBlockedPolicy:
+    if policy == ConstraintPolicy.RELAX_SIZE:
+        return SizeBlockedPolicy.RELAX_SIZE
+    if policy == ConstraintPolicy.RELAX_QUALITY:
+        return SizeBlockedPolicy.RELAX_QUALITY
+    return SizeBlockedPolicy.ASK
+
+
 def apply_decision_to_options(options: EncodeOptions, decision: DecisionOption) -> EncodeOptions:
     if decision.action_code == DecisionActionCode.RELAX_SIZE:
         if not isinstance(decision.suggested_value, (int, float)):
@@ -862,10 +1104,12 @@ def _analysis_receipt(
     measurement_fingerprint: str,
     windows: list[SampleWindow],
     candidates: list[QualityCandidateResult],
+    *,
+    vmaf_backend: VmafBackend,
 ) -> AnalysisReceipt:
     if item.encoder_info is None:
         raise ValueError("Smart analysis receipt requires a bound encoder.")
-    payload = measurement_configuration_payload(ffmpeg_path, item)
+    payload = measurement_configuration_payload(ffmpeg_path, item, vmaf_backend=vmaf_backend)
     return AnalysisReceipt(
         schema_version=ANALYSIS_RECEIPT_SCHEMA_VERSION,
         measurement_fingerprint=measurement_fingerprint,
@@ -884,6 +1128,71 @@ def _analysis_receipt(
     )
 
 
+def _exact_search_bounds(
+    coarse_candidates: list[QualityCandidateResult],
+    *,
+    min_bitrate_bps: int,
+    budget_bitrate_bps: int,
+    ceiling_bps: int,
+    min_vmaf: float,
+) -> tuple[int, int, int]:
+    passing = [candidate.video_bitrate_bps for candidate in coarse_candidates if candidate.min_vmaf >= min_vmaf]
+    failing = [candidate.video_bitrate_bps for candidate in coarse_candidates if candidate.min_vmaf < min_vmaf]
+    lower = max(failing) if failing else min_bitrate_bps
+    if passing:
+        seed = min(passing)
+        return max(min_bitrate_bps, lower), seed, max(seed, ceiling_bps)
+    return min_bitrate_bps, budget_bitrate_bps, ceiling_bps
+
+
+def _complete_candidates(
+    candidates: list[QualityCandidateResult],
+    window_count: int,
+) -> list[QualityCandidateResult]:
+    return [
+        candidate
+        for candidate in candidates
+        if not candidate.segment_vmaf or len(candidate.segment_vmaf) >= window_count
+    ]
+
+
+def _hardest_window_index(candidate: QualityCandidateResult) -> int:
+    if not candidate.segment_vmaf:
+        return 0
+    return min(range(len(candidate.segment_vmaf)), key=lambda index: candidate.segment_vmaf[index])
+
+
+def _window_order(window_count: int, hardest_index: int) -> list[int]:
+    if window_count <= 1:
+        return [0] if window_count == 1 else []
+    hardest = min(max(0, hardest_index), window_count - 1)
+    return [hardest, *[index for index in range(window_count) if index != hardest]]
+
+
+def _write_analysis_header(
+    log_file: TextIO,
+    item: EncodePlanItem,
+    windows: list[SampleWindow],
+    plan: AnalysisExecutionPlan,
+) -> None:
+    sample_label = (
+        f"{len(windows)}x{windows[0].duration_sec:.0f}s" if windows else "0"
+    )
+    log_file.write(
+        "Smart analysis:\n"
+        f"source={item.source_path.name}\n"
+        f"profile={plan.tier.value}\n"
+        f"hardware={plan.analysis_backend}\n"
+        f"decode={plan.source_decode_acceleration}\n"
+        f"candidate_encoder={plan.encoder_name}\n"
+        f"vmaf={plan.vmaf_backend.value}\n"
+        f"n_threads={plan.vmaf_threads}\n"
+        f"n_subsample={plan.vmaf_subsample}\n"
+        f"samples={sample_label}\n"
+    )
+    log_file.flush()
+
+
 def analyze_quality(
     ffmpeg_path: Path,
     item: EncodePlanItem,
@@ -899,8 +1208,29 @@ def analyze_quality(
     if item.media_info is None or item.encoder_info is None:
         raise ValueError("Smart analysis requires probed media and a bound encoder.")
 
-    fingerprint = quality_configuration_fingerprint(ffmpeg_path, item)
-    measurement_fingerprint = measurement_configuration_fingerprint(ffmpeg_path, item)
+    analysis_capabilities = detect_analysis_capabilities(ffmpeg_path)
+    active_cpu_vmaf_jobs = analysis_concurrency_limit()
+    exact_plan = build_analysis_execution_plan(
+        tier=AnalysisTier.EXACT,
+        encoder_info=item.encoder_info,
+        production_preset=item.options.encoder_preset,
+        production_two_pass=item.options.two_pass,
+        capabilities=analysis_capabilities,
+        decode_policy=AnalysisDecodePolicy.AUTO,
+        active_cpu_vmaf_jobs=active_cpu_vmaf_jobs,
+    )
+    fingerprint = quality_configuration_fingerprint(
+        ffmpeg_path,
+        item,
+        vmaf_backend=exact_plan.vmaf_backend,
+        vmaf_subsample=exact_plan.vmaf_subsample,
+    )
+    measurement_fingerprint = measurement_configuration_fingerprint(
+        ffmpeg_path,
+        item,
+        vmaf_backend=exact_plan.vmaf_backend,
+        vmaf_subsample=exact_plan.vmaf_subsample,
+    )
     cached = item.quality_search_result
     if cached is not None and cached.fingerprint == fingerprint:
         return cached
@@ -926,6 +1256,26 @@ def analyze_quality(
             fingerprint=fingerprint,
         )
 
+    if initial_candidates:
+        reused = reselect_from_candidates(
+            initial_candidates,
+            item,
+            measurement_fingerprint=measurement_fingerprint,
+            fingerprint=fingerprint,
+        )
+        if reused.status == QualitySearchStatus.FOUND:
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "stage": "analysis",
+                        "state": "receipt_loaded",
+                        "reused_candidate_count": len(initial_candidates),
+                        "file_name": item.source_path.name,
+                        "file_path": str(item.source_path),
+                    }
+                )
+            return reused
+
     if progress_callback is not None and initial_candidates:
         progress_callback(
             {
@@ -939,71 +1289,209 @@ def analyze_quality(
 
     workdir.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    candidates: list[QualityCandidateResult]
+    candidates: list[QualityCandidateResult] = list(initial_candidates)
+    started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="smart-analysis-", dir=workdir) as temp_dir:
         temp_root = Path(temp_dir)
         references: list[Path] = []
         candidate_index = 0
+        hardest_window = 0
+        coarse_plan = build_analysis_execution_plan(
+            tier=AnalysisTier.COARSE,
+            encoder_info=item.encoder_info,
+            production_preset=item.options.encoder_preset,
+            production_two_pass=item.options.two_pass,
+            capabilities=analysis_capabilities,
+            decode_policy=AnalysisDecodePolicy.AUTO,
+            active_cpu_vmaf_jobs=active_cpu_vmaf_jobs,
+        )
         with log_path.open("a", encoding="utf-8") as log_file:
+            _write_analysis_header(log_file, item, windows, exact_plan)
 
-            def ensure_references() -> None:
+            def ensure_references(plan: AnalysisExecutionPlan) -> AnalysisExecutionPlan:
+                nonlocal exact_plan, coarse_plan
                 if references:
-                    return
+                    return plan
                 capabilities = detect_vmaf_capabilities(ffmpeg_path)
                 unsupported = _unsupported_reason(item, capabilities)
                 if unsupported:
                     raise _UnsupportedSmartAnalysis(unsupported)
+                active_plan = plan
                 for index, window in enumerate(windows):
                     reference_path = temp_root / f"reference-{index}.mkv"
-                    _run_logged(
-                        _build_reference(ffmpeg_path, item, window, reference_path),
+                    extract_started = time.perf_counter()
+                    command = _build_reference(
+                        ffmpeg_path,
+                        item,
+                        window,
+                        reference_path,
+                        decode_acceleration=active_plan.source_decode_acceleration,
+                    )
+                    try:
+                        _run_logged(
+                            command,
+                            log_file,
+                            cancel_check=cancel_check,
+                            process_callback=process_callback,
+                            phase="reference extraction",
+                        )
+                    except SmartCommandError:
+                        if active_plan.source_decode_acceleration == SOURCE_DECODE_SOFTWARE:
+                            raise
+                        reason = (
+                            f"{active_plan.source_decode_acceleration} source decode failed; "
+                            "retrying with software"
+                        )
+                        _log_timing(log_file, reason)
+                        active_plan = software_source_plan(active_plan, reason=reason)
+                        exact_plan = software_source_plan(exact_plan, reason=reason)
+                        coarse_plan = software_source_plan(coarse_plan, reason=reason)
+                        _run_logged(
+                            _build_reference(
+                                ffmpeg_path,
+                                item,
+                                window,
+                                reference_path,
+                                decode_acceleration=SOURCE_DECODE_SOFTWARE,
+                            ),
+                            log_file,
+                            cancel_check=cancel_check,
+                            process_callback=process_callback,
+                            phase="reference extraction",
+                        )
+                    _log_timing(
                         log_file,
-                        cancel_check=cancel_check,
-                        process_callback=process_callback,
-                        phase="reference extraction",
+                        f"reference extraction #{index + 1}: {time.perf_counter() - extract_started:.2f}s",
                     )
                     references.append(reference_path)
+                return active_plan
 
-            def evaluate(bitrate_bps: int) -> QualityCandidateResult:
-                nonlocal candidate_index
-                ensure_references()
+            def evaluate(bitrate_bps: int, plan: AnalysisExecutionPlan) -> QualityCandidateResult:
+                nonlocal candidate_index, hardest_window, exact_plan, coarse_plan
+                active_plan = ensure_references(plan)
+                if plan.tier == AnalysisTier.EXACT:
+                    exact_plan = active_plan
+                else:
+                    coarse_plan = active_plan
                 candidate_index += 1
+                limit = EXACT_MAX_CANDIDATES if plan.tier == AnalysisTier.EXACT else COARSE_MAX_CANDIDATES
                 if progress_callback is not None:
                     progress_callback(
                         {
                             "stage": "analysis",
                             "state": "analyzing",
                             "candidate_index": candidate_index,
-                            "candidate_limit": MAX_SEARCH_CANDIDATES,
+                            "candidate_limit": limit,
                             "candidate_bitrate_bps": bitrate_bps,
+                            "candidate_tier": plan.tier.value,
+                            "analysis_backend": plan.analysis_backend,
+                            "decode_backend": plan.source_decode_acceleration,
+                            "vmaf_backend": plan.vmaf_backend.value,
+                            "n_threads": plan.vmaf_threads,
+                            "n_subsample": plan.vmaf_subsample,
                             "reused_candidate_count": len(initial_candidates),
                             "file_name": item.source_path.name,
                             "file_path": str(item.source_path),
                         }
                     )
-                result = _score_candidate(
-                    ffmpeg_path,
-                    item,
-                    references,
-                    bitrate_bps,
-                    temp_root,
-                    workdir,
-                    log_file,
-                    window_durations_sec=[window.duration_sec for window in windows],
-                    audio_bitrate_bps=budget.audio_bitrate_bps,
-                    source_bytes=budget.source_bytes,
-                    cancel_check=cancel_check,
-                    process_callback=process_callback,
-                )
+                order = _window_order(len(windows), hardest_window)
+                try:
+                    if active_plan.use_loopback:
+                        try:
+                            result = _score_candidate_loopback(
+                                ffmpeg_path,
+                                item,
+                                windows,
+                                bitrate_bps,
+                                temp_root,
+                                log_file,
+                                active_plan,
+                                audio_bitrate_bps=budget.audio_bitrate_bps,
+                                source_bytes=budget.source_bytes,
+                                cancel_check=cancel_check,
+                                process_callback=process_callback,
+                                min_vmaf_target=float(item.options.min_vmaf),
+                                window_order=order,
+                            )
+                        except (SmartCommandError, RuntimeError) as exc:
+                            reason = f"loopback scoring failed; using legacy FFV1 path ({exc})"
+                            _log_timing(log_file, reason)
+                            active_plan = legacy_loopback_plan(active_plan, reason=reason)
+                            exact_plan = legacy_loopback_plan(exact_plan, reason=reason)
+                            coarse_plan = legacy_loopback_plan(coarse_plan, reason=reason)
+                            active_plan = ensure_references(active_plan)
+                            result = _score_candidate(
+                                ffmpeg_path,
+                                item,
+                                references,
+                                bitrate_bps,
+                                temp_root,
+                                workdir,
+                                log_file,
+                                window_durations_sec=[window.duration_sec for window in windows],
+                                audio_bitrate_bps=budget.audio_bitrate_bps,
+                                source_bytes=budget.source_bytes,
+                                cancel_check=cancel_check,
+                                process_callback=process_callback,
+                                plan=active_plan,
+                                min_vmaf_target=float(item.options.min_vmaf),
+                                window_order=order,
+                            )
+                    else:
+                        result = _score_candidate(
+                            ffmpeg_path,
+                            item,
+                            references,
+                            bitrate_bps,
+                            temp_root,
+                            workdir,
+                            log_file,
+                            window_durations_sec=[window.duration_sec for window in windows],
+                            audio_bitrate_bps=budget.audio_bitrate_bps,
+                            source_bytes=budget.source_bytes,
+                            cancel_check=cancel_check,
+                            process_callback=process_callback,
+                            plan=active_plan,
+                            min_vmaf_target=float(item.options.min_vmaf),
+                            window_order=order,
+                        )
+                except SmartCommandError:
+                    if active_plan.vmaf_backend != VmafBackend.CUDA:
+                        raise
+                    reason = "CUDA VMAF failed; retrying with CPU libvmaf"
+                    _log_timing(log_file, reason)
+                    active_plan = cpu_vmaf_plan(active_plan, reason=reason)
+                    exact_plan = cpu_vmaf_plan(exact_plan, reason=reason)
+                    coarse_plan = cpu_vmaf_plan(coarse_plan, reason=reason)
+                    result = _score_candidate(
+                        ffmpeg_path,
+                        item,
+                        references,
+                        bitrate_bps,
+                        temp_root,
+                        workdir,
+                        log_file,
+                        window_durations_sec=[window.duration_sec for window in windows],
+                        audio_bitrate_bps=budget.audio_bitrate_bps,
+                        source_bytes=budget.source_bytes,
+                        cancel_check=cancel_check,
+                        process_callback=process_callback,
+                        plan=active_plan,
+                        min_vmaf_target=float(item.options.min_vmaf),
+                        window_order=order,
+                    )
+                if len(result.segment_vmaf) == len(windows):
+                    hardest_window = _hardest_window_index(result)
                 if progress_callback is not None:
                     progress_callback(
                         {
                             "stage": "analysis",
                             "state": "candidate_finished",
                             "candidate_index": candidate_index,
-                            "candidate_limit": MAX_SEARCH_CANDIDATES,
+                            "candidate_limit": limit,
                             "candidate_bitrate_bps": bitrate_bps,
                             "candidate_min_vmaf": result.min_vmaf,
+                            "candidate_tier": plan.tier.value,
                             "reused_candidate_count": len(initial_candidates),
                             "file_name": item.source_path.name,
                             "file_path": str(item.source_path),
@@ -1015,18 +1503,46 @@ def analyze_quality(
             required_ceiling = max(item.media_info.video_bitrate_bps, budget.max_video_bitrate_bps)
             if configured_max > 0:
                 required_ceiling = min(required_ceiling, configured_max)
+            tolerance = search_tolerance_bps(required_ceiling)
             try:
-                candidates, _selected_bitrate, _required_bitrate = search_bitrate_candidates(
-                    evaluate=evaluate,
-                    min_bitrate_bps=budget.min_video_bitrate_bps,
-                    budget_bitrate_bps=budget.max_video_bitrate_bps,
-                    required_search_ceiling_bps=required_ceiling,
+                coarse_candidates: list[QualityCandidateResult] = []
+                exact_min = budget.min_video_bitrate_bps
+                exact_budget = budget.max_video_bitrate_bps
+                exact_ceiling = required_ceiling
+                if not initial_candidates:
+                    coarse_candidates, _coarse_selected, _coarse_required = search_bitrate_candidates(
+                        evaluate=lambda bitrate: evaluate(bitrate, coarse_plan),
+                        min_bitrate_bps=budget.min_video_bitrate_bps,
+                        budget_bitrate_bps=budget.max_video_bitrate_bps,
+                        required_search_ceiling_bps=required_ceiling,
+                        min_vmaf=float(item.options.min_vmaf),
+                        max_candidates=COARSE_MAX_CANDIDATES,
+                        max_output_bytes=budget.max_output_bytes,
+                        tolerance_bps=tolerance,
+                    )
+                    exact_min, exact_budget, exact_ceiling = _exact_search_bounds(
+                        coarse_candidates,
+                        min_bitrate_bps=budget.min_video_bitrate_bps,
+                        budget_bitrate_bps=budget.max_video_bitrate_bps,
+                        ceiling_bps=required_ceiling,
+                        min_vmaf=float(item.options.min_vmaf),
+                    )
+                searched, _selected_bitrate, _required_bitrate = search_bitrate_candidates(
+                    evaluate=lambda bitrate: evaluate(bitrate, exact_plan),
+                    min_bitrate_bps=exact_min,
+                    budget_bitrate_bps=exact_budget,
+                    required_search_ceiling_bps=exact_ceiling,
                     min_vmaf=float(item.options.min_vmaf),
+                    max_candidates=EXACT_MAX_CANDIDATES,
                     max_output_bytes=budget.max_output_bytes,
                     initial_candidates=_refresh_candidate_predictions(
                         initial_candidates, budget, item.media_info.duration
                     ),
+                    tolerance_bps=tolerance,
                 )
+                candidates = _complete_candidates(searched, len(windows))
+                if not candidates:
+                    candidates = searched
             except _UnsupportedSmartAnalysis as exc:
                 return QualitySearchResult(
                     status=QualitySearchStatus.UNSUPPORTED,
@@ -1037,13 +1553,36 @@ def analyze_quality(
                     max_output_bytes=budget.max_output_bytes,
                     reason=str(exc),
                 )
+            _log_timing(log_file, f"Smart total: {time.perf_counter() - started:.2f}s")
+
+    if exact_plan.vmaf_backend != VmafBackend.CPU or exact_plan.fallback_reason:
+        measurement_fingerprint = measurement_configuration_fingerprint(
+            ffmpeg_path,
+            item,
+            vmaf_backend=exact_plan.vmaf_backend,
+            vmaf_subsample=exact_plan.vmaf_subsample,
+        )
+        fingerprint = quality_configuration_fingerprint(
+            ffmpeg_path,
+            item,
+            vmaf_backend=exact_plan.vmaf_backend,
+            vmaf_subsample=exact_plan.vmaf_subsample,
+        )
 
     candidates = _refresh_candidate_predictions(candidates, budget, item.media_info.duration)
-    if candidates:
+    persistable = _complete_candidates(candidates, len(windows))
+    if persistable:
         try:
             save_analysis_receipt(
                 workdir,
-                _analysis_receipt(ffmpeg_path, item, measurement_fingerprint, windows, candidates),
+                _analysis_receipt(
+                    ffmpeg_path,
+                    item,
+                    measurement_fingerprint,
+                    windows,
+                    persistable,
+                    vmaf_backend=exact_plan.vmaf_backend,
+                ),
             )
         except (OSError, ValueError) as exc:
             if progress_callback is not None:
@@ -1057,14 +1596,14 @@ def analyze_quality(
                     }
                 )
     return reselect_from_candidates(
-        candidates,
+        persistable or candidates,
         item,
         measurement_fingerprint=measurement_fingerprint,
         fingerprint=fingerprint,
     )
 
 
-SMART_ANALYSIS_SEMAPHORE = threading.Semaphore(1)
+SMART_ANALYSIS_SEMAPHORE = threading.Semaphore(analysis_concurrency_limit())
 
 
 def acquire_analysis_slot(cancel_check: Callable[[], bool] | None) -> None:

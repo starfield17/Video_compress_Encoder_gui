@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import threading
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Callable, TextIO
 
+from core.analysis_concurrency import analysis_concurrency_limit
 from core.build_ffmpeg_cmd import (
     build_encode_commands,
     build_preview_encode_commands,
@@ -16,6 +19,7 @@ from core.constraint_resolution import reselect_after_quality_decision
 from core.external_subtitles import copy_external_subtitles
 from core.models import (
     CompressionMode,
+    ConstraintFailureKind,
     ConstraintPolicy,
     DecisionActionCode,
     EncodePlan,
@@ -26,6 +30,7 @@ from core.models import (
     PreviewResult,
     QualitySearchResult,
     QualitySearchStatus,
+    QualityUnreachablePolicy,
     SmartPreviewResult,
 )
 from core.path_utils import log_file_path
@@ -37,6 +42,7 @@ from core.smart_quality import (
     acquire_analysis_slot,
     analyze_quality,
     build_decision_options,
+    constraint_policy_from_size_blocked,
     resolve_max_output_ratio,
 )
 
@@ -70,6 +76,26 @@ def _apply_constraint_policy(
 def _size_miss_output_path(output_path: Path) -> Path:
     return output_path.with_name(
         f"{output_path.stem}.size-miss-{uuid.uuid4().hex[:8]}{output_path.suffix}"
+    )
+
+
+def _usable_smart_result(item: EncodePlanItem) -> QualitySearchResult | None:
+    result = item.quality_search_result
+    if result is None or not result.success:
+        return None
+    encoder = item.encoder_info
+    if encoder is None:
+        return None
+    if result.encoder_name != encoder.encoder_name or result.backend != encoder.backend:
+        return None
+    return result
+
+
+def item_needs_smart_analysis(item: EncodePlanItem) -> bool:
+    return (
+        item.skip_reason is None
+        and item.options.compression_mode == CompressionMode.SMART
+        and _usable_smart_result(item) is None
     )
 
 
@@ -400,6 +426,248 @@ def _write_command_failure_log(log_path: Path, exc: subprocess.CalledProcessErro
             fh.write(exc.stderr + "\n")
 
 
+def analyze_plan_item(
+    ffmpeg_path: Path,
+    item: EncodePlanItem,
+    workdir: Path,
+    *,
+    queue_index: int = 1,
+    queue_total: int = 1,
+    log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+    process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
+    extra_progress_context: dict[str, object] | None = None,
+    constraint_policy: ConstraintPolicy | None = None,
+) -> EncodeResult | None:
+    """Run Smart analysis and attach the result.
+
+    Returns an ``EncodeResult`` when the item must not be encoded (skip,
+    unsupported, or needs a decision). Returns ``None`` when the item is ready
+    to encode with ``item.target_video_bitrate_bps`` set.
+    """
+    workdir = validate_workdir(workdir)
+    log_path = log_file_path(workdir, item.source_path, "encode")
+    base_context = _encode_progress_context(item, queue_index, queue_total, extra_progress_context)
+    if item.skip_reason:
+        return _skipped_encode_result(
+            item,
+            log_path,
+            base_context,
+            queue_index,
+            queue_total,
+            log_callback,
+            progress_callback,
+        )
+    if item.options.compression_mode != CompressionMode.SMART:
+        return None
+
+    existing = _usable_smart_result(item)
+    if existing is not None:
+        item.target_video_bitrate_bps = existing.selected_video_bitrate_bps
+        return None
+
+    result = EncodeResult(
+        source_path=item.source_path,
+        output_path=item.output_path,
+        success=True,
+        log_path=log_path,
+    )
+    _emit(log_callback, f"[{queue_index}/{queue_total}] Waiting for smart analysis: {item.source_path.name}")
+    _emit_progress(
+        progress_callback,
+        state="waiting_analysis",
+        percent=0.0,
+        file_progress=0.0,
+        **base_context,
+    )
+    acquire_analysis_slot(cancel_check)
+    try:
+        _emit(log_callback, f"[{queue_index}/{queue_total}] Smart analysis started: {item.source_path.name}")
+
+        def analysis_progress(event: dict[str, object]) -> None:
+            _emit_progress(progress_callback, **{**base_context, **event})
+
+        quality_result = analyze_quality(
+            ffmpeg_path,
+            item,
+            workdir,
+            log_path,
+            progress_callback=analysis_progress,
+            cancel_check=cancel_check,
+            process_callback=process_callback,
+        )
+    finally:
+        SMART_ANALYSIS_SEMAPHORE.release()
+
+    item.quality_search_result = quality_result
+    result.quality_search_result = quality_result
+    _assert_quality_encoder_matches_item(item, quality_result)
+    if quality_result.status == QualitySearchStatus.CONSTRAINT_UNSATISFIED:
+        size_policy = constraint_policy
+        if size_policy is None:
+            size_policy = constraint_policy_from_size_blocked(item.options.size_blocked_policy)
+        if quality_result.failure_kind == ConstraintFailureKind.SIZE_BLOCKED:
+            applied = _apply_constraint_policy(ffmpeg_path, item, quality_result, size_policy)
+            if applied.success and size_policy != ConstraintPolicy.FAIL:
+                _emit(
+                    log_callback,
+                    f"[{queue_index}/{queue_total}] Applied {size_policy.value} for "
+                    f"{item.source_path.name}: bitrate={applied.selected_video_bitrate_bps} "
+                    f"VMAF={applied.min_vmaf}",
+                )
+            quality_result = applied
+        item.quality_search_result = quality_result
+        result.quality_search_result = quality_result
+    if not quality_result.success:
+        result.success = False
+        result.error_message = quality_result.reason or "Smart compression constraints could not be satisfied."
+        unreachable_skip = (
+            quality_result.status == QualitySearchStatus.CONSTRAINT_UNSATISFIED
+            and quality_result.failure_kind == ConstraintFailureKind.QUALITY_UNREACHABLE
+            and item.options.quality_unreachable_policy == QualityUnreachablePolicy.SKIP
+        )
+        result.needs_decision = (
+            quality_result.status == QualitySearchStatus.CONSTRAINT_UNSATISFIED and not unreachable_skip
+        )
+        result.skipped = not result.needs_decision
+        _emit(
+            log_callback,
+            f"[{queue_index}/{queue_total}] Smart analysis requires a decision for "
+            f"{item.source_path.name}: {result.error_message}"
+            if result.needs_decision
+            else f"[{queue_index}/{queue_total}] Smart analysis skipped "
+            f"{item.source_path.name}: {result.error_message}",
+        )
+        _emit_progress(
+            progress_callback,
+            state="needs_decision" if result.needs_decision else "skipped",
+            percent=100.0,
+            file_progress=100.0,
+            message=result.error_message,
+            quality_search_result=quality_result,
+            **base_context,
+        )
+        return result
+
+    item.target_video_bitrate_bps = quality_result.selected_video_bitrate_bps
+    _emit_progress(
+        progress_callback,
+        state="analysis_finished",
+        quality_search_result=quality_result,
+        target_video_bitrate_bps=item.target_video_bitrate_bps,
+        **base_context,
+    )
+    return None
+
+
+def run_analysis_phase(
+    ffmpeg_path: Path,
+    items: list[EncodePlanItem],
+    workdir: Path,
+    *,
+    log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+    process_callback: Callable[[str, subprocess.Popen[str] | None], None] | None = None,
+    item_contexts: list[dict[str, object]] | None = None,
+    pause_check: Callable[[], bool] | None = None,
+    item_started_callback: Callable[[int], None] | None = None,
+    item_result_callback: Callable[[int, EncodeResult], None] | None = None,
+    constraint_policy: ConstraintPolicy | None = None,
+) -> list[EncodeResult | None]:
+    """Analyze every Smart item before any encode starts.
+
+    Items that are ready to encode keep ``None`` in the returned list. Terminal
+    analysis outcomes (skip / decision / unsupported) are stored in place.
+    """
+    results: list[EncodeResult | None] = [None] * len(items)
+    pending = deque(
+        index for index, item in enumerate(items) if item_needs_smart_analysis(item) or item.skip_reason
+    )
+    if not pending:
+        return results
+
+    workers = max(1, min(analysis_concurrency_limit(), len(pending)))
+    lock = threading.Lock()
+    stop_event = threading.Event()
+    exceptions: list[BaseException] = []
+
+    def should_stop() -> bool:
+        return stop_event.is_set() or (cancel_check is not None and cancel_check())
+
+    def worker(slot: str) -> None:
+        while not should_stop():
+            if pause_check is not None and pause_check():
+                return
+            with lock:
+                if not pending:
+                    return
+                index = pending.popleft()
+            item = items[index]
+            context = dict(item_contexts[index]) if item_contexts and index < len(item_contexts) else {}
+            if item_started_callback is not None:
+                item_started_callback(index)
+
+            def slot_process(proc: subprocess.Popen[str] | None, worker_slot: str = slot) -> None:
+                if process_callback is not None:
+                    process_callback(worker_slot, proc)
+
+            try:
+                terminal = analyze_plan_item(
+                    ffmpeg_path,
+                    item,
+                    workdir,
+                    queue_index=index + 1,
+                    queue_total=len(items),
+                    log_callback=log_callback,
+                    progress_callback=progress_callback,
+                    cancel_check=should_stop,
+                    process_callback=slot_process if process_callback is not None else None,
+                    extra_progress_context=context,
+                    constraint_policy=constraint_policy,
+                )
+            except BaseException as exc:
+                with lock:
+                    exceptions.append(exc)
+                stop_event.set()
+                return
+            if terminal is not None:
+                results[index] = terminal
+                if item_result_callback is not None:
+                    item_result_callback(index, terminal)
+
+    _emit(log_callback, f"Smart analysis phase started ({len(pending)} file(s), concurrency={workers}).")
+    _emit_progress(
+        progress_callback,
+        stage="analysis",
+        state="started",
+        parallel=workers > 1,
+        percent=0.0,
+    )
+    threads = [
+        threading.Thread(target=worker, args=(f"analysis-{slot}",), daemon=True)
+        for slot in range(workers)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if cancel_check is not None and cancel_check():
+        raise OperationCancelledError("Smart analysis cancelled.")
+    if exceptions:
+        raise exceptions[0]
+    _emit(log_callback, "Smart analysis phase finished.")
+    _emit_progress(
+        progress_callback,
+        stage="analysis",
+        state="finished",
+        parallel=workers > 1,
+        percent=100.0,
+    )
+    return results
+
+
 def execute_plan_item(
     ffmpeg_path: Path,
     item: EncodePlanItem,
@@ -412,7 +680,7 @@ def execute_plan_item(
     cancel_check: Callable[[], bool] | None = None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
     extra_progress_context: dict[str, object] | None = None,
-    constraint_policy: ConstraintPolicy = ConstraintPolicy.FAIL,
+    constraint_policy: ConstraintPolicy | None = None,
 ) -> EncodeResult:
     workdir = validate_workdir(workdir)
     log_path = log_file_path(workdir, item.source_path, "encode")
@@ -442,70 +710,22 @@ def execute_plan_item(
     current_pass_index = 1
     try:
         if item.options.compression_mode == CompressionMode.SMART:
-            _emit(log_callback, f"[{queue_index}/{queue_total}] Waiting for smart analysis: {item.source_path.name}")
-            _emit_progress(
-                progress_callback,
-                state="waiting_analysis",
-                percent=0.0,
-                file_progress=0.0,
-                **base_context,
+            terminal = analyze_plan_item(
+                ffmpeg_path,
+                item,
+                workdir,
+                queue_index=queue_index,
+                queue_total=queue_total,
+                log_callback=log_callback,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                process_callback=process_callback,
+                extra_progress_context=extra_progress_context,
+                constraint_policy=constraint_policy,
             )
-            acquire_analysis_slot(cancel_check)
-            try:
-                _emit(log_callback, f"[{queue_index}/{queue_total}] Smart analysis started: {item.source_path.name}")
-
-                def analysis_progress(event: dict[str, object]) -> None:
-                    _emit_progress(progress_callback, **{**base_context, **event})
-
-                quality_result = analyze_quality(
-                    ffmpeg_path,
-                    item,
-                    workdir,
-                    log_path,
-                    progress_callback=analysis_progress,
-                    cancel_check=cancel_check,
-                    process_callback=process_callback,
-                )
-            finally:
-                SMART_ANALYSIS_SEMAPHORE.release()
-            item.quality_search_result = quality_result
-            result.quality_search_result = quality_result
-            _assert_quality_encoder_matches_item(item, quality_result)
-            if quality_result.status == QualitySearchStatus.CONSTRAINT_UNSATISFIED:
-                quality_result = _apply_constraint_policy(ffmpeg_path, item, quality_result, constraint_policy)
-                item.quality_search_result = quality_result
-                result.quality_search_result = quality_result
-            if not quality_result.success:
-                result.success = False
-                result.error_message = quality_result.reason or "Smart compression constraints could not be satisfied."
-                result.needs_decision = quality_result.status == QualitySearchStatus.CONSTRAINT_UNSATISFIED
-                result.skipped = not result.needs_decision
-                _emit(
-                    log_callback,
-                    f"[{queue_index}/{queue_total}] Smart analysis requires a decision for "
-                    f"{item.source_path.name}: {result.error_message}"
-                    if result.needs_decision
-                    else f"[{queue_index}/{queue_total}] Smart analysis skipped "
-                    f"{item.source_path.name}: {result.error_message}",
-                )
-                _emit_progress(
-                    progress_callback,
-                    state="needs_decision" if result.needs_decision else "skipped",
-                    percent=100.0,
-                    file_progress=100.0,
-                    message=result.error_message,
-                    quality_search_result=quality_result,
-                    **base_context,
-                )
-                return result
-            item.target_video_bitrate_bps = quality_result.selected_video_bitrate_bps
-            _emit_progress(
-                progress_callback,
-                state="analysis_finished",
-                quality_search_result=quality_result,
-                target_video_bitrate_bps=item.target_video_bitrate_bps,
-                **base_context,
-            )
+            if terminal is not None:
+                return terminal
+            result.quality_search_result = item.quality_search_result
             item.output_path.parent.mkdir(parents=True, exist_ok=True)
             temporary_output = item.output_path.parent / (
                 f".{item.output_path.stem}.smart-{uuid.uuid4().hex}{item.output_path.suffix}"
@@ -679,35 +899,77 @@ def execute_plan(
     progress_callback: Callable[[dict[str, object]], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
-    constraint_policy: ConstraintPolicy = ConstraintPolicy.FAIL,
+    constraint_policy: ConstraintPolicy | None = None,
+    pause_check: Callable[[], bool] | None = None,
+    item_started_callback: Callable[[int], None] | None = None,
+    item_result_callback: Callable[[int, EncodeResult], None] | None = None,
+    extra_progress_contexts: list[dict[str, object]] | None = None,
 ) -> list[EncodeResult]:
     workdir = validate_workdir(workdir)
-    results: list[EncodeResult] = []
+    total = len(plan.items)
 
-    _emit(log_callback, "Encode execution started.")
+    def analysis_process(slot: str, proc: subprocess.Popen[str] | None) -> None:
+        del slot
+        if process_callback is not None:
+            process_callback(proc)
+
+    results = run_analysis_phase(
+        plan.ffmpeg_path,
+        plan.items,
+        workdir,
+        log_callback=log_callback,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
+        process_callback=analysis_process if process_callback is not None else None,
+        item_contexts=extra_progress_contexts,
+        pause_check=pause_check,
+        item_started_callback=item_started_callback,
+        item_result_callback=item_result_callback,
+        constraint_policy=constraint_policy,
+    )
+    if pause_check is not None and pause_check():
+        return [result for result in results if result is not None]
+
+    _emit(log_callback, "Encode phase started.")
     _emit_progress(progress_callback, stage="encode", state="started", percent=0.0)
-    for index, item in enumerate(plan.items, start=1):
+    for index, item in enumerate(plan.items):
+        if results[index] is not None:
+            continue
         if cancel_check is not None and cancel_check():
             _emit(log_callback, "Encode execution cancelled by user.")
             _emit_progress(progress_callback, stage="encode", state="cancelled")
             raise OperationCancelledError("Encoding cancelled.")
-        results.append(
-            execute_plan_item(
-                plan.ffmpeg_path,
-                item,
-                workdir,
-                queue_index=index,
-                queue_total=len(plan.items),
-                log_callback=log_callback,
-                progress_callback=progress_callback,
-                cancel_check=cancel_check,
-                process_callback=process_callback,
-                constraint_policy=constraint_policy,
-            )
+        if pause_check is not None and pause_check():
+            break
+        if item_started_callback is not None and item.options.compression_mode != CompressionMode.SMART:
+            item_started_callback(index)
+        context = extra_progress_contexts[index] if extra_progress_contexts and index < len(extra_progress_contexts) else None
+        encoded = execute_plan_item(
+            plan.ffmpeg_path,
+            item,
+            workdir,
+            queue_index=index + 1,
+            queue_total=total,
+            log_callback=log_callback,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            process_callback=process_callback,
+            extra_progress_context=context,
+            constraint_policy=constraint_policy,
         )
-    _emit(log_callback, "Encode execution finished.")
-    _emit_progress(progress_callback, stage="encode", state="finished", percent=100.0)
-    return results
+        results[index] = encoded
+        if item_result_callback is not None:
+            item_result_callback(index, encoded)
+    completed = [result for result in results if result is not None]
+    paused = pause_check is not None and pause_check() and len(completed) < total
+    _emit(log_callback, "Encode execution paused." if paused else "Encode execution finished.")
+    _emit_progress(
+        progress_callback,
+        stage="encode",
+        state="paused" if paused else "finished",
+        percent=100.0 if not paused else None,
+    )
+    return completed
 
 
 def execute_preview(

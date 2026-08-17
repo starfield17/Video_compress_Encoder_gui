@@ -43,13 +43,14 @@ class ReleaseWorkflowMatrixTestCase(unittest.TestCase):
                 (runner, architecture, package_kind),
             )
         self.assertEqual(rows["windows-arm64"]["windows_compiler"], "clang")
-        self.assertEqual(rows["windows-x86_64"]["windows_compiler"], "mingw64")
+        self.assertEqual(rows["windows-x86_64"]["windows_compiler"], "msvc")
         self.assertEqual(rows["windows-x86_64"]["msi_architecture"], "x86_64")
         self.assertEqual(rows["windows-arm64"]["msi_architecture"], "arm64")
         self.assertIn("scripts/build_icons.py --check", workflow)
         self.assertIn("scripts\\build_msi.py", workflow)
         self.assertIn("msi-smoke-expanded", workflow)
         self.assertIn("workdir/tmp", workflow)
+        self.assertIn('python-version: "3.13"', workflow)
 
     def test_release_matrix_and_publish_contract_cover_native_packages(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -70,6 +71,7 @@ class ReleaseWorkflowMatrixTestCase(unittest.TestCase):
         self.assertIn("WINDOWS_CERTIFICATE_BASE64", workflow)
         self.assertEqual(rows["windows-x86_64"]["msi_architecture"], "x86_64")
         self.assertEqual(rows["windows-arm64"]["msi_architecture"], "arm64")
+        self.assertIn('python-version: "3.13"', workflow)
 
 
 if __name__ == "__main__":

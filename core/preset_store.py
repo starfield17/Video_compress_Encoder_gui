@@ -15,6 +15,8 @@ from core.models import (
     ContainerChoice,
     DecodeAcceleration,
     EncodeOptions,
+    QualityUnreachablePolicy,
+    SizeBlockedPolicy,
 )
 
 
@@ -192,15 +194,43 @@ def _default_app_config() -> dict[str, Any]:
         "recent_paths": [],
         "log_level": "info",
         "language": "en",
+        "size_blocked_policy": SizeBlockedPolicy.RELAX_SIZE.value,
+        "quality_unreachable_policy": QualityUnreachablePolicy.SKIP.value,
     }
+
+
+def parse_size_blocked_policy(value: object) -> SizeBlockedPolicy:
+    try:
+        return SizeBlockedPolicy(str(value))
+    except ValueError:
+        return SizeBlockedPolicy.RELAX_SIZE
+
+
+def parse_quality_unreachable_policy(value: object) -> QualityUnreachablePolicy:
+    try:
+        return QualityUnreachablePolicy(str(value))
+    except ValueError:
+        return QualityUnreachablePolicy.SKIP
+
+
+def smart_policies_from_config(data: dict[str, Any]) -> tuple[SizeBlockedPolicy, QualityUnreachablePolicy]:
+    return (
+        parse_size_blocked_policy(data.get("size_blocked_policy", SizeBlockedPolicy.RELAX_SIZE.value)),
+        parse_quality_unreachable_policy(
+            data.get("quality_unreachable_policy", QualityUnreachablePolicy.SKIP.value)
+        ),
+    )
 
 
 def _load_app_config_unlocked(config_dir: Path) -> dict[str, Any]:
     path = app_config_path(config_dir)
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-
-    return _default_app_config()
+    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if not isinstance(data, dict):
+        data = {}
+    defaults = _default_app_config()
+    for key, value in defaults.items():
+        data.setdefault(key, value)
+    return data
 
 
 def _save_app_config_unlocked(config_dir: Path, data: dict[str, Any]) -> Path:

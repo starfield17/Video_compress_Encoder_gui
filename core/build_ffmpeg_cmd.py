@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 from core.models import AudioMode, ContainerChoice, DecodeAcceleration, EncodePlanItem, PreviewJob
@@ -23,7 +24,10 @@ def build_input_acceleration_args(plan_item: EncodePlanItem) -> list[str]:
     raise ValueError(f"Unsupported decode acceleration: {acceleration}")
 
 
-def build_video_args(plan_item: EncodePlanItem) -> list[str]:
+def build_video_args(
+    plan_item: EncodePlanItem,
+    extra_args: Sequence[str] = (),
+) -> list[str]:
     if plan_item.encoder_info is None:
         raise ValueError("Encoding requires a bound encoder.")
     encoder = plan_item.encoder_info.encoder_name
@@ -59,6 +63,9 @@ def build_video_args(plan_item: EncodePlanItem) -> list[str]:
 
     if encoder == "hevc_videotoolbox":
         args += ["-allow_sw", "0"]
+
+    if extra_args:
+        args += list(extra_args)
 
     return args
 
@@ -98,9 +105,10 @@ def build_encode_commands(
     input_path: Path | None = None,
     output_path: Path | None = None,
     stage: str = "encode",
+    extra_video_args: Sequence[str] = (),
 ) -> tuple[list[list[str]], Path | None]:
     if not plan_item.encoder_info:
-        raise ValueError("计划项缺少编码器信息。")
+        raise ValueError("Plan item is missing encoder information.")
 
     source_path = input_path or plan_item.source_path
     final_output = output_path or plan_item.output_path
@@ -114,7 +122,7 @@ def build_encode_commands(
         str(source_path),
     ]
 
-    video_args = build_video_args(plan_item)
+    video_args = build_video_args(plan_item, extra_args=extra_video_args)
     audio_args = build_audio_args(plan_item)
     subtitle_args = build_subtitle_args(plan_item)
     common_output_args = build_common_output_args(plan_item)

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QThread, Signal
 
-from core.exec_encode import execute_plan_item
+from core.exec_encode import execute_plan
 from core.models import EncodePlan, EncodeResult, OperationCancelledError
 from core.parallel_queue_exec import execute_plan_parallel, normalize_parallel_backends
 from gui.queue_state import QueueItemRecord, create_queue_records
@@ -109,29 +109,34 @@ class QueueExecuteWorker(QThread):
                     return
                 self.queue_finished.emit()
                 return
-            for index, item in enumerate(self.items, start=1):
-                if self._cancel_event.is_set():
-                    raise OperationCancelledError("Encoding cancelled.")
-                encoder = item.record.plan_item.encoder_info
+            plan = self._build_plan()
+            index_to_item_id = [item.item_id for item in self.items]
+
+            def started(index: int) -> None:
+                item = self.items[index]
+                encoder = plan.items[index].encoder_info or item.record.plan_item.encoder_info
                 backend_name = encoder.backend.value if encoder else item.record.plan_item.options.backend.value
                 encoder_name = encoder.encoder_name if encoder else "n/a"
                 self.item_started.emit(item.item_id, backend_name, encoder_name)
-                result = execute_plan_item(
-                    item.record.job_snapshot.ffmpeg_path,
-                    copy.deepcopy(item.record.plan_item),
-                    item.record.job_snapshot.workdir,
-                    queue_index=index,
-                    queue_total=len(self.items),
-                    log_callback=self._emit_log,
-                    progress_callback=self._emit_progress,
-                    cancel_check=self._cancel_event.is_set,
-                    process_callback=lambda proc: self._set_current_process("serial", proc),
-                    extra_progress_context={"queue_item_id": item.item_id},
-                )
-                self.item_finished.emit(item.item_id, result)
-                if self._pause_after_current_event.is_set():
-                    self.paused.emit()
-                    return
+
+            def finished(index: int, result: EncodeResult) -> None:
+                self.item_finished.emit(index_to_item_id[index], result)
+
+            results = execute_plan(
+                plan,
+                self.items[0].record.job_snapshot.workdir,
+                log_callback=self._emit_log,
+                progress_callback=self._emit_progress,
+                cancel_check=self._cancel_event.is_set,
+                process_callback=lambda proc: self._set_current_process("serial", proc),
+                pause_check=self._pause_after_current_event.is_set,
+                item_started_callback=started,
+                item_result_callback=finished,
+                extra_progress_contexts=[{"queue_item_id": item.item_id} for item in self.items],
+            )
+            if self._pause_after_current_event.is_set() and len(results) < len(self.items):
+                self.paused.emit()
+                return
             self.queue_finished.emit()
         except OperationCancelledError as exc:
             self.cancelled.emit(str(exc))

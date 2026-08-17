@@ -8,6 +8,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from core.analysis_runtime import AnalysisCapabilities, format_analysis_capability_report
 from scripts.prepare_ffmpeg import (
     binary_architecture,
     load_manifest,
@@ -147,6 +148,26 @@ class FFmpegPreparationTestCase(unittest.TestCase):
                     root=root,
                     run_capability_checks=False,
                 )
+
+    def test_optional_analysis_capabilities_are_reported_not_required(self) -> None:
+        report = format_analysis_capability_report(
+            AnalysisCapabilities(
+                libvmaf=True,
+                libvmaf_cuda=False,
+                loopback_decoder=False,
+                hwaccels=frozenset(),
+                filters=frozenset({"libvmaf"}),
+                encoders=frozenset({"libx265"}),
+                scale_vt=False,
+                scale_cuda=False,
+                videotoolbox_hwaccel=False,
+                cuda_hwaccel=False,
+                videotoolbox_prio_speed=False,
+            )
+        )
+        self.assertIn("CPU VMAF          yes", report)
+        self.assertIn("CUDA VMAF         no", report)
+        self.assertIn("Loopback decoder  no", report)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,8 @@ import zipfile
 from pathlib import Path
 from typing import BinaryIO
 
+from core.analysis_runtime import detect_analysis_capabilities, format_analysis_capability_report
+
 
 USER_AGENT = "Video-compressor-release-ci/1.0"
 MACHINE_TYPES = {
@@ -249,6 +251,8 @@ def verify_capabilities(ffmpeg_path: Path, ffprobe_path: Path) -> None:
                 "-",
             ]
         )
+
+    print(format_analysis_capability_report(detect_analysis_capabilities(ffmpeg_path)))
 
 
 def _host_matches(target: dict[str, object]) -> bool:

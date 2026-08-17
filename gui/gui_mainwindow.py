@@ -43,8 +43,10 @@ from core.models import (
     ContainerChoice,
     DecodeAcceleration,
     EncodeOptions,
+    QualityUnreachablePolicy,
     PreviewOptions,
     PreviewSampleMode,
+    SizeBlockedPolicy,
     SmartPreviewResult,
     VideoFileItem,
 )
@@ -55,7 +57,15 @@ from core.encoder_caps import (
     preset_choices_for_encoder,
     resolve_encoder,
 )
-from core.preset_store import delete_preset, list_presets, load_app_config, load_preset, save_preset, update_app_config
+from core.preset_store import (
+    delete_preset,
+    list_presets,
+    load_app_config,
+    load_preset,
+    save_preset,
+    smart_policies_from_config,
+    update_app_config,
+)
 from core.smart_quality import resolve_max_output_ratio
 from gui.activity_log_window import ActivityLogWindow
 from gui.constraint_decision_dialog import (
@@ -537,6 +547,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.parallel_amf_check, 3, 3)
         layout.addWidget(self.parallel_videotoolbox_check, 3, 4)
         layout.addWidget(self.parallel_cpu_check, 3, 5)
+
+        self.size_blocked_policy_label = QLabel()
+        self.size_blocked_policy_combo = QComboBox()
+        self.quality_unreachable_policy_label = QLabel()
+        self.quality_unreachable_policy_combo = QComboBox()
+        self._fill_policy_combos()
+        layout.addWidget(self.size_blocked_policy_label, 4, 0)
+        layout.addWidget(self.size_blocked_policy_combo, 4, 1)
+        layout.addWidget(self.quality_unreachable_policy_label, 4, 2)
+        layout.addWidget(self.quality_unreachable_policy_combo, 4, 3, 1, 3)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
         layout.setColumnStretch(5, 1)
@@ -706,9 +726,38 @@ class MainWindow(QMainWindow):
                 self._apply_options(EncodeOptions())
         else:
             self._apply_options(EncodeOptions())
+        self._apply_policy_settings()
 
         self._set_status_snapshot("-", "-", "-", "-", None)
         self._restore_header_state()
+
+    def _fill_policy_combos(self) -> None:
+        self.size_blocked_policy_combo.clear()
+        self.size_blocked_policy_combo.addItem("", SizeBlockedPolicy.RELAX_SIZE.value)
+        self.size_blocked_policy_combo.addItem("", SizeBlockedPolicy.RELAX_QUALITY.value)
+        self.size_blocked_policy_combo.addItem("", SizeBlockedPolicy.ASK.value)
+        self.quality_unreachable_policy_combo.clear()
+        self.quality_unreachable_policy_combo.addItem("", QualityUnreachablePolicy.SKIP.value)
+        self.quality_unreachable_policy_combo.addItem("", QualityUnreachablePolicy.ASK.value)
+
+    def _apply_policy_settings(self) -> None:
+        size_policy, unreachable_policy = smart_policies_from_config(self.app_config)
+        size_index = self.size_blocked_policy_combo.findData(size_policy.value)
+        if size_index >= 0:
+            self.size_blocked_policy_combo.setCurrentIndex(size_index)
+        unreachable_index = self.quality_unreachable_policy_combo.findData(unreachable_policy.value)
+        if unreachable_index >= 0:
+            self.quality_unreachable_policy_combo.setCurrentIndex(unreachable_index)
+
+    def _current_size_blocked_policy(self) -> SizeBlockedPolicy:
+        return SizeBlockedPolicy(
+            self.size_blocked_policy_combo.currentData() or SizeBlockedPolicy.RELAX_SIZE.value
+        )
+
+    def _current_quality_unreachable_policy(self) -> QualityUnreachablePolicy:
+        return QualityUnreachablePolicy(
+            self.quality_unreachable_policy_combo.currentData() or QualityUnreachablePolicy.SKIP.value
+        )
 
     def _apply_translations(self) -> None:
         self.tr = get_translator(self.language, self.config_dir)
@@ -756,6 +805,28 @@ class MainWindow(QMainWindow):
         self.ratio_label.setText(self.tr.t("gui.label.ratio"))
         self.min_vmaf_label.setText(self.tr.t("gui.label.min_vmaf"))
         self.max_output_ratio_label.setText(self.tr.t("gui.label.max_output_ratio"))
+        self.size_blocked_policy_label.setText(self.tr.t("gui.label.size_blocked_policy"))
+        self.quality_unreachable_policy_label.setText(self.tr.t("gui.label.quality_unreachable_policy"))
+        self.size_blocked_policy_combo.setItemText(
+            self.size_blocked_policy_combo.findData(SizeBlockedPolicy.RELAX_SIZE.value),
+            self.tr.t("gui.value.size_blocked_relax_size"),
+        )
+        self.size_blocked_policy_combo.setItemText(
+            self.size_blocked_policy_combo.findData(SizeBlockedPolicy.RELAX_QUALITY.value),
+            self.tr.t("gui.value.size_blocked_relax_quality"),
+        )
+        self.size_blocked_policy_combo.setItemText(
+            self.size_blocked_policy_combo.findData(SizeBlockedPolicy.ASK.value),
+            self.tr.t("gui.value.size_blocked_ask"),
+        )
+        self.quality_unreachable_policy_combo.setItemText(
+            self.quality_unreachable_policy_combo.findData(QualityUnreachablePolicy.SKIP.value),
+            self.tr.t("gui.value.quality_unreachable_skip"),
+        )
+        self.quality_unreachable_policy_combo.setItemText(
+            self.quality_unreachable_policy_combo.findData(QualityUnreachablePolicy.ASK.value),
+            self.tr.t("gui.value.quality_unreachable_ask"),
+        )
         self.overwrite_check.setText(self.tr.t("gui.checkbox.overwrite"))
         self.recursive_check.setText(self.tr.t("gui.checkbox.recursive"))
         self.parallel_check.setText(self.tr.t("gui.checkbox.parallel_enabled"))
@@ -1023,6 +1094,7 @@ class MainWindow(QMainWindow):
         old_language = self.language
         old_ffmpeg_path = str(self.app_config.get("ffmpeg_path", "")).strip()
         self.app_config.update(values)
+        self._apply_policy_settings()
         self._persist_runtime_state()
         if values["language"] != old_language:
             self._language_changed(str(values["language"]))
@@ -1106,6 +1178,8 @@ class MainWindow(QMainWindow):
             bufsize_factor=float(self.bufsize_factor_spin.value()),
             overwrite=self.overwrite_check.isChecked(),
             recursive=self.recursive_check.isChecked(),
+            size_blocked_policy=self._current_size_blocked_policy(),
+            quality_unreachable_policy=self._current_quality_unreachable_policy(),
         )
 
     def _apply_options(self, options: EncodeOptions) -> None:
@@ -1322,6 +1396,8 @@ class MainWindow(QMainWindow):
         self.ratio_edit.setEnabled(not smart_mode)
         self.min_vmaf_spin.setEnabled(smart_mode)
         self.max_output_ratio_spin.setEnabled(smart_mode)
+        self.size_blocked_policy_combo.setEnabled(smart_mode)
+        self.quality_unreachable_policy_combo.setEnabled(smart_mode)
         self.sample_mode_combo.setEnabled(not smart_mode)
         self.sample_duration_spin.setEnabled(not smart_mode)
         custom_sample = (
@@ -1465,6 +1541,8 @@ class MainWindow(QMainWindow):
         self.app_config.setdefault("ffprobe_path", "")
         self.app_config.setdefault("keep_preview_temp", True)
         self.app_config.setdefault("log_level", "info")
+        self.app_config["size_blocked_policy"] = self._current_size_blocked_policy().value
+        self.app_config["quality_unreachable_policy"] = self._current_quality_unreachable_policy().value
 
         recent_paths = list(self.app_config.get("recent_paths", []))
         if source_text:

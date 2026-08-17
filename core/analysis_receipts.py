@@ -13,7 +13,7 @@ from typing import Any
 from core.models import AnalysisReceipt, QualityCandidateResult
 
 
-ANALYSIS_RECEIPT_SCHEMA_VERSION = 1
+ANALYSIS_RECEIPT_SCHEMA_VERSION = 2
 _FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 _RECEIPT_LOCK = threading.RLock()
 

@@ -17,6 +17,7 @@ from core.analysis_receipts import (
     load_analysis_receipt,
     save_analysis_receipt,
 )
+from core.exec_encode import analyze_plan_item
 from core.models import (
     AnalysisReceipt,
     BackendChoice,
@@ -30,8 +31,11 @@ from core.models import (
     MediaInfo,
     QualityCandidateResult,
     QualitySearchStatus,
+    QualityUnreachablePolicy,
+    SizeBlockedPolicy,
     VmafCapabilities,
 )
+from core.preset_store import _default_app_config, smart_policies_from_config
 from core.smart_quality import (
     apply_decision_to_options,
     analyze_quality,
@@ -113,6 +117,75 @@ class ConstraintDecisionTestCase(unittest.TestCase):
             reselected = reselect_from_candidates(result.candidates, relaxed)
             self.assertEqual(reselected.status, QualitySearchStatus.FOUND)
             self.assertEqual(reselected.selected_video_bitrate_bps, 1_500_000)
+
+    def test_size_blocked_relax_size_encodes_without_asking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _item(root)
+            item.options.size_blocked_policy = SizeBlockedPolicy.RELAX_SIZE
+            blocked = reselect_from_candidates(_candidates(), item)
+            with patch("core.exec_encode.analyze_quality", return_value=blocked):
+                terminal = analyze_plan_item(root / "ffmpeg", item, root)
+            self.assertIsNone(terminal)
+            self.assertEqual(item.quality_search_result.status, QualitySearchStatus.FOUND)
+            self.assertEqual(item.target_video_bitrate_bps, 1_500_000)
+
+    def test_size_blocked_ask_still_needs_a_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _item(root)
+            item.options.size_blocked_policy = SizeBlockedPolicy.ASK
+            blocked = reselect_from_candidates(_candidates(), item)
+            with patch("core.exec_encode.analyze_quality", return_value=blocked):
+                terminal = analyze_plan_item(root / "ffmpeg", item, root)
+            self.assertIsNotNone(terminal)
+            assert terminal is not None
+            self.assertTrue(terminal.needs_decision)
+            self.assertFalse(terminal.skipped)
+
+    def test_quality_unreachable_skips_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _item(root)
+            item.options.quality_unreachable_policy = QualityUnreachablePolicy.SKIP
+            unreachable = reselect_from_candidates(
+                [QualityCandidateResult(video_bitrate_bps=1_000_000, min_vmaf=90.0)],
+                item,
+            )
+            self.assertEqual(unreachable.failure_kind, ConstraintFailureKind.QUALITY_UNREACHABLE)
+            with patch("core.exec_encode.analyze_quality", return_value=unreachable):
+                terminal = analyze_plan_item(root / "ffmpeg", item, root)
+            self.assertIsNotNone(terminal)
+            assert terminal is not None
+            self.assertTrue(terminal.skipped)
+            self.assertFalse(terminal.needs_decision)
+
+    def test_quality_unreachable_ask_needs_a_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _item(root)
+            item.options.quality_unreachable_policy = QualityUnreachablePolicy.ASK
+            unreachable = reselect_from_candidates(
+                [QualityCandidateResult(video_bitrate_bps=1_000_000, min_vmaf=90.0)],
+                item,
+            )
+            with patch("core.exec_encode.analyze_quality", return_value=unreachable):
+                terminal = analyze_plan_item(root / "ffmpeg", item, root)
+            self.assertIsNotNone(terminal)
+            assert terminal is not None
+            self.assertTrue(terminal.needs_decision)
+            self.assertFalse(terminal.skipped)
+
+    def test_old_app_config_backfills_smart_policies(self) -> None:
+        data = {"language": "en"}
+        for key, value in _default_app_config().items():
+            data.setdefault(key, value)
+        size_policy, unreachable_policy = smart_policies_from_config(data)
+        self.assertEqual(size_policy, SizeBlockedPolicy.RELAX_SIZE)
+        self.assertEqual(unreachable_policy, QualityUnreachablePolicy.SKIP)
+        empty_size, empty_unreachable = smart_policies_from_config({})
+        self.assertEqual(empty_size, SizeBlockedPolicy.RELAX_SIZE)
+        self.assertEqual(empty_unreachable, QualityUnreachablePolicy.SKIP)
 
     def test_policy_changes_do_not_invalidate_measurements(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

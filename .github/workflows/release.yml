@@ -29,7 +29,7 @@ jobs:
             architecture: x64
             msi_architecture: x86_64
             package_kind: standalone
-            windows_compiler: mingw64
+            windows_compiler: msvc
 
           - os: windows-11-arm
             target: windows-arm64
@@ -68,7 +68,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.13"
           architecture: ${{ matrix.architecture }}
           cache: pip
           cache-dependency-path: requirements-build.txt

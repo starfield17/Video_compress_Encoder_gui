@@ -18,6 +18,7 @@ from cli.cli_entry import _build_parser, _merge_options, _parse_parallel_backend
 from core.models import (
     BackendChoice,
     CodecChoice,
+    CompressionMode,
     EncodeOptions,
     EncodePlan,
     EncodePlanItem,
@@ -79,7 +80,7 @@ def _capabilities(entries: list[tuple[BackendChoice, str]]) -> dict:
 
 
 def _plan(tmp: Path, count: int = 4, options: EncodeOptions | None = None) -> EncodePlan:
-    current = options or EncodeOptions(overwrite=True)
+    current = options or EncodeOptions(compression_mode=CompressionMode.FIXED_BITRATE, overwrite=True)
     items: list[EncodePlanItem] = []
     for index in range(count):
         source = tmp / f"video_{index}.mp4"

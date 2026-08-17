@@ -70,6 +70,7 @@ def resolve_windows_compiler(
     requested: str,
     *,
     machine: str | None = None,
+    python_version: tuple[int, int] | None = None,
 ) -> str:
     if requested not in _WINDOWS_COMPILERS:
         raise ValueError(f"Unsupported Windows compiler: {requested}")
@@ -80,6 +81,9 @@ def resolve_windows_compiler(
     if normalized_machine(machine) == "arm64":
         return "clang"
 
+    version = python_version or sys.version_info[:2]
+    if version >= (3, 13):
+        return "msvc"
     return "mingw64"
 
 

@@ -20,6 +20,8 @@ from core.models import (
     CodecChoice,
     CompressionMode,
     ConstraintPolicy,
+    QualityUnreachablePolicy,
+    SizeBlockedPolicy,
     ContainerChoice,
     DecodeAcceleration,
     EncodeOptions,
@@ -34,8 +36,11 @@ from core.preset_store import (
     list_presets,
     load_app_config,
     load_preset,
+    parse_quality_unreachable_policy,
+    parse_size_blocked_policy,
     save_preset,
 )
+from core.smart_quality import constraint_policy_from_size_blocked, size_blocked_from_constraint_policy
 from core.preview_sample import build_preview_job
 
 
@@ -111,6 +116,16 @@ def _merge_options(base: EncodeOptions, args: argparse.Namespace) -> EncodeOptio
         updates["parallel_enabled"] = bool(parallel_enabled)
     if hasattr(args, "parallel_backends"):
         updates["parallel_backends"] = _parse_parallel_backends(getattr(args, "parallel_backends", None))
+
+    size_blocked = getattr(args, "size_blocked_policy", None)
+    constraint_policy = getattr(args, "constraint_policy", None)
+    if size_blocked is not None:
+        updates["size_blocked_policy"] = parse_size_blocked_policy(size_blocked)
+    elif constraint_policy is not None:
+        updates["size_blocked_policy"] = size_blocked_from_constraint_policy(ConstraintPolicy(constraint_policy))
+    unreachable = getattr(args, "quality_unreachable_policy", None)
+    if unreachable is not None:
+        updates["quality_unreachable_policy"] = parse_quality_unreachable_policy(unreachable)
 
     return replace(base, **updates)
 
@@ -283,10 +298,21 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_runtime_flags(encode_parser)
     _add_encode_flags(encode_parser)
     encode_parser.add_argument(
+        "--size-blocked-policy",
+        dest="size_blocked_policy",
+        choices=[policy.value for policy in SizeBlockedPolicy],
+        help="When VMAF is reachable only above the size limit (default: relax_size)",
+    )
+    encode_parser.add_argument(
+        "--quality-unreachable-policy",
+        dest="quality_unreachable_policy",
+        choices=[policy.value for policy in QualityUnreachablePolicy],
+        help="When the encoder cannot reach the VMAF target (default: skip)",
+    )
+    encode_parser.add_argument(
         "--constraint-policy",
         choices=[policy.value for policy in ConstraintPolicy],
-        default=ConstraintPolicy.FAIL.value,
-        help="How to handle Smart quality/size conflicts",
+        help="Deprecated alias of --size-blocked-policy (fail means ask)",
     )
 
     preview_parser = subparsers.add_parser("preview", help="Run a manual preview sample")
@@ -375,13 +401,13 @@ def _run_encode(args: argparse.Namespace, config_dir: Path) -> int:
             plan,
             workdir,
             backends=options.parallel_backends,
-            constraint_policy=ConstraintPolicy(args.constraint_policy),
+            constraint_policy=constraint_policy_from_size_blocked(options.size_blocked_policy),
         )
     else:
         results = execute_plan(
             plan,
             workdir,
-            constraint_policy=ConstraintPolicy(args.constraint_policy),
+            constraint_policy=constraint_policy_from_size_blocked(options.size_blocked_policy),
         )
     print_encode_results(results, tr)
     if any(result.needs_decision for result in results):

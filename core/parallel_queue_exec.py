@@ -10,9 +10,10 @@ from typing import Callable, Sequence
 from core.app_paths import config_dir as app_config_dir
 from core.encoder_capability_cache import ensure_encoder_capabilities
 from core.encoder_caps import resolve_encoder
-from core.exec_encode import execute_plan_item
+from core.exec_encode import execute_plan_item, run_analysis_phase
 from core.models import (
     BackendChoice,
+    CompressionMode,
     ConstraintPolicy,
     EncodePlan,
     EncodePlanItem,
@@ -114,7 +115,7 @@ def execute_plan_parallel(
     pause_check: Callable[[], bool] | None = None,
     item_started_callback: ItemStartedCallback | None = None,
     item_result_callback: ItemResultCallback | None = None,
-    constraint_policy: ConstraintPolicy = ConstraintPolicy.FAIL,
+    constraint_policy: ConstraintPolicy | None = None,
 ) -> list[EncodeResult]:
     # One daemon thread per backend pulls work from a lock-protected deque.
     workdir = validate_workdir(workdir)
@@ -130,37 +131,84 @@ def execute_plan_parallel(
         )
         for backend in normalized
     }
-    pending = deque(enumerate(plan.items))
+    bound_items: list[EncodePlanItem] = []
+    for index, item in enumerate(plan.items):
+        backend = normalized[index % len(normalized)]
+        bound_items.append(_bind_item_to_backend(item, backend, encoders[backend]))
+
+    analysis_contexts = []
+    for index, bound in enumerate(bound_items):
+        encoder = bound.encoder_info
+        analysis_contexts.append(
+            _context_for_item(
+                item_contexts,
+                index,
+                bound.options.backend,
+                encoder.encoder_name if encoder is not None else "",
+            )
+        )
+
+    def analysis_started(index: int) -> None:
+        bound = bound_items[index]
+        encoder = bound.encoder_info
+        if item_started_callback is not None and encoder is not None:
+            item_started_callback(index, encoder.backend.value, encoder.encoder_name)
+
+    if log_callback is not None:
+        log_callback(f"Parallel execution started with {len(normalized)} backend(s); analysis runs first.")
+    results = run_analysis_phase(
+        plan.ffmpeg_path,
+        bound_items,
+        workdir,
+        log_callback=log_callback,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
+        process_callback=process_callback,
+        item_contexts=analysis_contexts,
+        pause_check=pause_check,
+        item_started_callback=analysis_started,
+        item_result_callback=item_result_callback,
+        constraint_policy=constraint_policy,
+    )
+    if pause_check is not None and pause_check():
+        return [result for result in results if result is not None]
+
+    pending = deque(
+        (index, item)
+        for index, item in enumerate(bound_items)
+        if results[index] is None
+    )
     lock = threading.Lock()
     stop_event = threading.Event()
-    results: list[EncodeResult | None] = [None] * len(plan.items)
     exceptions: list[BaseException] = []
     total = len(plan.items)
 
     def should_stop() -> bool:
-        # Combines internal error/stop signal with external user cancellation.
         return stop_event.is_set() or (cancel_check is not None and cancel_check())
 
     def worker(backend: BackendChoice) -> None:
-        encoder = encoders[backend]
         worker_name = backend.value
         while not should_stop():
             if pause_check is not None and pause_check():
-                # Workers exit on pause so the caller can resume the queue later.
                 return
             with lock:
-                if not pending:
+                claimed: tuple[int, EncodePlanItem] | None = None
+                for offset, (index, item) in enumerate(pending):
+                    if item.options.backend == backend:
+                        claimed = pending[offset]
+                        del pending[offset]
+                        break
+                if claimed is None:
                     return
-                index, item = pending.popleft()
+                index, item = claimed
             try:
-                bound_item = _bind_item_to_backend(item, backend, encoder)
-                context = _context_for_item(item_contexts, index, backend, encoder.encoder_name)
-                if item_started_callback is not None:
-                    item_started_callback(index, backend.value, encoder.encoder_name)
+                context = _context_for_item(item_contexts, index, backend, encoders[backend].encoder_name)
+                if item_started_callback is not None and item.options.compression_mode != CompressionMode.SMART:
+                    item_started_callback(index, backend.value, encoders[backend].encoder_name)
                 callback = _process_callback_for_worker(process_callback, worker_name)
                 result = execute_plan_item(
                     plan.ffmpeg_path,
-                    bound_item,
+                    item,
                     workdir,
                     queue_index=index + 1,
                     queue_total=total,
@@ -181,7 +229,7 @@ def execute_plan_parallel(
                 return
 
     if log_callback is not None:
-        log_callback(f"Parallel encode execution started with {len(normalized)} backend worker(s).")
+        log_callback(f"Encode phase started with {len(normalized)} backend worker(s).")
     if progress_callback is not None:
         progress_callback({"stage": "encode", "state": "started", "parallel": True, "percent": 0.0})
 
