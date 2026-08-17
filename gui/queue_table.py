@@ -763,6 +763,8 @@ class QueueTableModel(QAbstractTableModel):
             record.status = QueueItemStatus.VALIDATING
         elif state == "needs_decision":
             record.status = QueueItemStatus.NEEDS_DECISION
+        elif state == "failed":
+            record.status = QueueItemStatus.FAILED
         candidate_index = event.get("candidate_index")
         if isinstance(candidate_index, int):
             record.analysis_candidate_index = candidate_index

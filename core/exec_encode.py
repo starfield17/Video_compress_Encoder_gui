@@ -79,23 +79,10 @@ def _size_miss_output_path(output_path: Path) -> Path:
     )
 
 
-def _usable_smart_result(item: EncodePlanItem) -> QualitySearchResult | None:
-    result = item.quality_search_result
-    if result is None or not result.success:
-        return None
-    encoder = item.encoder_info
-    if encoder is None:
-        return None
-    if result.encoder_name != encoder.encoder_name or result.backend != encoder.backend:
-        return None
-    return result
-
-
 def item_needs_smart_analysis(item: EncodePlanItem) -> bool:
     return (
         item.skip_reason is None
         and item.options.compression_mode == CompressionMode.SMART
-        and _usable_smart_result(item) is None
     )
 
 
@@ -462,11 +449,6 @@ def analyze_plan_item(
     if item.options.compression_mode != CompressionMode.SMART:
         return None
 
-    existing = _usable_smart_result(item)
-    if existing is not None:
-        item.target_video_bitrate_bps = existing.selected_video_bitrate_bps
-        return None
-
     result = EncodeResult(
         source_path=item.source_path,
         output_path=item.output_path,
@@ -530,18 +512,17 @@ def analyze_plan_item(
         result.needs_decision = (
             quality_result.status == QualitySearchStatus.CONSTRAINT_UNSATISFIED and not unreachable_skip
         )
-        result.skipped = not result.needs_decision
+        result.skipped = unreachable_skip
+        progress_state = "needs_decision" if result.needs_decision else ("skipped" if result.skipped else "failed")
+        outcome = "requires a decision" if result.needs_decision else ("skipped" if result.skipped else "failed")
         _emit(
             log_callback,
-            f"[{queue_index}/{queue_total}] Smart analysis requires a decision for "
-            f"{item.source_path.name}: {result.error_message}"
-            if result.needs_decision
-            else f"[{queue_index}/{queue_total}] Smart analysis skipped "
-            f"{item.source_path.name}: {result.error_message}",
+            f"[{queue_index}/{queue_total}] Smart analysis {outcome} "
+            f"for {item.source_path.name}: {result.error_message}",
         )
         _emit_progress(
             progress_callback,
-            state="needs_decision" if result.needs_decision else "skipped",
+            state=progress_state,
             percent=100.0,
             file_progress=100.0,
             message=result.error_message,
@@ -681,6 +662,7 @@ def execute_plan_item(
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
     extra_progress_context: dict[str, object] | None = None,
     constraint_policy: ConstraintPolicy | None = None,
+    smart_analysis_validated: bool = False,
 ) -> EncodeResult:
     workdir = validate_workdir(workdir)
     log_path = log_file_path(workdir, item.source_path, "encode")
@@ -710,21 +692,28 @@ def execute_plan_item(
     current_pass_index = 1
     try:
         if item.options.compression_mode == CompressionMode.SMART:
-            terminal = analyze_plan_item(
-                ffmpeg_path,
-                item,
-                workdir,
-                queue_index=queue_index,
-                queue_total=queue_total,
-                log_callback=log_callback,
-                progress_callback=progress_callback,
-                cancel_check=cancel_check,
-                process_callback=process_callback,
-                extra_progress_context=extra_progress_context,
-                constraint_policy=constraint_policy,
-            )
-            if terminal is not None:
-                return terminal
+            if smart_analysis_validated:
+                quality_result = item.quality_search_result
+                if quality_result is None or not quality_result.success:
+                    raise RuntimeError("Validated Smart encoding is missing a successful analysis result.")
+                _assert_quality_encoder_matches_item(item, quality_result)
+                item.target_video_bitrate_bps = quality_result.selected_video_bitrate_bps
+            else:
+                terminal = analyze_plan_item(
+                    ffmpeg_path,
+                    item,
+                    workdir,
+                    queue_index=queue_index,
+                    queue_total=queue_total,
+                    log_callback=log_callback,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                    process_callback=process_callback,
+                    extra_progress_context=extra_progress_context,
+                    constraint_policy=constraint_policy,
+                )
+                if terminal is not None:
+                    return terminal
             result.quality_search_result = item.quality_search_result
             item.output_path.parent.mkdir(parents=True, exist_ok=True)
             temporary_output = item.output_path.parent / (
@@ -956,6 +945,7 @@ def execute_plan(
             process_callback=process_callback,
             extra_progress_context=context,
             constraint_policy=constraint_policy,
+            smart_analysis_validated=item.options.compression_mode == CompressionMode.SMART,
         )
         results[index] = encoded
         if item_result_callback is not None:

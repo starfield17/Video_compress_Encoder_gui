@@ -395,16 +395,18 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             cpu = measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CPU)
             cuda = measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CUDA)
             self.assertNotEqual(cpu, cuda)
-            self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 2)
-            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 2)
-            self.assertEqual(ANALYSIS_RECEIPT_SCHEMA_VERSION, 2)
+            self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 3)
+            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 3)
+            self.assertEqual(ANALYSIS_RECEIPT_SCHEMA_VERSION, 3)
             from core.smart_quality import measurement_configuration_payload
 
             payload = measurement_configuration_payload(ffmpeg, item, vmaf_backend=VmafBackend.CPU)
-            self.assertEqual(payload["sample_scheme_version"], 2)
+            self.assertEqual(payload["sample_scheme_version"], 3)
             self.assertEqual(payload["vmaf_subsample"], 1)
             self.assertEqual(payload["vmaf_backend"], "cpu")
-            self.assertEqual(payload["analysis_algorithm_version"], 2)
+            self.assertEqual(payload["analysis_algorithm_version"], 3)
+            self.assertEqual(payload["vmaf_resolution_mode"], "source_native")
+            self.assertEqual(payload["vmaf_pooling"], "lowest_sampled_window_mean")
             self.assertNotIn("n_threads", payload)
             self.assertNotIn("vmaf_threads", payload)
             with patch("core.smart_quality.SMART_SAMPLE_SCHEME_VERSION", 99):
@@ -458,7 +460,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                         )
                 return QualityCandidateResult(
                     video_bitrate_bps=bitrate,
-                    min_vmaf=96.0 if bitrate >= 900_000 else 91.0,
+                    min_vmaf=95.5 if bitrate >= 900_000 else 91.0,
                     segment_vmaf=[96.0, 95.5, 96.2] if bitrate >= 900_000 else [91.0, 91.0, 91.0],
                     observed_video_bitrate_bps=bitrate,
                     predicted_output_bytes=bitrate // 10,

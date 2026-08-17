@@ -14,7 +14,9 @@ from core.discover_ffmpeg import discover_ffmpeg_tools
 from core.encoder_caps import list_available_encoders, preset_choices_for_encoder, resolve_encoder
 from core.exec_encode import execute_plan, execute_preview, execute_smart_preview
 from core.i18n import get_translator
+from core.analysis_profiles import bind_analysis_profile, parse_analysis_profile_name
 from core.models import (
+    AnalysisProfileName,
     AudioMode,
     BackendChoice,
     CodecChoice,
@@ -151,8 +153,23 @@ def _normalize_auto_backend_preset(options: EncodeOptions, args: argparse.Namesp
     return replace(options, encoder_preset=None)
 
 
+def _apply_analysis_profile(options: EncodeOptions, args: argparse.Namespace, config_dir: Path) -> EncodeOptions:
+    app_config = load_app_config(config_dir)
+    selected = getattr(args, "analysis_profile", None)
+    if selected is None:
+        selected = app_config.get("analysis_profile")
+    return bind_analysis_profile(
+        options,
+        name=parse_analysis_profile_name(selected),
+        stored_profiles=app_config.get("analysis_profiles"),
+    )
+
+
 def _options_from_args(args: argparse.Namespace, config_dir: Path) -> EncodeOptions:
-    return _normalize_auto_backend_preset(_merge_options(_load_base_options(args, config_dir), args), args)
+    options = _normalize_auto_backend_preset(_merge_options(_load_base_options(args, config_dir), args), args)
+    return _apply_analysis_profile(options, args, config_dir)
+
+
 def _add_runtime_flags(parser: argparse.ArgumentParser, include_input: bool = True) -> None:
     if include_input:
         parser.add_argument("input", help="Input file or directory")
@@ -187,7 +204,18 @@ def _add_encode_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--parallel", action="store_true", help="Enable queue-level parallel transcoding")
     parser.add_argument("--parallel-backends", dest="parallel_backends", help="Comma-separated explicit backends")
     parser.add_argument("--ratio", type=float, help="Target video bitrate ratio")
-    parser.add_argument("--min-vmaf", dest="min_vmaf", type=float, help="Minimum VMAF for smart mode")
+    parser.add_argument(
+        "--min-vmaf",
+        dest="min_vmaf",
+        type=float,
+        help="Native-resolution sampled-window mean VMAF target for smart mode",
+    )
+    parser.add_argument(
+        "--analysis-profile",
+        dest="analysis_profile",
+        choices=[name.value for name in AnalysisProfileName],
+        help="Smart VMAF scan profile: fast, balance, or precise",
+    )
     parser.add_argument(
         "--max-output-ratio",
         dest="max_output_ratio",

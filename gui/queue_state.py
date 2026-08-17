@@ -219,7 +219,7 @@ def build_tooltip(record: QueueItemRecord) -> str:
     quality = record.plan_item.quality_search_result
     if quality is not None:
         if quality.min_vmaf is not None:
-            lines.append(f"Minimum VMAF: {quality.min_vmaf:.2f}")
+            lines.append(f"Lowest sampled-window mean VMAF: {quality.min_vmaf:.2f}")
         if quality.predicted_output_ratio is not None:
             lines.append(f"Predicted output: {quality.predicted_output_ratio * 100:.2f}%")
         if quality.required_output_ratio is not None:

@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -48,6 +49,7 @@ from core.smart_quality import (
     analyze_quality,
     calculate_smart_bitrate_budget,
     choose_smart_sample_windows,
+    measurement_configuration_fingerprint,
     quality_configuration_fingerprint,
     resolve_max_output_ratio,
     search_bitrate_candidates,
@@ -153,6 +155,37 @@ class SmartConfigurationTestCase(unittest.TestCase):
 
             self.assertEqual(exit_code, 3)
             self.assertEqual(execute.call_args.kwargs["constraint_policy"], ConstraintPolicy.RELAX_SIZE)
+
+    def test_cli_returns_two_for_failed_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"source")
+            item = _item(source, root / "output.mp4", EncodeOptions())
+            plan = EncodePlan(
+                items=[item],
+                ffmpeg_path=root / "ffmpeg",
+                ffprobe_path=root / "ffprobe",
+                input_root=root,
+                output_root=root,
+            )
+            result = EncodeResult(
+                source_path=source,
+                output_path=item.output_path,
+                success=False,
+                skipped=False,
+                error_message="libvmaf unavailable",
+            )
+            with (
+                patch("cli.cli_entry.build_encode_plan", return_value=plan),
+                patch("cli.cli_entry.execute_plan", return_value=[result]),
+                patch("cli.cli_entry.print_plan"),
+                patch("cli.cli_entry.print_encode_results"),
+            ):
+                exit_code = run_cli(["encode", str(source), "--lang", "en"])
+
+            self.assertEqual(exit_code, 2)
+            self.assertFalse(item.output_path.exists())
 
 
 class SmartSamplingAndBudgetTestCase(unittest.TestCase):
@@ -850,6 +883,29 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
             )
             second = quality_configuration_fingerprint(ffmpeg, item)
             self.assertNotEqual(first, second)
+
+    def test_search_controls_change_decision_but_not_measurement_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"source")
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"binary")
+            item = _item(source, root / "output.mp4", EncodeOptions())
+            measurement = measurement_configuration_fingerprint(ffmpeg, item)
+            decision = quality_configuration_fingerprint(ffmpeg, item)
+
+            item.options = replace(
+                item.options,
+                analysis_settings=replace(
+                    item.options.analysis_settings,
+                    exact_max_candidates=item.options.analysis_settings.exact_max_candidates + 1,
+                    min_search_tolerance_bps=25_000,
+                ),
+            )
+
+            self.assertEqual(measurement_configuration_fingerprint(ffmpeg, item), measurement)
+            self.assertNotEqual(quality_configuration_fingerprint(ffmpeg, item), decision)
 
     def test_matching_analysis_cache_is_reused(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

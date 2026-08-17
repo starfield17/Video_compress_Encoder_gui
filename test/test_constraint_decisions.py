@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
 import tempfile
 import unittest
-import os
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -17,7 +18,8 @@ from core.analysis_receipts import (
     load_analysis_receipt,
     save_analysis_receipt,
 )
-from core.exec_encode import analyze_plan_item
+from core.constraint_resolution import prepare_size_miss_retry
+from core.exec_encode import analyze_plan_item, item_needs_smart_analysis
 from core.models import (
     AnalysisReceipt,
     BackendChoice,
@@ -30,6 +32,7 @@ from core.models import (
     EncoderInfo,
     MediaInfo,
     QualityCandidateResult,
+    QualitySearchResult,
     QualitySearchStatus,
     QualityUnreachablePolicy,
     SizeBlockedPolicy,
@@ -118,6 +121,52 @@ class ConstraintDecisionTestCase(unittest.TestCase):
             self.assertEqual(reselected.status, QualitySearchStatus.FOUND)
             self.assertEqual(reselected.selected_video_bitrate_bps, 1_500_000)
 
+    def test_cached_candidates_outside_configured_bitrate_bounds_are_not_selectable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            item = _item(Path(temp_dir))
+            item.options.min_video_kbps = 1_000
+            below_minimum = reselect_from_candidates(
+                [QualityCandidateResult(video_bitrate_bps=500_000, min_vmaf=99.0)],
+                item,
+            )
+            self.assertEqual(below_minimum.status, QualitySearchStatus.CONSTRAINT_UNSATISFIED)
+
+            item.options.min_video_kbps = 250
+            item.options.max_video_kbps = 1_000
+            above_maximum = reselect_from_candidates(
+                [QualityCandidateResult(video_bitrate_bps=1_500_000, min_vmaf=99.0)],
+                item,
+            )
+            self.assertEqual(above_maximum.status, QualitySearchStatus.CONSTRAINT_UNSATISFIED)
+
+    def test_size_miss_retry_invalidates_old_successful_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _item(root)
+            quality = reselect_from_candidates(
+                [QualityCandidateResult(video_bitrate_bps=1_500_000, min_vmaf=96.0)],
+                replace(item, options=replace(item.options, max_output_ratio=1.0)),
+            )
+            item.quality_search_result = quality
+            rejected = root / "output.size-miss-test.mp4"
+            rejected.write_bytes(b"encoded")
+            result = EncodeResult(
+                source_path=item.source_path,
+                output_path=item.output_path,
+                success=False,
+                needs_decision=True,
+                rejected_output_path=rejected,
+                actual_output_bytes=120_000_000,
+                allowed_output_bytes=100_000_000,
+            )
+
+            corrected = prepare_size_miss_retry(item, result)
+
+            self.assertEqual(corrected, item.options.max_video_kbps * 1_000)
+            self.assertEqual(item.target_video_bitrate_bps, corrected)
+            self.assertIsNone(item.quality_search_result)
+            self.assertTrue(item_needs_smart_analysis(item))
+
     def test_size_blocked_relax_size_encodes_without_asking(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -142,6 +191,26 @@ class ConstraintDecisionTestCase(unittest.TestCase):
             assert terminal is not None
             self.assertTrue(terminal.needs_decision)
             self.assertFalse(terminal.skipped)
+
+    def test_unsupported_analysis_is_failed_not_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _item(root)
+            assert item.encoder_info is not None
+            unsupported = QualitySearchResult(
+                status=QualitySearchStatus.UNSUPPORTED,
+                encoder_name=item.encoder_info.encoder_name,
+                backend=item.encoder_info.backend,
+                reason="libvmaf unavailable",
+            )
+            with patch("core.exec_encode.analyze_quality", return_value=unsupported):
+                terminal = analyze_plan_item(root / "ffmpeg", item, root)
+
+            self.assertIsNotNone(terminal)
+            assert terminal is not None
+            self.assertFalse(terminal.success)
+            self.assertFalse(terminal.skipped)
+            self.assertFalse(terminal.needs_decision)
 
     def test_quality_unreachable_skips_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -320,7 +389,23 @@ class AnalysisReceiptTestCase(unittest.TestCase):
                 encoder_identity={"encoder": "libx265", "backend": "cpu"},
                 sample_scheme_version=1,
                 sample_windows=[(10.0, 5.0)],
-                candidates=_candidates(),
+                search_fingerprint="b" * 64,
+                measurement_configuration={
+                    "vmaf_backend": "cpu",
+                    "vmaf_subsample": 1,
+                },
+                candidates=[
+                    QualityCandidateResult(
+                        video_bitrate_bps=1_000_000,
+                        min_vmaf=94.0,
+                        segment_vmaf=[94.0],
+                    ),
+                    QualityCandidateResult(
+                        video_bitrate_bps=1_500_000,
+                        min_vmaf=96.0,
+                        segment_vmaf=[96.0],
+                    ),
+                ],
                 created_at="2026-08-17T00:00:00+00:00",
             )
             path = save_analysis_receipt(root, receipt)
@@ -330,6 +415,11 @@ class AnalysisReceiptTestCase(unittest.TestCase):
             self.assertIsNotNone(loaded)
             assert loaded is not None
             self.assertEqual(loaded.candidates[1].min_vmaf, 96.0)
+
+            inconsistent = json.loads(path.read_text(encoding="utf-8"))
+            inconsistent["candidates"][1]["min_vmaf"] = 99.0
+            path.write_text(json.dumps(inconsistent), encoding="utf-8")
+            self.assertIsNone(load_analysis_receipt(root, fingerprint))
 
             path.write_text("{not-json", encoding="utf-8")
             self.assertIsNone(load_analysis_receipt(root, fingerprint))
@@ -347,9 +437,11 @@ class AnalysisReceiptTestCase(unittest.TestCase):
             item = _item(root)
 
             def score(_ffmpeg, _item, _references, bitrate, *_args, **_kwargs):
+                vmaf = 96.0 if bitrate >= 800_000 else 92.0
                 return QualityCandidateResult(
                     video_bitrate_bps=bitrate,
-                    min_vmaf=96.0 if bitrate >= 800_000 else 92.0,
+                    min_vmaf=vmaf,
+                    segment_vmaf=[vmaf, vmaf, vmaf],
                     observed_video_bitrate_bps=bitrate,
                 )
 
@@ -361,10 +453,29 @@ class AnalysisReceiptTestCase(unittest.TestCase):
                 patch("core.smart_quality._run_logged"),
                 patch("core.smart_quality._score_candidate", side_effect=score) as first_score,
             ):
-                first = analyze_quality(ffmpeg, item, root, root / "analysis.log")
+                progress_events: list[dict[str, object]] = []
+                first = analyze_quality(
+                    ffmpeg,
+                    item,
+                    root,
+                    root / "analysis.log",
+                    progress_callback=progress_events.append,
+                )
 
             self.assertEqual(first.status, QualitySearchStatus.FOUND)
             self.assertGreater(first_score.call_count, 0)
+            candidate_events = [
+                event for event in progress_events if event.get("state") == "candidate_finished"
+            ]
+            for tier in {event["candidate_tier"] for event in candidate_events}:
+                tier_events = [event for event in candidate_events if event["candidate_tier"] == tier]
+                self.assertEqual(tier_events[0]["candidate_index"], 1)
+                self.assertTrue(
+                    all(
+                        int(event["candidate_index"]) <= int(event["candidate_limit"])
+                        for event in tier_events
+                    )
+                )
             receipt = load_analysis_receipt(root, first.measurement_fingerprint)
             self.assertIsNotNone(receipt)
 
@@ -374,16 +485,22 @@ class AnalysisReceiptTestCase(unittest.TestCase):
                 quality_search_result=None,
             )
             with (
-                patch("core.smart_quality.detect_vmaf_capabilities") as detect,
-                patch("core.smart_quality._score_candidate") as second_score,
+                patch(
+                    "core.smart_quality.detect_vmaf_capabilities",
+                    return_value=VmafCapabilities(True, True, True),
+                ),
+                patch("core.smart_quality._run_logged"),
+                patch("core.smart_quality._score_candidate", side_effect=score) as second_score,
             ):
                 second = analyze_quality(ffmpeg, changed_policy, root, root / "analysis-2.log")
 
             self.assertEqual(second.status, QualitySearchStatus.FOUND)
             self.assertEqual(second.measurement_fingerprint, first.measurement_fingerprint)
             self.assertNotEqual(second.fingerprint, first.fingerprint)
-            detect.assert_not_called()
-            second_score.assert_not_called()
+            self.assertGreater(second_score.call_count, 0)
+            first_bitrates = {candidate.video_bitrate_bps for candidate in first.candidates}
+            second_bitrates = {candidate.video_bitrate_bps for candidate in second.candidates}
+            self.assertTrue(first_bitrates.issubset(second_bitrates))
 
 
 if __name__ == "__main__":

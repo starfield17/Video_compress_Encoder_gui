@@ -25,7 +25,11 @@ def reselect_after_quality_decision(
         quality.candidates,
         item,
         measurement_fingerprint=quality.measurement_fingerprint,
-        fingerprint=quality_configuration_fingerprint(ffmpeg_path, item),
+        fingerprint=quality_configuration_fingerprint(
+            ffmpeg_path,
+            item,
+            measurement_fingerprint=quality.measurement_fingerprint,
+        ),
     )
 
 
@@ -87,5 +91,7 @@ def prepare_size_miss_retry(item: EncodePlanItem, result: EncodeResult) -> int:
     current_cap = item.options.max_video_kbps
     corrected_kbps = max(1, corrected_bitrate // 1_000)
     item.options.max_video_kbps = min(current_cap, corrected_kbps) if current_cap > 0 else corrected_kbps
+    corrected_bitrate = item.options.max_video_kbps * 1_000
     item.target_video_bitrate_bps = corrected_bitrate
+    item.quality_search_result = None
     return corrected_bitrate

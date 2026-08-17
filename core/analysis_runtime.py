@@ -90,8 +90,13 @@ class AnalysisExecutionPlan:
         return "cpu"
 
 
-def search_tolerance_bps(search_ceiling_bps: int) -> int:
-    return max(MIN_SEARCH_TOLERANCE_BPS, round(int(search_ceiling_bps) * SEARCH_TOLERANCE_RATIO))
+def search_tolerance_bps(
+    search_ceiling_bps: int,
+    *,
+    min_bps: int = MIN_SEARCH_TOLERANCE_BPS,
+    ratio: float = SEARCH_TOLERANCE_RATIO,
+) -> int:
+    return max(int(min_bps), round(int(search_ceiling_bps) * float(ratio)))
 
 
 def parse_filter_names(output: str) -> frozenset[str]:
@@ -371,6 +376,8 @@ def build_analysis_execution_plan(
     decode_policy: AnalysisDecodePolicy = AnalysisDecodePolicy.AUTO,
     active_cpu_vmaf_jobs: int = 1,
     enable_loopback: bool = False,
+    coarse_vmaf_subsample: int = COARSE_VMAF_SUBSAMPLE,
+    exact_vmaf_subsample: int = EXACT_VMAF_SUBSAMPLE,
 ) -> AnalysisExecutionPlan:
     encoder_name = encoder_info.encoder_name
     if encoder_name == "av1_videotoolbox":
@@ -391,7 +398,7 @@ def build_analysis_execution_plan(
             two_pass=False,
             vmaf_backend=vmaf_backend,
             vmaf_threads=vmaf_thread_budget(active_cpu_vmaf_jobs),
-            vmaf_subsample=COARSE_VMAF_SUBSAMPLE,
+            vmaf_subsample=coarse_vmaf_subsample,
             use_loopback=bool(enable_loopback and capabilities.loopback_decoder),
         )
 
@@ -404,6 +411,6 @@ def build_analysis_execution_plan(
         two_pass=bool(production_two_pass and encoder_info.supports_two_pass),
         vmaf_backend=vmaf_backend,
         vmaf_threads=vmaf_thread_budget(active_cpu_vmaf_jobs),
-        vmaf_subsample=EXACT_VMAF_SUBSAMPLE,
+        vmaf_subsample=exact_vmaf_subsample,
         use_loopback=bool(enable_loopback and capabilities.loopback_decoder),
     )

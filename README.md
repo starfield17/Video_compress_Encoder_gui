@@ -56,13 +56,22 @@ python main.py --cli preview input.mp4 \
 ```
 
 Smart mode requires an FFmpeg build whose `libvmaf` filter and required model
-can actually run. It analyzes one full clip for videos up to 30 seconds, or
-three 10-second windows for longer videos. If quality and final-size
-constraints cannot both be met, the item stops in a **Needs decision** state.
-The GUI can accept the measured size requirement, lower the VMAF floor to a
-tested value, change the media budget, or skip the file. The CLI is strict by
-default and exits with code `3`; automation can opt into
-`--constraint-policy relax_size` or `--constraint-policy relax_quality`.
+can actually run. The Balance profile analyzes the full video up to 10 seconds
+and otherwise uses three 5-second windows; Fast uses shorter samples and fewer
+candidates, while Precise uses longer samples and a tighter search. A one-window
+custom profile samples the middle of the video.
+
+VMAF is measured at the source's native resolution. The reported value is the
+lowest mean VMAF among the sampled windows, not the lowest individual-frame
+score, so thresholds are most meaningful when comparing sources at the same
+resolution. The built-in threshold remains 95 for compatibility.
+
+If quality and final-size constraints cannot both be met, the configured Smart
+policy is applied. The default size-blocked policy relaxes the size limit, and
+the default quality-unreachable policy skips the file; `ask` leaves the item in
+a **Needs decision** state. CLI exit code `3` means a decision is required,
+exit code `2` means analysis or encoding failed, and intentional skips remain a
+successful batch outcome.
 Candidate sizes are estimated from the largest measured encoded sample
 bitrate (including the existing container safety factor) plus the audio
 budget; the requested video bitrate is not treated as an observed size. Full
@@ -70,6 +79,8 @@ smart encodes are written to a temporary file beside the target and are
 published only after the actual size passes validation. A complete encode that
 misses the limit is preserved beside the target as `*.size-miss-<id>.*` for an
 explicit accept, corrected-bitrate retry, or delete decision.
+A corrected-bitrate retry invalidates the old Smart selection and re-runs the
+search under the lower video-bitrate ceiling before encoding again.
 
 Smart candidate measurements are cached as versioned JSON receipts under
 `workdir/analysis/receipts/`. Changing only VMAF, size, audio, or bitrate policy
@@ -163,7 +174,7 @@ The GUI now includes:
 - preset load/save/delete controls
 - plan summary, preview summary, and encode result summary panels
 - a detailed plan/result table with resolution, duration, bitrate, note, and status columns
-- smart-analysis stages, selected bitrate, minimum VMAF, and predicted size
+- smart-analysis stages, selected bitrate, lowest sampled-window mean VMAF, and predicted size
 - English and Simplified Chinese language switching
 
 ## Notes

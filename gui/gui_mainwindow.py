@@ -43,10 +43,9 @@ from core.models import (
     ContainerChoice,
     DecodeAcceleration,
     EncodeOptions,
-    QualityUnreachablePolicy,
+    AnalysisProfileName,
     PreviewOptions,
     PreviewSampleMode,
-    SizeBlockedPolicy,
     SkippedOutputPolicy,
     SmartPreviewResult,
     VideoFileItem,
@@ -58,6 +57,7 @@ from core.encoder_caps import (
     preset_choices_for_encoder,
     resolve_encoder,
 )
+from core.analysis_profiles import analysis_profiles_from_config, parse_analysis_profile_name
 from core.preset_store import (
     delete_preset,
     list_presets,
@@ -123,6 +123,7 @@ class MainWindow(QMainWindow):
         self._status_elapsed = "-"
         self._status_percent: float | None = None
         self._close_after_running_task_stops = False
+        self._loading_initial_state = True
 
         self.queue_model = QueueTableModel(self.tr, self)
         self.queue_manager = QueueManager(self.queue_model, self)
@@ -133,6 +134,7 @@ class MainWindow(QMainWindow):
         self._last_codec_for_ratio = CodecChoice(self.codec_combo.currentText())
         self._connect_signals()
         self._load_initial_state()
+        self._loading_initial_state = False
         self._apply_translations()
         self._sync_dependent_controls()
         self._update_queue_metrics(self.queue_model.metrics())
@@ -447,6 +449,9 @@ class MainWindow(QMainWindow):
         self.codec_combo.currentIndexChanged.connect(self._on_codec_changed)
         self.backend_combo.currentIndexChanged.connect(self._refresh_encoder_preset_choices)
         self.decode_acceleration_combo.currentIndexChanged.connect(self._sync_dependent_controls)
+        self.analysis_profile_combo.currentIndexChanged.connect(
+            lambda _index: self._persist_runtime_state()
+        )
         self.source_combo.editTextChanged.connect(self._persist_runtime_state)
         self.output_edit.editingFinished.connect(self._persist_runtime_state)
         self.preset_combo.currentIndexChanged.connect(self._preset_combo_changed)
@@ -550,19 +555,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.parallel_videotoolbox_check, 3, 4)
         layout.addWidget(self.parallel_cpu_check, 3, 5)
 
-        self.size_blocked_policy_label = QLabel()
-        self.size_blocked_policy_combo = QComboBox()
-        self.quality_unreachable_policy_label = QLabel()
-        self.quality_unreachable_policy_combo = QComboBox()
-        self.skipped_output_policy_label = QLabel()
-        self.skipped_output_policy_combo = QComboBox()
-        self._fill_policy_combos()
-        layout.addWidget(self.size_blocked_policy_label, 4, 0)
-        layout.addWidget(self.size_blocked_policy_combo, 4, 1)
-        layout.addWidget(self.quality_unreachable_policy_label, 4, 2)
-        layout.addWidget(self.quality_unreachable_policy_combo, 4, 3)
-        layout.addWidget(self.skipped_output_policy_label, 4, 4)
-        layout.addWidget(self.skipped_output_policy_combo, 4, 5)
+        self.analysis_profile_label = QLabel()
+        self.analysis_profile_combo = QComboBox()
+        self._fill_analysis_profile_combo()
+        layout.addWidget(self.analysis_profile_label, 4, 0)
+        layout.addWidget(self.analysis_profile_combo, 4, 1)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
         layout.setColumnStretch(5, 1)
@@ -732,49 +729,24 @@ class MainWindow(QMainWindow):
                 self._apply_options(EncodeOptions())
         else:
             self._apply_options(EncodeOptions())
-        self._apply_policy_settings()
+        self._apply_analysis_profile_settings()
 
         self._set_status_snapshot("-", "-", "-", "-", None)
         self._restore_header_state()
 
-    def _fill_policy_combos(self) -> None:
-        self.size_blocked_policy_combo.clear()
-        self.size_blocked_policy_combo.addItem("", SizeBlockedPolicy.RELAX_SIZE.value)
-        self.size_blocked_policy_combo.addItem("", SizeBlockedPolicy.RELAX_QUALITY.value)
-        self.size_blocked_policy_combo.addItem("", SizeBlockedPolicy.ASK.value)
-        self.quality_unreachable_policy_combo.clear()
-        self.quality_unreachable_policy_combo.addItem("", QualityUnreachablePolicy.SKIP.value)
-        self.quality_unreachable_policy_combo.addItem("", QualityUnreachablePolicy.ASK.value)
-        self.skipped_output_policy_combo.addItem("", SkippedOutputPolicy.COPY.value)
-        self.skipped_output_policy_combo.addItem("", SkippedOutputPolicy.ASK.value)
-        self.skipped_output_policy_combo.addItem("", SkippedOutputPolicy.IGNORE.value)
+    def _fill_analysis_profile_combo(self) -> None:
+        self.analysis_profile_combo.clear()
+        for name in AnalysisProfileName:
+            self.analysis_profile_combo.addItem("", name.value)
 
-    def _apply_policy_settings(self) -> None:
-        size_policy, unreachable_policy, skipped_policy = smart_policies_from_config(self.app_config)
-        size_index = self.size_blocked_policy_combo.findData(size_policy.value)
-        if size_index >= 0:
-            self.size_blocked_policy_combo.setCurrentIndex(size_index)
-        unreachable_index = self.quality_unreachable_policy_combo.findData(unreachable_policy.value)
-        if unreachable_index >= 0:
-            self.quality_unreachable_policy_combo.setCurrentIndex(unreachable_index)
-        skipped_index = self.skipped_output_policy_combo.findData(skipped_policy.value)
-        if skipped_index >= 0:
-            self.skipped_output_policy_combo.setCurrentIndex(skipped_index)
+    def _apply_analysis_profile_settings(self) -> None:
+        name, _settings = analysis_profiles_from_config(self.app_config)
+        index = self.analysis_profile_combo.findData(name.value)
+        if index >= 0:
+            self.analysis_profile_combo.setCurrentIndex(index)
 
-    def _current_size_blocked_policy(self) -> SizeBlockedPolicy:
-        return SizeBlockedPolicy(
-            self.size_blocked_policy_combo.currentData() or SizeBlockedPolicy.RELAX_SIZE.value
-        )
-
-    def _current_quality_unreachable_policy(self) -> QualityUnreachablePolicy:
-        return QualityUnreachablePolicy(
-            self.quality_unreachable_policy_combo.currentData() or QualityUnreachablePolicy.SKIP.value
-        )
-
-    def _current_skipped_output_policy(self) -> SkippedOutputPolicy:
-        return SkippedOutputPolicy(
-            self.skipped_output_policy_combo.currentData() or SkippedOutputPolicy.COPY.value
-        )
+    def _current_analysis_profile_name(self) -> AnalysisProfileName:
+        return parse_analysis_profile_name(self.analysis_profile_combo.currentData())
 
     def _apply_translations(self) -> None:
         self.tr = get_translator(self.language, self.config_dir)
@@ -821,42 +793,23 @@ class MainWindow(QMainWindow):
         self.container_label.setText(self.tr.t("gui.label.container"))
         self.ratio_label.setText(self.tr.t("gui.label.ratio"))
         self.min_vmaf_label.setText(self.tr.t("gui.label.min_vmaf"))
+        self.min_vmaf_label.setToolTip(self.tr.t("gui.tooltip.min_vmaf"))
+        self.min_vmaf_spin.setToolTip(self.tr.t("gui.tooltip.min_vmaf"))
         self.max_output_ratio_label.setText(self.tr.t("gui.label.max_output_ratio"))
-        self.size_blocked_policy_label.setText(self.tr.t("gui.label.size_blocked_policy"))
-        self.quality_unreachable_policy_label.setText(self.tr.t("gui.label.quality_unreachable_policy"))
-        self.size_blocked_policy_combo.setItemText(
-            self.size_blocked_policy_combo.findData(SizeBlockedPolicy.RELAX_SIZE.value),
-            self.tr.t("gui.value.size_blocked_relax_size"),
+        self.analysis_profile_label.setText(self.tr.t("gui.label.analysis_profile"))
+        self.analysis_profile_combo.setItemText(
+            self.analysis_profile_combo.findData(AnalysisProfileName.FAST.value),
+            self.tr.t("gui.value.analysis_fast"),
         )
-        self.size_blocked_policy_combo.setItemText(
-            self.size_blocked_policy_combo.findData(SizeBlockedPolicy.RELAX_QUALITY.value),
-            self.tr.t("gui.value.size_blocked_relax_quality"),
+        self.analysis_profile_combo.setItemText(
+            self.analysis_profile_combo.findData(AnalysisProfileName.BALANCE.value),
+            self.tr.t("gui.value.analysis_balance"),
         )
-        self.size_blocked_policy_combo.setItemText(
-            self.size_blocked_policy_combo.findData(SizeBlockedPolicy.ASK.value),
-            self.tr.t("gui.value.size_blocked_ask"),
+        self.analysis_profile_combo.setItemText(
+            self.analysis_profile_combo.findData(AnalysisProfileName.PRECISE.value),
+            self.tr.t("gui.value.analysis_precise"),
         )
-        self.quality_unreachable_policy_combo.setItemText(
-            self.quality_unreachable_policy_combo.findData(QualityUnreachablePolicy.SKIP.value),
-            self.tr.t("gui.value.quality_unreachable_skip"),
-        )
-        self.quality_unreachable_policy_combo.setItemText(
-            self.quality_unreachable_policy_combo.findData(QualityUnreachablePolicy.ASK.value),
-            self.tr.t("gui.value.quality_unreachable_ask"),
-        )
-        self.skipped_output_policy_label.setText(self.tr.t("gui.label.skipped_output_policy"))
-        self.skipped_output_policy_combo.setItemText(
-            self.skipped_output_policy_combo.findData(SkippedOutputPolicy.COPY.value),
-            self.tr.t("gui.value.skipped_output_copy"),
-        )
-        self.skipped_output_policy_combo.setItemText(
-            self.skipped_output_policy_combo.findData(SkippedOutputPolicy.ASK.value),
-            self.tr.t("gui.value.skipped_output_ask"),
-        )
-        self.skipped_output_policy_combo.setItemText(
-            self.skipped_output_policy_combo.findData(SkippedOutputPolicy.IGNORE.value),
-            self.tr.t("gui.value.skipped_output_ignore"),
-        )
+        self.analysis_profile_combo.setToolTip(self.tr.t("gui.tooltip.analysis_profile"))
         self.overwrite_check.setText(self.tr.t("gui.checkbox.overwrite"))
         self.recursive_check.setText(self.tr.t("gui.checkbox.recursive"))
         self.parallel_check.setText(self.tr.t("gui.checkbox.parallel_enabled"))
@@ -1124,7 +1077,7 @@ class MainWindow(QMainWindow):
         old_language = self.language
         old_ffmpeg_path = str(self.app_config.get("ffmpeg_path", "")).strip()
         self.app_config.update(values)
-        self._apply_policy_settings()
+        self._apply_analysis_profile_settings()
         self._persist_runtime_state()
         if values["language"] != old_language:
             self._language_changed(str(values["language"]))
@@ -1178,6 +1131,13 @@ class MainWindow(QMainWindow):
         preset_value = self.encoder_preset_combo.currentData()
         encoder_preset = str(preset_value) if isinstance(preset_value, str) and preset_value else None
         pix_fmt = self.pix_fmt_edit.text().strip() or "yuv420p"
+        size_policy, unreachable_policy, skipped_policy = smart_policies_from_config(self.app_config)
+        profile_name, profile_settings = analysis_profiles_from_config(
+            {
+                **self.app_config,
+                "analysis_profile": self._current_analysis_profile_name().value,
+            }
+        )
         return EncodeOptions(
             codec=CodecChoice(self.codec_combo.currentText()),
             compression_mode=CompressionMode(
@@ -1208,9 +1168,11 @@ class MainWindow(QMainWindow):
             bufsize_factor=float(self.bufsize_factor_spin.value()),
             overwrite=self.overwrite_check.isChecked(),
             recursive=self.recursive_check.isChecked(),
-            size_blocked_policy=self._current_size_blocked_policy(),
-            quality_unreachable_policy=self._current_quality_unreachable_policy(),
-            skipped_output_policy=self._current_skipped_output_policy(),
+            size_blocked_policy=size_policy,
+            quality_unreachable_policy=unreachable_policy,
+            skipped_output_policy=skipped_policy,
+            analysis_profile=profile_name,
+            analysis_settings=profile_settings,
         )
 
     def _apply_options(self, options: EncodeOptions) -> None:
@@ -1427,9 +1389,7 @@ class MainWindow(QMainWindow):
         self.ratio_edit.setEnabled(not smart_mode)
         self.min_vmaf_spin.setEnabled(smart_mode)
         self.max_output_ratio_spin.setEnabled(smart_mode)
-        self.size_blocked_policy_combo.setEnabled(smart_mode)
-        self.quality_unreachable_policy_combo.setEnabled(smart_mode)
-        self.skipped_output_policy_combo.setEnabled(smart_mode)
+        self.analysis_profile_combo.setEnabled(smart_mode)
         self.sample_mode_combo.setEnabled(not smart_mode)
         self.sample_duration_spin.setEnabled(not smart_mode)
         custom_sample = (
@@ -1563,6 +1523,8 @@ class MainWindow(QMainWindow):
         update_app_config(self.config_dir, merge)
 
     def _persist_runtime_state(self) -> None:
+        if self._loading_initial_state:
+            return
         source_text = self.source_combo.currentText().strip()
         output_text = self.output_edit.text().strip()
         self.app_config["language"] = self.language
@@ -1573,9 +1535,7 @@ class MainWindow(QMainWindow):
         self.app_config.setdefault("ffprobe_path", "")
         self.app_config.setdefault("keep_preview_temp", True)
         self.app_config.setdefault("log_level", "info")
-        self.app_config["size_blocked_policy"] = self._current_size_blocked_policy().value
-        self.app_config["quality_unreachable_policy"] = self._current_quality_unreachable_policy().value
-        self.app_config["skipped_output_policy"] = self._current_skipped_output_policy().value
+        self.app_config["analysis_profile"] = self._current_analysis_profile_name().value
 
         recent_paths = list(self.app_config.get("recent_paths", []))
         if source_text:
@@ -1968,7 +1928,7 @@ class MainWindow(QMainWindow):
             dialog = PreviewResultDialog(self.tr, summary, self)
             dialog.exec()
             self._set_status_snapshot(
-                self.tr.t("gui.status.done") if result.success else self.tr.t("gui.status.skip"),
+                self.tr.t("gui.status.done") if result.success else self.tr.t("gui.status.failed"),
                 result.source_path.name,
                 "-",
                 "-",

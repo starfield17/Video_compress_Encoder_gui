@@ -218,6 +218,7 @@ def execute_plan_parallel(
                     process_callback=callback,
                     extra_progress_context=context,
                     constraint_policy=constraint_policy,
+                    smart_analysis_validated=item.options.compression_mode == CompressionMode.SMART,
                 )
                 results[index] = result
                 if item_result_callback is not None:

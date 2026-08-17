@@ -13,7 +13,7 @@ from typing import Any
 from core.models import AnalysisReceipt, QualityCandidateResult
 
 
-ANALYSIS_RECEIPT_SCHEMA_VERSION = 2
+ANALYSIS_RECEIPT_SCHEMA_VERSION = 3
 _FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 _RECEIPT_LOCK = threading.RLock()
 
@@ -100,6 +100,23 @@ def _receipt_from_data(data: object) -> AnalysisReceipt:
     raw_candidates = data.get("candidates", [])
     if not isinstance(raw_candidates, list):
         raise ValueError("Analysis receipt candidates must be a list.")
+    candidates = [_candidate_from_data(candidate) for candidate in raw_candidates]
+    for candidate in candidates:
+        if len(candidate.segment_vmaf) != len(windows):
+            raise ValueError("Analysis receipt candidate does not cover every sample window.")
+        if candidate.segment_vmaf and not math.isclose(
+            candidate.min_vmaf,
+            min(candidate.segment_vmaf),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            raise ValueError("Analysis receipt candidate VMAF summary is inconsistent.")
+    search_fingerprint = str(data.get("search_fingerprint", ""))
+    if _FINGERPRINT_RE.fullmatch(search_fingerprint) is None:
+        raise ValueError("Analysis receipt contains an invalid search fingerprint.")
+    measurement_configuration = _identity(
+        data.get("measurement_configuration"), "measurement_configuration"
+    )
     return AnalysisReceipt(
         schema_version=schema_version,
         measurement_fingerprint=fingerprint,
@@ -108,7 +125,9 @@ def _receipt_from_data(data: object) -> AnalysisReceipt:
         encoder_identity=_identity(data.get("encoder_identity"), "encoder_identity"),
         sample_scheme_version=int(data.get("sample_scheme_version", 0)),
         sample_windows=windows,
-        candidates=[_candidate_from_data(candidate) for candidate in raw_candidates],
+        search_fingerprint=search_fingerprint,
+        measurement_configuration=measurement_configuration,
+        candidates=candidates,
         created_at=str(data.get("created_at", "")),
     )
 

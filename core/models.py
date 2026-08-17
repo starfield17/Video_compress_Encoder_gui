@@ -33,6 +33,25 @@ class SkippedOutputPolicy(str, Enum):
     IGNORE = "ignore"
 
 
+class AnalysisProfileName(str, Enum):
+    FAST = "fast"
+    BALANCE = "balance"
+    PRECISE = "precise"
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisProfileSettings:
+    whole_video_max_sec: float = 10.0
+    sample_duration_sec: float = 5.0
+    sample_window_count: int = 3
+    coarse_max_candidates: int = 4
+    exact_max_candidates: int = 3
+    coarse_vmaf_subsample: int = 3
+    exact_vmaf_subsample: int = 1
+    min_search_tolerance_bps: int = 50_000
+    search_tolerance_ratio: float = 0.03
+
+
 class BackendChoice(str, Enum):
     AUTO = "auto"
     CPU = "cpu"
@@ -125,6 +144,8 @@ class EncodeOptions:
     size_blocked_policy: SizeBlockedPolicy = SizeBlockedPolicy.RELAX_SIZE
     quality_unreachable_policy: QualityUnreachablePolicy = QualityUnreachablePolicy.SKIP
     skipped_output_policy: SkippedOutputPolicy = SkippedOutputPolicy.COPY
+    analysis_profile: AnalysisProfileName = AnalysisProfileName.BALANCE
+    analysis_settings: AnalysisProfileSettings = field(default_factory=AnalysisProfileSettings)
 
 
 @dataclass(slots=True)
@@ -302,6 +323,8 @@ class AnalysisReceipt:
     encoder_identity: dict[str, object]
     sample_scheme_version: int
     sample_windows: list[tuple[float, float]]
+    search_fingerprint: str = ""
+    measurement_configuration: dict[str, object] = field(default_factory=dict)
     candidates: list[QualityCandidateResult] = field(default_factory=list)
     created_at: str = ""
 

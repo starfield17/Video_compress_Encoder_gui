@@ -18,6 +18,7 @@ from core.models import (
     QualityUnreachablePolicy,
     SizeBlockedPolicy,
     SkippedOutputPolicy,
+    AnalysisProfileName,
 )
 
 
@@ -198,6 +199,8 @@ def _default_app_config() -> dict[str, Any]:
         "size_blocked_policy": SizeBlockedPolicy.RELAX_SIZE.value,
         "quality_unreachable_policy": QualityUnreachablePolicy.SKIP.value,
         "skipped_output_policy": SkippedOutputPolicy.COPY.value,
+        "analysis_profile": AnalysisProfileName.BALANCE.value,
+        "analysis_profiles": {},
     }
 
 

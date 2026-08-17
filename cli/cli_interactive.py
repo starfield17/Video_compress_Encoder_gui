@@ -87,7 +87,7 @@ def print_encode_results(results: list[EncodeResult], tr: Translator) -> None:
 def print_preview_result(result: PreviewResult | SmartPreviewResult, tr: Translator) -> None:
     if isinstance(result, SmartPreviewResult):
         quality = result.quality_search_result
-        label = tr.t("cli.preview_success") if result.success else tr.t("cli.result_skipped")
+        label = tr.t("cli.preview_success") if result.success else tr.t("cli.result_failed")
         print(f"[{label}] {result.source_path}")
         if quality.selected_video_bitrate_bps:
             print(f"  {tr.t('cli.target_bitrate')}: {human_kbps(quality.selected_video_bitrate_bps)}")
