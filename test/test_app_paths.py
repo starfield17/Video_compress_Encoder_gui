@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -92,6 +93,47 @@ class AppPathsCompiledEnvironmentTestCase(unittest.TestCase):
             self.assertEqual((runtime_config / "user.json").read_text(encoding="utf-8"), "user")
             self.assertFalse((app_bundle / "Contents" / "MacOS" / "config").exists())
             self.assertFalse((app_bundle / "Contents" / "MacOS" / "workdir").exists())
+
+    def test_macos_app_upgrade_adds_translation_keys_without_replacing_custom_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app_bundle = root / "Video Compressor.app"
+            executable = app_bundle / "Contents" / "MacOS" / "video-compressor"
+            bundled_i18n = app_bundle / "Contents" / "Resources" / "config" / "i18n"
+            bundled_i18n.mkdir(parents=True)
+            (bundled_i18n / "en.json").write_text(
+                json.dumps({"existing": "Bundled", "new": "New text"}),
+                encoding="utf-8",
+            )
+            executable.parent.mkdir(parents=True)
+            executable.write_text("executable", encoding="utf-8")
+
+            home = root / "home"
+            runtime_i18n = (
+                home
+                / "Library"
+                / "Application Support"
+                / "Video Compressor"
+                / "config"
+                / "i18n"
+            )
+            runtime_i18n.mkdir(parents=True)
+            (runtime_i18n / "en.json").write_text(
+                json.dumps({"existing": "Customized"}),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(app_paths, "__compiled__", object(), create=True),
+                patch.object(sys, "frozen", False, create=True),
+                patch.object(sys, "executable", str(executable)),
+                patch.object(app_paths.Path, "home", return_value=home),
+            ):
+                app_paths.ensure_runtime_layout()
+
+            messages = json.loads((runtime_i18n / "en.json").read_text(encoding="utf-8"))
+            self.assertEqual(messages["existing"], "Customized")
+            self.assertEqual(messages["new"], "New text")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -94,6 +95,24 @@ def _copy_tree_if_missing(source_dir: Path, target_dir: Path) -> None:
             shutil.copy2(item, target)
 
 
+def _merge_missing_translations(source_dir: Path, target_dir: Path) -> None:
+    """Add bundled translation keys without replacing user-customized values."""
+    if not source_dir.exists():
+        return
+    for source in source_dir.glob("*.json"):
+        target = target_dir / source.name
+        if not target.is_file() or source.resolve() == target.resolve():
+            continue
+        bundled = json.loads(source.read_text(encoding="utf-8"))
+        runtime = json.loads(target.read_text(encoding="utf-8"))
+        merged = {**bundled, **runtime}
+        if merged != runtime:
+            target.write_text(
+                json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+
 def ensure_runtime_layout() -> tuple[Path, Path]:
     # Seeds the writable runtime directory from the bundled (potentially read-only) config.
     # Returns (runtime_config_dir, runtime_workdir).
@@ -107,6 +126,10 @@ def ensure_runtime_layout() -> tuple[Path, Path]:
 
     bundled_config = bundle_root() / "config"
     _copy_tree_if_missing(bundled_config, runtime_config)
+    _merge_missing_translations(
+        bundled_config / "i18n",
+        runtime_config / "i18n",
+    )
 
     for name in ("preview", "logs", "temp"):
         (runtime_workdir / name).mkdir(parents=True, exist_ok=True)
