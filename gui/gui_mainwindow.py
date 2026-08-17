@@ -58,10 +58,16 @@ from core.encoder_caps import (
 from core.preset_store import delete_preset, list_presets, load_app_config, load_preset, save_preset, update_app_config
 from core.smart_quality import resolve_max_output_ratio
 from gui.activity_log_window import ActivityLogWindow
+from gui.constraint_decision_dialog import (
+    SizeMissDecision,
+    choose_quality_decision,
+    choose_size_miss_decision,
+)
 from gui.gui_workers import EncoderCapabilityDetectWorker, PlanWorker, PreviewWorker
 from gui.preview_result_dialog import PreviewResultDialog
 from gui.preset_manager_dialog import PresetManagerDialog
 from gui.queue_manager import QueueManager
+from gui.queue_state import QueueItemRecord
 from gui.queue_table import QueueTableModel, create_queue_view, format_duration, format_size
 from gui.queue_window import QueueWindow
 from gui.settings_dialog import SettingsDialog
@@ -940,6 +946,7 @@ class MainWindow(QMainWindow):
                 ready=metrics.ready_items,
                 running=metrics.running_items,
                 failed=metrics.failed_items,
+                decision=metrics.needs_decision_items,
             )
         )
         self.total_duration_value.setText(format_duration(metrics.total_duration_sec))
@@ -1561,6 +1568,8 @@ class MainWindow(QMainWindow):
             self._append_log(self.tr.t("gui.log.queue_paused"))
         elif state == "cancelled":
             self._append_log(self.tr.t("gui.log.queue_cancelled"))
+        elif state == "awaiting_decision":
+            self._append_log(self.tr.t("gui.log.queue_awaiting_decision"))
         elif state == "idle":
             self._append_log(self.tr.t("gui.log.encode_done"))
 
@@ -1844,6 +1853,7 @@ class MainWindow(QMainWindow):
         copy_output_action = menu.addAction(self.tr.t("gui.menu.copy_output_path"))
         menu.addSeparator()
         retry_action = menu.addAction(self.tr.t("gui.menu.retry_selected"))
+        resolve_action = menu.addAction(self.tr.t("gui.menu.resolve_decision"))
         remove_action = menu.addAction(self.tr.t("gui.menu.remove_from_queue"))
         clear_completed_action = menu.addAction(self.tr.t("gui.menu.clear_completed"))
 
@@ -1853,6 +1863,9 @@ class MainWindow(QMainWindow):
         copy_source_action.setEnabled(has_selection)
         copy_output_action.setEnabled(has_selection)
         retry_action.setEnabled(has_selection and self.queue_model.can_retry_rows(rows) and not self.queue_busy)
+        resolve_action.setEnabled(
+            len(rows) == 1 and self.queue_model.can_resolve_row(rows[0]) and not self.queue_busy
+        )
         remove_action.setEnabled(has_selection and self.queue_model.can_remove_rows(rows) and not self.queue_busy)
         clear_completed_action.setEnabled(not self.queue_busy)
 
@@ -1871,6 +1884,8 @@ class MainWindow(QMainWindow):
             retried = self.queue_manager.retry_rows(rows)
             if retried:
                 self._append_log(self.tr.t("gui.log.retry_selected", count=retried))
+        elif action == resolve_action and selected_record is not None:
+            self._resolve_queue_decision(rows[0], selected_record)
         elif action == remove_action:
             removed = self.queue_manager.remove_rows(rows)
             if removed:
@@ -1879,6 +1894,41 @@ class MainWindow(QMainWindow):
             removed = self.queue_manager.clear_completed()
             if removed:
                 self._append_log(self.tr.t("gui.log.cleared_completed", count=removed))
+
+    def _resolve_queue_decision(self, row: int, record: QueueItemRecord) -> None:
+        result = record.result
+        if result is not None and result.rejected_output_path is not None:
+            choice = choose_size_miss_decision(self, self.tr, record)
+            resolved = False
+            if choice == SizeMissDecision.ACCEPT:
+                resolved = self.queue_model.accept_size_miss(row)
+            elif choice == SizeMissDecision.RETRY:
+                resolved = self.queue_model.retry_size_miss(row)
+            elif choice == SizeMissDecision.DISCARD:
+                resolved = self.queue_model.discard_size_miss(row)
+            if resolved and choice is not None:
+                self._append_log(
+                    self.tr.t("gui.log.decision_resolved", file=record.source_path.name, action=choice.value)
+                )
+                if record.result is not None:
+                    for warning in record.result.external_subtitle_warnings:
+                        self._append_log(warning)
+            return
+
+        options = self.queue_model.decision_options_for_row(row)
+        if not options:
+            return
+        decision = choose_quality_decision(self, self.tr, record, options)
+        if decision is None:
+            return
+        if self.queue_model.apply_quality_decision(row, decision):
+            self._append_log(
+                self.tr.t(
+                    "gui.log.decision_resolved",
+                    file=record.source_path.name,
+                    action=decision.action_code.value,
+                )
+            )
 
     def _show_header_context_menu(self, view, pos: QPoint) -> None:
         menu = QMenu(self)

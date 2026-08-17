@@ -11,7 +11,14 @@ from core.app_paths import config_dir as app_config_dir
 from core.encoder_capability_cache import ensure_encoder_capabilities
 from core.encoder_caps import resolve_encoder
 from core.exec_encode import execute_plan_item
-from core.models import BackendChoice, EncodePlan, EncodePlanItem, EncodeResult, OperationCancelledError
+from core.models import (
+    BackendChoice,
+    ConstraintPolicy,
+    EncodePlan,
+    EncodePlanItem,
+    EncodeResult,
+    OperationCancelledError,
+)
 from core.safety_checks import validate_workdir
 
 
@@ -107,6 +114,7 @@ def execute_plan_parallel(
     pause_check: Callable[[], bool] | None = None,
     item_started_callback: ItemStartedCallback | None = None,
     item_result_callback: ItemResultCallback | None = None,
+    constraint_policy: ConstraintPolicy = ConstraintPolicy.FAIL,
 ) -> list[EncodeResult]:
     # One daemon thread per backend pulls work from a lock-protected deque.
     workdir = validate_workdir(workdir)
@@ -161,6 +169,7 @@ def execute_plan_parallel(
                     cancel_check=should_stop,
                     process_callback=callback,
                     extra_progress_context=context,
+                    constraint_policy=constraint_policy,
                 )
                 results[index] = result
                 if item_result_callback is not None:

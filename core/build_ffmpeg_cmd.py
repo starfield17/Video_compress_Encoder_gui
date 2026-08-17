@@ -24,6 +24,8 @@ def build_input_acceleration_args(plan_item: EncodePlanItem) -> list[str]:
 
 
 def build_video_args(plan_item: EncodePlanItem) -> list[str]:
+    if plan_item.encoder_info is None:
+        raise ValueError("Encoding requires a bound encoder.")
     encoder = plan_item.encoder_info.encoder_name
     options = plan_item.options
     target_video_bps = plan_item.target_video_bitrate_bps

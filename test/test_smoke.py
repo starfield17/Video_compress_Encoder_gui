@@ -5,7 +5,6 @@ import io
 import os
 import unittest
 from unittest.mock import patch
-from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 

@@ -12,9 +12,12 @@ from core.build_ffmpeg_cmd import (
     build_preview_encode_commands,
     build_preview_extract_command,
 )
+from core.constraint_resolution import reselect_after_quality_decision
 from core.external_subtitles import copy_external_subtitles
 from core.models import (
     CompressionMode,
+    ConstraintPolicy,
+    DecisionActionCode,
     EncodePlan,
     EncodePlanItem,
     EncodeResult,
@@ -33,8 +36,56 @@ from core.smart_quality import (
     SMART_ANALYSIS_SEMAPHORE,
     acquire_analysis_slot,
     analyze_quality,
+    build_decision_options,
     resolve_max_output_ratio,
 )
+
+
+def _apply_constraint_policy(
+    ffmpeg_path: Path,
+    item: EncodePlanItem,
+    quality_result: QualitySearchResult,
+    policy: ConstraintPolicy,
+) -> QualitySearchResult:
+    action_code = {
+        ConstraintPolicy.RELAX_SIZE: DecisionActionCode.RELAX_SIZE,
+        ConstraintPolicy.RELAX_QUALITY: DecisionActionCode.RELAX_QUALITY,
+    }.get(policy)
+    if action_code is None:
+        return quality_result
+    decision = next(
+        (option for option in build_decision_options(quality_result) if option.action_code == action_code),
+        None,
+    )
+    if decision is None or decision.requires_analysis:
+        return quality_result
+    return reselect_after_quality_decision(
+        ffmpeg_path,
+        item,
+        quality_result,
+        decision,
+    )
+
+
+def _size_miss_output_path(output_path: Path) -> Path:
+    return output_path.with_name(
+        f"{output_path.stem}.size-miss-{uuid.uuid4().hex[:8]}{output_path.suffix}"
+    )
+
+
+def _assert_quality_encoder_matches_item(
+    item: EncodePlanItem,
+    quality_result: QualitySearchResult,
+) -> None:
+    encoder = item.encoder_info
+    if encoder is None:
+        raise ValueError("Smart encoding requires a bound encoder.")
+    if quality_result.encoder_name != encoder.encoder_name or quality_result.backend != encoder.backend:
+        raise RuntimeError(
+            "Smart analysis result was produced by a different encoder "
+            f"({quality_result.encoder_name}/{quality_result.backend.value}); expected "
+            f"{encoder.encoder_name}/{encoder.backend.value}."
+        )
 
 
 def _emit(log_callback: Callable[[str], None] | None, message: str) -> None:
@@ -163,7 +214,8 @@ def _apply_pass_progress(
         return event
 
     # Remap intra-pass percentage to total file percentage across N passes.
-    pass_percent = float(event.get("percent") or 0.0)
+    raw_percent = event.get("percent")
+    pass_percent = float(raw_percent) if isinstance(raw_percent, (int, float)) else 0.0
     file_progress = (((current_pass_index - 1) + (pass_percent / 100.0)) / total_passes) * 100.0
     event["pass_percent"] = pass_percent
     event["file_progress"] = max(0.0, min(100.0, file_progress))
@@ -176,10 +228,9 @@ def _emit_output_event(
     progress_callback: Callable[[dict[str, object]], None] | None,
     progress_context: dict[str, object] | None,
 ) -> None:
-    parsed = _parse_ffmpeg_progress(
-        normalized,
-        progress_context.get("duration_sec") if progress_context else None,
-    )
+    raw_duration = progress_context.get("duration_sec") if progress_context else None
+    duration_sec = float(raw_duration) if isinstance(raw_duration, (int, float)) else None
+    parsed = _parse_ffmpeg_progress(normalized, duration_sec)
     if parsed is None:
         _emit_progress(progress_callback, category="log", message=normalized, **(progress_context or {}))
         return
@@ -340,7 +391,7 @@ def _copy_external_subtitles_for_result(
         )
 
 
-def _write_command_failure_log(log_path: Path, exc: subprocess.CalledProcessError[str]) -> None:
+def _write_command_failure_log(log_path: Path, exc: subprocess.CalledProcessError) -> None:
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(f"[command failed] returncode={exc.returncode}\n")
         if exc.stdout:
@@ -361,6 +412,7 @@ def execute_plan_item(
     cancel_check: Callable[[], bool] | None = None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
     extra_progress_context: dict[str, object] | None = None,
+    constraint_policy: ConstraintPolicy = ConstraintPolicy.FAIL,
 ) -> EncodeResult:
     workdir = validate_workdir(workdir)
     log_path = log_file_path(workdir, item.source_path, "encode")
@@ -418,17 +470,27 @@ def execute_plan_item(
                 SMART_ANALYSIS_SEMAPHORE.release()
             item.quality_search_result = quality_result
             result.quality_search_result = quality_result
+            _assert_quality_encoder_matches_item(item, quality_result)
+            if quality_result.status == QualitySearchStatus.CONSTRAINT_UNSATISFIED:
+                quality_result = _apply_constraint_policy(ffmpeg_path, item, quality_result, constraint_policy)
+                item.quality_search_result = quality_result
+                result.quality_search_result = quality_result
             if not quality_result.success:
                 result.success = False
-                result.skipped = True
                 result.error_message = quality_result.reason or "Smart compression constraints could not be satisfied."
+                result.needs_decision = quality_result.status == QualitySearchStatus.CONSTRAINT_UNSATISFIED
+                result.skipped = not result.needs_decision
                 _emit(
                     log_callback,
-                    f"[{queue_index}/{queue_total}] Smart analysis skipped {item.source_path.name}: {result.error_message}",
+                    f"[{queue_index}/{queue_total}] Smart analysis requires a decision for "
+                    f"{item.source_path.name}: {result.error_message}"
+                    if result.needs_decision
+                    else f"[{queue_index}/{queue_total}] Smart analysis skipped "
+                    f"{item.source_path.name}: {result.error_message}",
                 )
                 _emit_progress(
                     progress_callback,
-                    state="skipped",
+                    state="needs_decision" if result.needs_decision else "skipped",
                     percent=100.0,
                     file_progress=100.0,
                     message=result.error_message,
@@ -498,6 +560,8 @@ def execute_plan_item(
                 },
             )
         if temporary_output is not None:
+            if result.quality_search_result is not None:
+                _assert_quality_encoder_matches_item(item, result.quality_search_result)
             _emit_progress(
                 progress_callback,
                 state="validating",
@@ -514,15 +578,21 @@ def execute_plan_item(
             actual_size = temporary_output.stat().st_size
             if actual_size > max_output_bytes:
                 result.success = False
-                result.skipped = True
+                result.needs_decision = True
+                result.actual_output_bytes = actual_size
+                result.allowed_output_bytes = max_output_bytes
+                rejected_output = _size_miss_output_path(item.output_path)
+                os.replace(temporary_output, rejected_output)
+                temporary_output = None
+                result.rejected_output_path = rejected_output
                 result.error_message = (
                     f"Actual output size {actual_size} bytes exceeds the smart limit "
-                    f"of {max_output_bytes} bytes."
+                    f"of {max_output_bytes} bytes. The encoded file was preserved at {rejected_output}."
                 )
                 _emit(log_callback, f"[{queue_index}/{queue_total}] {result.error_message}")
                 _emit_progress(
                     progress_callback,
-                    state="skipped",
+                    state="needs_decision",
                     message=result.error_message,
                     quality_search_result=result.quality_search_result,
                     **base_context,
@@ -609,6 +679,7 @@ def execute_plan(
     progress_callback: Callable[[dict[str, object]], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
+    constraint_policy: ConstraintPolicy = ConstraintPolicy.FAIL,
 ) -> list[EncodeResult]:
     workdir = validate_workdir(workdir)
     results: list[EncodeResult] = []
@@ -631,6 +702,7 @@ def execute_plan(
                 progress_callback=progress_callback,
                 cancel_check=cancel_check,
                 process_callback=process_callback,
+                constraint_policy=constraint_policy,
             )
         )
     _emit(log_callback, "Encode execution finished.")

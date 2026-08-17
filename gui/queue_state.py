@@ -22,6 +22,7 @@ class QueueItemStatus(str, Enum):
     PAUSED = "paused"
     DONE = "done"
     FAILED = "failed"
+    NEEDS_DECISION = "needs_decision"
     SKIPPED = "skipped"
     CANCELLED = "cancelled"
 
@@ -37,6 +38,7 @@ STATUS_KEY_BY_VALUE = {
     QueueItemStatus.PAUSED: "gui.status.paused",
     QueueItemStatus.DONE: "gui.status.done",
     QueueItemStatus.FAILED: "gui.status.failed",
+    QueueItemStatus.NEEDS_DECISION: "gui.status.needs_decision",
     QueueItemStatus.SKIPPED: "gui.status.skip",
     QueueItemStatus.CANCELLED: "gui.status.cancelled",
 }
@@ -108,6 +110,7 @@ class QueueMetrics:
     queued_items: int = 0
     running_items: int = 0
     failed_items: int = 0
+    needs_decision_items: int = 0
     done_items: int = 0
     skipped_items: int = 0
     cancelled_items: int = 0
@@ -193,7 +196,13 @@ def build_tags(record: QueueItemRecord) -> list[str]:
         tags.append("Skip")
     if record.status == QueueItemStatus.FAILED:
         tags.append("Fail")
-    if record.error_summary and record.status not in {QueueItemStatus.SKIPPED, QueueItemStatus.FAILED}:
+    if record.status == QueueItemStatus.NEEDS_DECISION:
+        tags.append("Decision")
+    if record.error_summary and record.status not in {
+        QueueItemStatus.SKIPPED,
+        QueueItemStatus.FAILED,
+        QueueItemStatus.NEEDS_DECISION,
+    }:
         tags.append("Note")
     return tags
 
@@ -274,6 +283,8 @@ def processed_weight(record: QueueItemRecord) -> float:
         return 0.0
     if record.status in {QueueItemStatus.DONE, QueueItemStatus.SKIPPED}:
         return weight
+    if record.status == QueueItemStatus.NEEDS_DECISION:
+        return weight * 0.99
     return weight * max(0.0, min(100.0, record.file_progress)) / 100.0
 
 
@@ -297,6 +308,8 @@ def compute_metrics(records: list[QueueItemRecord]) -> QueueMetrics:
             running_record = record
         elif record.status == QueueItemStatus.FAILED:
             metrics.failed_items += 1
+        elif record.status == QueueItemStatus.NEEDS_DECISION:
+            metrics.needs_decision_items += 1
         elif record.status == QueueItemStatus.DONE:
             metrics.done_items += 1
         elif record.status == QueueItemStatus.SKIPPED:
@@ -371,6 +384,12 @@ def mark_finished(record: QueueItemRecord, result: EncodeResult) -> None:
         record.plan_item.quality_search_result = result.quality_search_result
         if result.quality_search_result.selected_video_bitrate_bps > 0:
             record.plan_item.target_video_bitrate_bps = result.quality_search_result.selected_video_bitrate_bps
+    if result.needs_decision:
+        record.status = QueueItemStatus.NEEDS_DECISION
+        record.file_progress = 100.0
+        record.pass_percent = 100.0
+        record.error_summary = short_error(result.error_message)
+        return
     if result.skipped:
         record.status = QueueItemStatus.SKIPPED
         record.file_progress = 100.0

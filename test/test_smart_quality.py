@@ -24,9 +24,11 @@ from core.models import (
     BackendChoice,
     CodecChoice,
     CompressionMode,
+    ConstraintPolicy,
     EncodeOptions,
     EncodePlan,
     EncodePlanItem,
+    EncodeResult,
     EncoderInfo,
     MediaInfo,
     OperationCancelledError,
@@ -119,6 +121,37 @@ class SmartConfigurationTestCase(unittest.TestCase):
             )
         self.assertEqual(exit_code, 2)
         self.assertIn("--ratio cannot be used", stderr.getvalue())
+
+    def test_cli_returns_three_when_a_constraint_needs_a_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"source")
+            item = _item(source, root / "output.mp4", EncodeOptions())
+            plan = EncodePlan(
+                items=[item],
+                ffmpeg_path=root / "ffmpeg",
+                ffprobe_path=root / "ffprobe",
+                input_root=root,
+                output_root=root,
+            )
+            result = EncodeResult(
+                source_path=source,
+                output_path=item.output_path,
+                success=False,
+                needs_decision=True,
+                error_message="quality and size conflict",
+            )
+            with (
+                patch("cli.cli_entry.build_encode_plan", return_value=plan),
+                patch("cli.cli_entry.execute_plan", return_value=[result]) as execute,
+                patch("cli.cli_entry.print_plan"),
+                patch("cli.cli_entry.print_encode_results"),
+            ):
+                exit_code = run_cli(["encode", str(source), "--lang", "en"])
+
+            self.assertEqual(exit_code, 3)
+            self.assertEqual(execute.call_args.kwargs["constraint_policy"], ConstraintPolicy.FAIL)
 
 
 class SmartSamplingAndBudgetTestCase(unittest.TestCase):
@@ -519,6 +552,25 @@ class SmartExecutionSafetyTestCase(unittest.TestCase):
         self.assertIn(str(result.log_path), failure_messages[0])
         self.assertNotIn("x" * 100, failure_messages[0])
 
+    def test_analysis_from_a_different_encoder_is_never_published(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            source.write_bytes(b"s" * 1_000)
+            item = _item(source, root / "output.mp4", EncodeOptions())
+            mismatched = self._quality_result()
+            mismatched.backend = BackendChoice.NVENC
+
+            with (
+                patch("core.exec_encode.analyze_quality", return_value=mismatched),
+                patch("core.exec_encode._run_logged_command") as run_command,
+            ):
+                result = execute_plan_item(Path("ffmpeg"), item, root)
+
+            self.assertFalse(result.success)
+            self.assertIn("different encoder", result.error_message or "")
+            run_command.assert_not_called()
+
     def test_oversized_output_does_not_replace_existing_target(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -538,7 +590,13 @@ class SmartExecutionSafetyTestCase(unittest.TestCase):
             ):
                 result = execute_plan_item(Path("ffmpeg"), item, root)
 
-            self.assertTrue(result.skipped)
+            self.assertFalse(result.skipped)
+            self.assertTrue(result.needs_decision)
+            self.assertIsNotNone(result.rejected_output_path)
+            assert result.rejected_output_path is not None
+            self.assertEqual(result.rejected_output_path.read_bytes(), b"x" * 800)
+            self.assertEqual(result.actual_output_bytes, 800)
+            self.assertEqual(result.allowed_output_bytes, 700)
             self.assertEqual(output.read_bytes(), b"original")
             self.assertFalse(list(root.glob(".*.smart-*")))
 

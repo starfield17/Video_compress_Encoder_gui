@@ -230,7 +230,11 @@ def ensure_encoder_capabilities(
     resolved = _resolved_ffmpeg_path(ffmpeg_path)
     with _CACHE_LOCK:
         cached = load_cached_encoder_capabilities(config_dir)
-        if not force_refresh and is_encoder_capability_cache_valid(cached, resolved):
+        if (
+            not force_refresh
+            and isinstance(cached, dict)
+            and is_encoder_capability_cache_valid(cached, resolved)
+        ):
             return cached
 
         _emit(progress_callback, "Detecting hardware encoders...")

@@ -7,17 +7,24 @@ import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import Callable, TextIO, cast
 
+from core.analysis_receipts import ANALYSIS_RECEIPT_SCHEMA_VERSION, load_analysis_receipt, save_analysis_receipt
 from core.build_ffmpeg_cmd import build_encode_commands, build_input_acceleration_args
 from core.models import (
+    AnalysisReceipt,
     AudioMode,
     CodecChoice,
     CompressionMode,
+    ConstraintFailureKind,
     ContainerChoice,
+    DecisionActionCode,
+    DecisionOption,
     DecodeAcceleration,
+    EncodeOptions,
     EncodePlanItem,
     OperationCancelledError,
     QualityCandidateResult,
@@ -36,6 +43,7 @@ MAX_SEARCH_CANDIDATES = 8
 CONTAINER_BUDGET_FACTOR = 0.98
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}
 SMART_ERROR_TAIL_CHARS = 4_000
+SMART_SAMPLE_SCHEME_VERSION = 1
 
 
 class SmartCommandError(subprocess.CalledProcessError):
@@ -71,6 +79,10 @@ class SmartCommandError(subprocess.CalledProcessError):
             f"Smart {self.phase} failed with exit code {self.returncode}: {command}\n"
             f"Output tail (last {SMART_ERROR_TAIL_CHARS} characters):\n{tail}"
         )
+
+
+class _UnsupportedSmartAnalysis(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,14 +177,6 @@ def predicted_output_size(
     return int(math.ceil(media_bytes / CONTAINER_BUDGET_FACTOR))
 
 
-def _measured_prediction_ratio(candidate: QualityCandidateResult, source_bytes: int) -> float | None:
-    if candidate.predicted_output_ratio is not None:
-        return candidate.predicted_output_ratio
-    if candidate.predicted_output_bytes is not None and source_bytes > 0:
-        return candidate.predicted_output_bytes / source_bytes
-    return None
-
-
 def _floor_candidate(value: int) -> int:
     return max(1_000, int(value // 1_000) * 1_000)
 
@@ -190,6 +194,7 @@ def search_bitrate_candidates(
     min_vmaf: float,
     max_candidates: int = MAX_SEARCH_CANDIDATES,
     max_output_bytes: int | None = None,
+    initial_candidates: list[QualityCandidateResult] | None = None,
 ) -> tuple[list[QualityCandidateResult], int | None, int | None]:
     """Return tested candidates, a selectable bitrate, and required bitrate.
 
@@ -200,8 +205,11 @@ def search_bitrate_candidates(
     report the measured ratio that explains why the joint constraints are
     unsatisfiable.
     """
-    cache: dict[int, QualityCandidateResult] = {}
+    cache: dict[int, QualityCandidateResult] = {
+        candidate.video_bitrate_bps: candidate for candidate in (initial_candidates or [])
+    }
     candidate_limit = min(MAX_SEARCH_CANDIDATES, max(0, int(max_candidates)))
+    evaluated = 0
 
     def quality_passes(result: QualityCandidateResult) -> bool:
         return result.min_vmaf >= min_vmaf
@@ -223,10 +231,14 @@ def search_bitrate_candidates(
         return (min(selectable) if selectable else None), required
 
     def test(value: int) -> QualityCandidateResult | None:
+        nonlocal evaluated
         bitrate = _floor_candidate(value)
-        if bitrate in cache or len(cache) >= candidate_limit:
+        if bitrate in cache:
             return cache.get(bitrate)
+        if evaluated >= candidate_limit:
+            return None
         cache[bitrate] = evaluate(bitrate)
+        evaluated += 1
         return cache[bitrate]
 
     budget = _floor_candidate(budget_bitrate_bps)
@@ -242,7 +254,7 @@ def search_bitrate_candidates(
             return list(cache.values()), selected, required
         low = minimum
         high = budget
-        while len(cache) < candidate_limit and high - low > 1_000:
+        while evaluated < candidate_limit and high - low > 1_000:
             middle = _floor_candidate((low + high) // 2)
             if middle in cache:
                 break
@@ -263,7 +275,7 @@ def search_bitrate_candidates(
 
     low = budget
     high = ceiling
-    while len(cache) < candidate_limit and high - low > 1_000:
+    while evaluated < candidate_limit and high - low > 1_000:
         middle = _floor_candidate((low + high) // 2)
         if middle in cache:
             break
@@ -282,19 +294,25 @@ def search_bitrate_candidates(
     return list(cache.values()), selected, required
 
 
-def quality_configuration_fingerprint(ffmpeg_path: Path, item: EncodePlanItem) -> str:
+def _path_identity(path: Path) -> dict[str, object]:
+    try:
+        stat = path.stat()
+        return {
+            "path": str(path.resolve()),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+    except OSError:
+        return {"path": str(path), "size": None, "mtime_ns": None}
+
+
+def measurement_configuration_payload(ffmpeg_path: Path, item: EncodePlanItem) -> dict[str, object]:
     if item.encoder_info is None:
         raise ValueError("Smart analysis requires a bound encoder.")
-    source_stat = item.source_path.stat()
-    try:
-        ffmpeg_stat = ffmpeg_path.stat()
-        ffmpeg_identity = [str(ffmpeg_path.resolve()), ffmpeg_stat.st_size, ffmpeg_stat.st_mtime_ns]
-    except OSError:
-        ffmpeg_identity = [str(ffmpeg_path), None, None]
     options = item.options
-    payload = {
-        "source": [str(item.source_path.resolve()), source_stat.st_size, source_stat.st_mtime_ns],
-        "ffmpeg": ffmpeg_identity,
+    return {
+        "source": _path_identity(item.source_path),
+        "ffmpeg": _path_identity(ffmpeg_path),
         "codec": options.codec.value,
         "encoder": item.encoder_info.encoder_name,
         "backend": item.encoder_info.backend.value,
@@ -302,14 +320,30 @@ def quality_configuration_fingerprint(ffmpeg_path: Path, item: EncodePlanItem) -
         "preset": options.encoder_preset,
         "pix_fmt": options.pix_fmt,
         "two_pass": options.two_pass,
+        "maxrate_factor": options.maxrate_factor,
+        "bufsize_factor": options.bufsize_factor,
+        "sample_scheme_version": SMART_SAMPLE_SCHEME_VERSION,
+        "vmaf_model": "vmaf_4k_v0.6.1" if _is_4k(item) else "vmaf_v0.6.1",
+    }
+
+
+def measurement_configuration_fingerprint(ffmpeg_path: Path, item: EncodePlanItem) -> str:
+    payload = measurement_configuration_payload(ffmpeg_path, item)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def quality_configuration_fingerprint(ffmpeg_path: Path, item: EncodePlanItem) -> str:
+    options = item.options
+    payload = {
+        "measurement_fingerprint": measurement_configuration_fingerprint(ffmpeg_path, item),
         "min_vmaf": options.min_vmaf,
         "max_output_ratio": resolve_max_output_ratio(options.codec, options.max_output_ratio),
         "audio_mode": options.audio_mode.value,
         "audio_bitrate": options.audio_bitrate,
         "min_video_kbps": options.min_video_kbps,
         "max_video_kbps": options.max_video_kbps,
-        "maxrate_factor": options.maxrate_factor,
-        "bufsize_factor": options.bufsize_factor,
+        "container": options.container.value,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -638,6 +672,218 @@ def _score_candidate(
     )
 
 
+def _refresh_candidate_predictions(
+    candidates: list[QualityCandidateResult],
+    budget: SmartBitrateBudget,
+    duration_sec: float,
+) -> list[QualityCandidateResult]:
+    refreshed: list[QualityCandidateResult] = []
+    for candidate in candidates:
+        observed_bitrate = candidate.observed_video_bitrate_bps
+        if observed_bitrate <= 0 and candidate.encoded_bytes and candidate.encoded_durations_sec:
+            measured_bitrates = [
+                int(math.ceil(encoded_bytes * 8.0 / duration))
+                for encoded_bytes, duration in zip(candidate.encoded_bytes, candidate.encoded_durations_sec)
+                if duration > 0
+            ]
+            if measured_bitrates:
+                observed_bitrate = max(measured_bitrates)
+        if observed_bitrate <= 0:
+            observed_bitrate = candidate.video_bitrate_bps
+        predicted_bytes = predicted_output_size(observed_bitrate, budget.audio_bitrate_bps, duration_sec)
+        refreshed.append(
+            replace(
+                candidate,
+                observed_video_bitrate_bps=observed_bitrate,
+                predicted_output_bytes=predicted_bytes,
+                predicted_output_ratio=(predicted_bytes / budget.source_bytes if budget.source_bytes else None),
+            )
+        )
+    return refreshed
+
+
+def reselect_from_candidates(
+    candidates: list[QualityCandidateResult],
+    item: EncodePlanItem,
+    *,
+    measurement_fingerprint: str = "",
+    fingerprint: str = "",
+) -> QualitySearchResult:
+    if item.media_info is None or item.encoder_info is None:
+        raise ValueError("Smart candidate selection requires probed media and a bound encoder.")
+    budget = calculate_smart_bitrate_budget(item)
+    base = {
+        "encoder_name": item.encoder_info.encoder_name,
+        "backend": item.encoder_info.backend,
+        "measurement_fingerprint": measurement_fingerprint,
+        "fingerprint": fingerprint,
+        "max_output_bytes": budget.max_output_bytes,
+    }
+    if budget.max_video_bitrate_bps < budget.min_video_bitrate_bps:
+        return QualitySearchResult(
+            status=QualitySearchStatus.CONSTRAINT_UNSATISFIED,
+            failure_kind=ConstraintFailureKind.MEDIA_BUDGET_TOO_SMALL,
+            reason="Audio and container overhead leave too little room for the minimum video bitrate.",
+            **base,
+        )
+
+    refreshed = _refresh_candidate_predictions(candidates, budget, item.media_info.duration)
+    quality_passing = [candidate for candidate in refreshed if candidate.min_vmaf >= item.options.min_vmaf]
+    selectable = [
+        candidate
+        for candidate in quality_passing
+        if candidate.predicted_output_bytes is not None and candidate.predicted_output_bytes <= budget.max_output_bytes
+    ]
+    size_fitting = [
+        candidate
+        for candidate in refreshed
+        if candidate.predicted_output_bytes is not None and candidate.predicted_output_bytes <= budget.max_output_bytes
+    ]
+    best_size_fitting = max(size_fitting, key=lambda candidate: (candidate.min_vmaf, -candidate.video_bitrate_bps), default=None)
+    if selectable:
+        chosen = min(selectable, key=lambda candidate: candidate.video_bitrate_bps)
+        return QualitySearchResult(
+            status=QualitySearchStatus.FOUND,
+            candidates=refreshed,
+            selected_video_bitrate_bps=chosen.video_bitrate_bps,
+            min_vmaf=chosen.min_vmaf,
+            predicted_output_bytes=chosen.predicted_output_bytes,
+            predicted_output_ratio=chosen.predicted_output_ratio,
+            best_size_fitting_candidate_bps=(best_size_fitting.video_bitrate_bps if best_size_fitting else 0),
+            best_size_fitting_vmaf=(best_size_fitting.min_vmaf if best_size_fitting else None),
+            **base,
+        )
+
+    required = min(quality_passing, key=lambda candidate: candidate.video_bitrate_bps, default=None)
+    required_ratio = required.predicted_output_ratio if required is not None else None
+    size_blocked = (
+        required is not None
+        and required.predicted_output_bytes is not None
+        and required.predicted_output_bytes > budget.max_output_bytes
+    )
+    failure_kind = (
+        ConstraintFailureKind.SIZE_BLOCKED if size_blocked else ConstraintFailureKind.QUALITY_UNREACHABLE
+    )
+    if size_blocked and required_ratio is not None:
+        reason = (
+            f"VMAF {item.options.min_vmaf:.1f} requires an estimated output ratio of "
+            f"{required_ratio:.3f}, above the configured size limit."
+        )
+    else:
+        reason = f"The bound encoder cannot reach VMAF {item.options.min_vmaf:.1f} with the tested candidates."
+    return QualitySearchResult(
+        status=QualitySearchStatus.CONSTRAINT_UNSATISFIED,
+        candidates=refreshed,
+        selected_video_bitrate_bps=(
+            required.video_bitrate_bps
+            if required is not None
+            else (best_size_fitting.video_bitrate_bps if best_size_fitting is not None else 0)
+        ),
+        min_vmaf=(required.min_vmaf if required is not None else (best_size_fitting.min_vmaf if best_size_fitting else None)),
+        predicted_output_bytes=(
+            required.predicted_output_bytes
+            if required is not None
+            else (best_size_fitting.predicted_output_bytes if best_size_fitting is not None else None)
+        ),
+        predicted_output_ratio=(
+            required.predicted_output_ratio
+            if required is not None
+            else (best_size_fitting.predicted_output_ratio if best_size_fitting is not None else None)
+        ),
+        required_output_ratio=required_ratio,
+        required_video_bitrate_bps=(required.video_bitrate_bps if required else 0),
+        best_size_fitting_candidate_bps=(best_size_fitting.video_bitrate_bps if best_size_fitting else 0),
+        best_size_fitting_vmaf=(best_size_fitting.min_vmaf if best_size_fitting else None),
+        failure_kind=failure_kind,
+        reason=reason,
+        **base,
+    )
+
+
+def build_decision_options(result: QualitySearchResult) -> list[DecisionOption]:
+    options: list[DecisionOption] = []
+    if (
+        result.failure_kind == ConstraintFailureKind.SIZE_BLOCKED
+        and result.required_output_ratio is not None
+        and result.required_output_ratio <= 1.0
+    ):
+        options.append(
+            DecisionOption(
+                action_code=DecisionActionCode.RELAX_SIZE,
+                suggested_value=math.nextafter(result.required_output_ratio, 1.0),
+                requires_analysis=False,
+            )
+        )
+    if result.best_size_fitting_vmaf is not None:
+        options.append(
+            DecisionOption(
+                action_code=DecisionActionCode.RELAX_QUALITY,
+                suggested_value=result.best_size_fitting_vmaf,
+                requires_analysis=False,
+            )
+        )
+    if result.failure_kind == ConstraintFailureKind.MEDIA_BUDGET_TOO_SMALL:
+        options.append(
+            DecisionOption(
+                action_code=DecisionActionCode.CHANGE_MEDIA_BUDGET,
+                suggested_value=AudioMode.AAC.value,
+                requires_analysis=True,
+            )
+        )
+    if result.failure_kind == ConstraintFailureKind.QUALITY_UNREACHABLE:
+        options.append(
+            DecisionOption(
+                action_code=DecisionActionCode.REANALYZE,
+                requires_analysis=True,
+                parameters={"change_encoder": True},
+            )
+        )
+    options.append(DecisionOption(action_code=DecisionActionCode.SKIP))
+    return options
+
+
+def apply_decision_to_options(options: EncodeOptions, decision: DecisionOption) -> EncodeOptions:
+    if decision.action_code == DecisionActionCode.RELAX_SIZE:
+        if not isinstance(decision.suggested_value, (int, float)):
+            raise ValueError("Relax-size decision requires an output ratio.")
+        return replace(options, max_output_ratio=float(decision.suggested_value))
+    if decision.action_code == DecisionActionCode.RELAX_QUALITY:
+        if not isinstance(decision.suggested_value, (int, float)):
+            raise ValueError("Relax-quality decision requires a VMAF value.")
+        return replace(options, min_vmaf=float(decision.suggested_value))
+    if decision.action_code == DecisionActionCode.CHANGE_MEDIA_BUDGET:
+        return replace(options, audio_mode=AudioMode.AAC)
+    return options
+
+
+def _analysis_receipt(
+    ffmpeg_path: Path,
+    item: EncodePlanItem,
+    measurement_fingerprint: str,
+    windows: list[SampleWindow],
+    candidates: list[QualityCandidateResult],
+) -> AnalysisReceipt:
+    if item.encoder_info is None:
+        raise ValueError("Smart analysis receipt requires a bound encoder.")
+    payload = measurement_configuration_payload(ffmpeg_path, item)
+    return AnalysisReceipt(
+        schema_version=ANALYSIS_RECEIPT_SCHEMA_VERSION,
+        measurement_fingerprint=measurement_fingerprint,
+        source_identity=dict(cast(dict[str, object], payload["source"])),
+        ffmpeg_identity=dict(cast(dict[str, object], payload["ffmpeg"])),
+        encoder_identity={
+            "codec": item.options.codec.value,
+            "backend": item.encoder_info.backend.value,
+            "encoder": item.encoder_info.encoder_name,
+            "preset": item.options.encoder_preset,
+        },
+        sample_scheme_version=SMART_SAMPLE_SCHEME_VERSION,
+        sample_windows=[(window.start_sec, window.duration_sec) for window in windows],
+        candidates=candidates,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
 def analyze_quality(
     ffmpeg_path: Path,
     item: EncodePlanItem,
@@ -654,54 +900,73 @@ def analyze_quality(
         raise ValueError("Smart analysis requires probed media and a bound encoder.")
 
     fingerprint = quality_configuration_fingerprint(ffmpeg_path, item)
+    measurement_fingerprint = measurement_configuration_fingerprint(ffmpeg_path, item)
     cached = item.quality_search_result
     if cached is not None and cached.fingerprint == fingerprint:
         return cached
+    windows = choose_smart_sample_windows(item.media_info.duration)
+    initial_candidates: list[QualityCandidateResult] = []
+    if cached is not None and cached.measurement_fingerprint == measurement_fingerprint:
+        initial_candidates = list(cached.candidates)
+    else:
+        receipt = load_analysis_receipt(workdir, measurement_fingerprint)
+        if (
+            receipt is not None
+            and receipt.sample_scheme_version == SMART_SAMPLE_SCHEME_VERSION
+            and receipt.sample_windows == [(window.start_sec, window.duration_sec) for window in windows]
+        ):
+            initial_candidates = list(receipt.candidates)
 
-    capabilities = detect_vmaf_capabilities(ffmpeg_path)
-    unsupported = _unsupported_reason(item, capabilities)
     budget = calculate_smart_bitrate_budget(item)
-    base = {
-        "encoder_name": item.encoder_info.encoder_name,
-        "backend": item.encoder_info.backend,
-        "fingerprint": fingerprint,
-        "max_output_bytes": budget.max_output_bytes,
-    }
-    if unsupported:
-        return QualitySearchResult(
-            status=QualitySearchStatus.UNSUPPORTED,
-            reason=unsupported,
-            **base,
-        )
     if budget.max_video_bitrate_bps < budget.min_video_bitrate_bps:
-        return QualitySearchResult(
-            status=QualitySearchStatus.CONSTRAINT_UNSATISFIED,
-            reason="Audio and container overhead leave too little room for the minimum video bitrate.",
-            **base,
+        return reselect_from_candidates(
+            initial_candidates,
+            item,
+            measurement_fingerprint=measurement_fingerprint,
+            fingerprint=fingerprint,
+        )
+
+    if progress_callback is not None and initial_candidates:
+        progress_callback(
+            {
+                "stage": "analysis",
+                "state": "receipt_loaded",
+                "reused_candidate_count": len(initial_candidates),
+                "file_name": item.source_path.name,
+                "file_path": str(item.source_path),
+            }
         )
 
     workdir.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    candidates: list[QualityCandidateResult]
     with tempfile.TemporaryDirectory(prefix="smart-analysis-", dir=workdir) as temp_dir:
         temp_root = Path(temp_dir)
         references: list[Path] = []
-        windows = choose_smart_sample_windows(item.media_info.duration)
+        candidate_index = 0
         with log_path.open("a", encoding="utf-8") as log_file:
-            for index, window in enumerate(windows):
-                reference_path = temp_root / f"reference-{index}.mkv"
-                _run_logged(
-                    _build_reference(ffmpeg_path, item, window, reference_path),
-                    log_file,
-                    cancel_check=cancel_check,
-                    process_callback=process_callback,
-                    phase="reference extraction",
-                )
-                references.append(reference_path)
 
-            candidate_index = 0
+            def ensure_references() -> None:
+                if references:
+                    return
+                capabilities = detect_vmaf_capabilities(ffmpeg_path)
+                unsupported = _unsupported_reason(item, capabilities)
+                if unsupported:
+                    raise _UnsupportedSmartAnalysis(unsupported)
+                for index, window in enumerate(windows):
+                    reference_path = temp_root / f"reference-{index}.mkv"
+                    _run_logged(
+                        _build_reference(ffmpeg_path, item, window, reference_path),
+                        log_file,
+                        cancel_check=cancel_check,
+                        process_callback=process_callback,
+                        phase="reference extraction",
+                    )
+                    references.append(reference_path)
 
             def evaluate(bitrate_bps: int) -> QualityCandidateResult:
                 nonlocal candidate_index
+                ensure_references()
                 candidate_index += 1
                 if progress_callback is not None:
                     progress_callback(
@@ -711,6 +976,7 @@ def analyze_quality(
                             "candidate_index": candidate_index,
                             "candidate_limit": MAX_SEARCH_CANDIDATES,
                             "candidate_bitrate_bps": bitrate_bps,
+                            "reused_candidate_count": len(initial_candidates),
                             "file_name": item.source_path.name,
                             "file_path": str(item.source_path),
                         }
@@ -738,6 +1004,7 @@ def analyze_quality(
                             "candidate_limit": MAX_SEARCH_CANDIDATES,
                             "candidate_bitrate_bps": bitrate_bps,
                             "candidate_min_vmaf": result.min_vmaf,
+                            "reused_candidate_count": len(initial_candidates),
                             "file_name": item.source_path.name,
                             "file_path": str(item.source_path),
                         }
@@ -748,67 +1015,52 @@ def analyze_quality(
             required_ceiling = max(item.media_info.video_bitrate_bps, budget.max_video_bitrate_bps)
             if configured_max > 0:
                 required_ceiling = min(required_ceiling, configured_max)
-            candidates, selected_bitrate, required_bitrate = search_bitrate_candidates(
-                evaluate=evaluate,
-                min_bitrate_bps=budget.min_video_bitrate_bps,
-                budget_bitrate_bps=budget.max_video_bitrate_bps,
-                required_search_ceiling_bps=required_ceiling,
-                min_vmaf=float(item.options.min_vmaf),
-                max_output_bytes=budget.max_output_bytes,
-            )
+            try:
+                candidates, _selected_bitrate, _required_bitrate = search_bitrate_candidates(
+                    evaluate=evaluate,
+                    min_bitrate_bps=budget.min_video_bitrate_bps,
+                    budget_bitrate_bps=budget.max_video_bitrate_bps,
+                    required_search_ceiling_bps=required_ceiling,
+                    min_vmaf=float(item.options.min_vmaf),
+                    max_output_bytes=budget.max_output_bytes,
+                    initial_candidates=_refresh_candidate_predictions(
+                        initial_candidates, budget, item.media_info.duration
+                    ),
+                )
+            except _UnsupportedSmartAnalysis as exc:
+                return QualitySearchResult(
+                    status=QualitySearchStatus.UNSUPPORTED,
+                    encoder_name=item.encoder_info.encoder_name,
+                    backend=item.encoder_info.backend,
+                    measurement_fingerprint=measurement_fingerprint,
+                    fingerprint=fingerprint,
+                    max_output_bytes=budget.max_output_bytes,
+                    reason=str(exc),
+                )
 
-    if selected_bitrate is not None:
-        chosen = next(
-            candidate for candidate in candidates
-            if candidate.video_bitrate_bps == selected_bitrate
-            and candidate.min_vmaf >= item.options.min_vmaf
-        )
-        return QualitySearchResult(
-            status=QualitySearchStatus.FOUND,
-            candidates=candidates,
-            selected_video_bitrate_bps=selected_bitrate,
-            min_vmaf=chosen.min_vmaf,
-            predicted_output_bytes=chosen.predicted_output_bytes,
-            predicted_output_ratio=_measured_prediction_ratio(chosen, budget.source_bytes),
-            **base,
-        )
-
-    required_ratio = None
-    if required_bitrate is not None:
-        required_candidate = next(
-            (
-                candidate
-                for candidate in candidates
-                if candidate.video_bitrate_bps == required_bitrate
-                and candidate.min_vmaf >= item.options.min_vmaf
-            ),
-            None,
-        )
-        if required_candidate is not None:
-            required_ratio = _measured_prediction_ratio(required_candidate, budget.source_bytes)
-    cap_candidate = next(
-        (candidate for candidate in candidates if candidate.video_bitrate_bps == _floor_candidate(budget.max_video_bitrate_bps)),
-        None,
-    )
-    size_blocked = required_ratio is not None and required_ratio > (
-        budget.max_output_bytes / budget.source_bytes
-    )
-    return QualitySearchResult(
-        status=QualitySearchStatus.CONSTRAINT_UNSATISFIED,
-        candidates=candidates,
-        min_vmaf=cap_candidate.min_vmaf if cap_candidate else None,
-        required_output_ratio=required_ratio,
-        reason=(
-            (
-                f"VMAF {item.options.min_vmaf:.1f} requires an estimated output ratio of "
-                f"{required_ratio:.3f}, above the configured size limit."
+    candidates = _refresh_candidate_predictions(candidates, budget, item.media_info.duration)
+    if candidates:
+        try:
+            save_analysis_receipt(
+                workdir,
+                _analysis_receipt(ffmpeg_path, item, measurement_fingerprint, windows, candidates),
             )
-            if size_blocked
-            else f"Maximum allowed output cannot reach VMAF {item.options.min_vmaf:.1f}."
-            if required_ratio is not None
-            else f"The bound encoder cannot reach VMAF {item.options.min_vmaf:.1f} within the search ceiling."
-        ),
-        **base,
+        except (OSError, ValueError) as exc:
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "stage": "analysis",
+                        "state": "receipt_write_failed",
+                        "message": str(exc),
+                        "file_name": item.source_path.name,
+                        "file_path": str(item.source_path),
+                    }
+                )
+    return reselect_from_candidates(
+        candidates,
+        item,
+        measurement_fingerprint=measurement_fingerprint,
+        fingerprint=fingerprint,
     )
 
 

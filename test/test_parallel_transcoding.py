@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import contextlib
 import io
 import os
@@ -17,10 +16,8 @@ from PySide6.QtWidgets import QApplication
 
 from cli.cli_entry import _build_parser, _merge_options, _parse_parallel_backends, run_cli
 from core.models import (
-    AudioMode,
     BackendChoice,
     CodecChoice,
-    ContainerChoice,
     EncodeOptions,
     EncodePlan,
     EncodePlanItem,
@@ -335,7 +332,8 @@ class ParallelGuiTestCase(unittest.TestCase):
             window.close()
 
     def test_queue_table_prefers_runtime_assigned_encoder(self) -> None:
-        model = QueueTableModel(window_tr := MainWindow(self.repo_root, language="en").tr)
+        window = MainWindow(self.repo_root, language="en")
+        model = QueueTableModel(window.tr)
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_root = Path(temp_dir)
@@ -346,7 +344,7 @@ class ParallelGuiTestCase(unittest.TestCase):
                 index = model.index(0, int(QueueColumn.ENCODER))
                 self.assertEqual(model.data(index), "hevc_qsv (qsv)")
         finally:
-            pass
+            window.close()
 
 
 if __name__ == "__main__":

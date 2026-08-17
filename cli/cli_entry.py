@@ -5,6 +5,7 @@ import json
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import TypedDict
 
 from cli.cli_interactive import print_encode_results, print_plan, print_preview_result
 from core.app_paths import config_dir as app_config_dir
@@ -18,6 +19,7 @@ from core.models import (
     BackendChoice,
     CodecChoice,
     CompressionMode,
+    ConstraintPolicy,
     ContainerChoice,
     DecodeAcceleration,
     EncodeOptions,
@@ -37,7 +39,12 @@ from core.preset_store import (
 from core.preview_sample import build_preview_job
 
 
-def _bool_action_kwargs() -> dict[str, object]:
+class _BoolActionKwargs(TypedDict):
+    action: type[argparse.Action]
+    default: None
+
+
+def _bool_action_kwargs() -> _BoolActionKwargs:
     return {"action": argparse.BooleanOptionalAction, "default": None}
 
 
@@ -125,9 +132,6 @@ def _normalize_auto_backend_preset(options: EncodeOptions, args: argparse.Namesp
 
 def _options_from_args(args: argparse.Namespace, config_dir: Path) -> EncodeOptions:
     return _normalize_auto_backend_preset(_merge_options(_load_base_options(args, config_dir), args), args)
-
-
-
 def _add_runtime_flags(parser: argparse.ArgumentParser, include_input: bool = True) -> None:
     if include_input:
         parser.add_argument("input", help="Input file or directory")
@@ -278,6 +282,12 @@ def _build_parser() -> argparse.ArgumentParser:
     encode_parser = subparsers.add_parser("encode", help="Execute the encode plan")
     _add_runtime_flags(encode_parser)
     _add_encode_flags(encode_parser)
+    encode_parser.add_argument(
+        "--constraint-policy",
+        choices=[policy.value for policy in ConstraintPolicy],
+        default=ConstraintPolicy.FAIL.value,
+        help="How to handle Smart quality/size conflicts",
+    )
 
     preview_parser = subparsers.add_parser("preview", help="Run a manual preview sample")
     _add_runtime_flags(preview_parser)
@@ -365,10 +375,17 @@ def _run_encode(args: argparse.Namespace, config_dir: Path) -> int:
             plan,
             workdir,
             backends=options.parallel_backends,
+            constraint_policy=ConstraintPolicy(args.constraint_policy),
         )
     else:
-        results = execute_plan(plan, workdir)
+        results = execute_plan(
+            plan,
+            workdir,
+            constraint_policy=ConstraintPolicy(args.constraint_policy),
+        )
     print_encode_results(results, tr)
+    if any(result.needs_decision for result in results):
+        return 3
     return 0 if all(result.success or result.skipped for result in results) else 2
 
 

@@ -577,13 +577,17 @@ def stage_release_resources(
 
     config_source = root / "config"
     readme_source = root / "README.md"
+    license_source = root / "LICENSE"
     if not config_source.is_dir():
         raise FileNotFoundError(f"Required release resource is missing: {config_source}")
     if not readme_source.is_file():
         raise FileNotFoundError(f"Required release resource is missing: {readme_source}")
+    if not license_source.is_file():
+        raise FileNotFoundError(f"Required release resource is missing: {license_source}")
 
     shutil.copytree(config_source, resource_dir / "config", dirs_exist_ok=True)
     shutil.copy2(readme_source, resource_dir / "README.md")
+    shutil.copy2(license_source, resource_dir / "LICENSE")
     icon_source = root / "packaging" / "assets" / "app.svg"
     if not icon_source.is_file():
         raise FileNotFoundError(f"Required release resource is missing: {icon_source}")
@@ -745,7 +749,7 @@ def main(argv: list[str] | None = None) -> int:
         else None
     )
     try:
-        normalized_version = normalize_version(args.version)
+        normalize_version(args.version)
         paths = build_paths(
             name=args.name,
             output_dir=args.output_dir,

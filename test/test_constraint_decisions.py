@@ -1,0 +1,315 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+import os
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtWidgets import QApplication
+
+from core.analysis_receipts import (
+    ANALYSIS_RECEIPT_SCHEMA_VERSION,
+    analysis_receipt_path,
+    load_analysis_receipt,
+    save_analysis_receipt,
+)
+from core.models import (
+    AnalysisReceipt,
+    BackendChoice,
+    CodecChoice,
+    ConstraintFailureKind,
+    DecisionActionCode,
+    EncodeOptions,
+    EncodePlanItem,
+    EncodeResult,
+    EncoderInfo,
+    MediaInfo,
+    QualityCandidateResult,
+    QualitySearchStatus,
+    VmafCapabilities,
+)
+from core.smart_quality import (
+    apply_decision_to_options,
+    analyze_quality,
+    build_decision_options,
+    measurement_configuration_fingerprint,
+    quality_configuration_fingerprint,
+    reselect_from_candidates,
+)
+from core.i18n import get_translator
+from gui.queue_table import QueueTableModel
+from gui.queue_state import QueueItemRecord, QueueItemStatus, compute_metrics, mark_finished
+from gui.queue_state import QueueJobSnapshot
+
+
+def _item(root: Path) -> EncodePlanItem:
+    source = root / "source.mp4"
+    with source.open("wb") as fh:
+        fh.truncate(100_000_000)
+    options = EncodeOptions(
+        codec=CodecChoice.HEVC,
+        min_vmaf=95.0,
+        max_output_ratio=0.10,
+        min_video_kbps=250,
+    )
+    return EncodePlanItem(
+        source_path=source,
+        output_path=root / "output.mp4",
+        media_info=MediaInfo(
+            path=source,
+            duration=60.0,
+            format_bitrate_bps=4_000_000,
+            video_bitrate_bps=3_000_000,
+            audio_bitrate_bps=128_000,
+            width=1920,
+            height=1080,
+            fps=30.0,
+            video_codec="h264",
+            audio_codec="aac",
+            audio_stream_count=1,
+        ),
+        encoder_info=EncoderInfo(
+            codec=CodecChoice.HEVC,
+            backend=BackendChoice.CPU,
+            encoder_name="libx265",
+            supports_two_pass=True,
+            default_preset="slow",
+        ),
+        options=options,
+    )
+
+
+def _candidates() -> list[QualityCandidateResult]:
+    return [
+        QualityCandidateResult(video_bitrate_bps=1_000_000, min_vmaf=94.0),
+        QualityCandidateResult(video_bitrate_bps=1_500_000, min_vmaf=96.0),
+    ]
+
+
+class ConstraintDecisionTestCase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_size_blocked_result_exposes_concrete_local_choices(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            item = _item(Path(temp_dir))
+            result = reselect_from_candidates(_candidates(), item)
+
+            self.assertEqual(result.status, QualitySearchStatus.CONSTRAINT_UNSATISFIED)
+            self.assertEqual(result.failure_kind, ConstraintFailureKind.SIZE_BLOCKED)
+            self.assertEqual(result.selected_video_bitrate_bps, 1_500_000)
+            self.assertIsNotNone(result.predicted_output_bytes)
+            actions = {option.action_code: option for option in build_decision_options(result)}
+            self.assertIn(DecisionActionCode.RELAX_SIZE, actions)
+            self.assertIn(DecisionActionCode.RELAX_QUALITY, actions)
+            self.assertFalse(actions[DecisionActionCode.RELAX_SIZE].requires_analysis)
+
+            relaxed = replace(item, options=apply_decision_to_options(item.options, actions[DecisionActionCode.RELAX_SIZE]))
+            reselected = reselect_from_candidates(result.candidates, relaxed)
+            self.assertEqual(reselected.status, QualitySearchStatus.FOUND)
+            self.assertEqual(reselected.selected_video_bitrate_bps, 1_500_000)
+
+    def test_policy_changes_do_not_invalidate_measurements(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"ffmpeg")
+            item = _item(root)
+            measurement = measurement_configuration_fingerprint(ffmpeg, item)
+            decision = quality_configuration_fingerprint(ffmpeg, item)
+
+            item.options.min_vmaf = 92.0
+            item.options.max_output_ratio = 0.20
+
+            self.assertEqual(measurement_configuration_fingerprint(ffmpeg, item), measurement)
+            self.assertNotEqual(quality_configuration_fingerprint(ffmpeg, item), decision)
+
+    def test_needs_decision_is_not_counted_as_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _item(root)
+            record = QueueItemRecord(
+                item_id="one",
+                plan_item=item,
+                job_snapshot=QueueJobSnapshot(root, root / "ffmpeg", root / "ffprobe", root),
+                status=QueueItemStatus.ANALYZING,
+                total_passes=1,
+            )
+            result = EncodeResult(
+                source_path=item.source_path,
+                output_path=item.output_path,
+                success=False,
+                needs_decision=True,
+                quality_search_result=reselect_from_candidates(_candidates(), item),
+            )
+            mark_finished(record, result)
+            metrics = compute_metrics([record])
+
+            self.assertEqual(record.status, QueueItemStatus.NEEDS_DECISION)
+            self.assertEqual(metrics.needs_decision_items, 1)
+            self.assertEqual(metrics.completed_items, 0)
+            self.assertLess(metrics.queue_percent, 100.0)
+
+    def test_queue_applies_a_local_quality_decision_without_reanalysis(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"ffmpeg")
+            item = _item(root)
+            quality = reselect_from_candidates(
+                _candidates(),
+                item,
+                measurement_fingerprint=measurement_configuration_fingerprint(ffmpeg, item),
+                fingerprint=quality_configuration_fingerprint(ffmpeg, item),
+            )
+            item.quality_search_result = quality
+            record = QueueItemRecord(
+                item_id="one",
+                plan_item=item,
+                job_snapshot=QueueJobSnapshot(root, ffmpeg, root / "ffprobe", root),
+                status=QueueItemStatus.ANALYZING,
+                total_passes=1,
+            )
+            mark_finished(
+                record,
+                EncodeResult(
+                    source_path=item.source_path,
+                    output_path=item.output_path,
+                    success=False,
+                    needs_decision=True,
+                    quality_search_result=quality,
+                ),
+            )
+            model = QueueTableModel(get_translator("en", Path(__file__).resolve().parent.parent / "config"))
+            model.add_records([record])
+            relax_size = next(
+                option
+                for option in model.decision_options_for_row(0)
+                if option.action_code == DecisionActionCode.RELAX_SIZE
+            )
+
+            self.assertTrue(model.apply_quality_decision(0, relax_size))
+            self.assertEqual(record.status, QueueItemStatus.WAITING_ANALYSIS)
+            self.assertEqual(record.plan_item.quality_search_result.status, QualitySearchStatus.FOUND)
+
+    def test_queue_can_accept_a_preserved_size_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _item(root)
+            item.source_path.with_suffix(".srt").write_text("subtitle", encoding="utf-8")
+            item.output_path.write_bytes(b"old")
+            rejected = root / "output.size-miss-abcd.mp4"
+            rejected.write_bytes(b"new")
+            result = EncodeResult(
+                source_path=item.source_path,
+                output_path=item.output_path,
+                success=False,
+                needs_decision=True,
+                rejected_output_path=rejected,
+                actual_output_bytes=800,
+                allowed_output_bytes=700,
+            )
+            record = QueueItemRecord(
+                item_id="one",
+                plan_item=item,
+                job_snapshot=QueueJobSnapshot(root, root / "ffmpeg", root / "ffprobe", root),
+                status=QueueItemStatus.NEEDS_DECISION,
+                total_passes=1,
+                result=result,
+            )
+            model = QueueTableModel(get_translator("en", Path(__file__).resolve().parent.parent / "config"))
+            model.add_records([record])
+
+            self.assertTrue(model.accept_size_miss(0))
+            self.assertEqual(item.output_path.read_bytes(), b"new")
+            self.assertFalse(rejected.exists())
+            self.assertEqual(record.status, QueueItemStatus.DONE)
+            self.assertEqual(item.output_path.with_suffix(".srt").read_text(encoding="utf-8"), "subtitle")
+
+
+class AnalysisReceiptTestCase(unittest.TestCase):
+    def test_receipt_round_trips_and_corruption_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fingerprint = "a" * 64
+            receipt = AnalysisReceipt(
+                schema_version=ANALYSIS_RECEIPT_SCHEMA_VERSION,
+                measurement_fingerprint=fingerprint,
+                source_identity={"path": "source.mp4", "size": 10, "mtime_ns": 20},
+                ffmpeg_identity={"path": "ffmpeg", "size": 30, "mtime_ns": 40},
+                encoder_identity={"encoder": "libx265", "backend": "cpu"},
+                sample_scheme_version=1,
+                sample_windows=[(10.0, 5.0)],
+                candidates=_candidates(),
+                created_at="2026-08-17T00:00:00+00:00",
+            )
+            path = save_analysis_receipt(root, receipt)
+            loaded = load_analysis_receipt(root, fingerprint)
+
+            self.assertEqual(path, analysis_receipt_path(root, fingerprint))
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.candidates[1].min_vmaf, 96.0)
+
+            path.write_text("{not-json", encoding="utf-8")
+            self.assertIsNone(load_analysis_receipt(root, fingerprint))
+
+    def test_receipt_path_rejects_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(ValueError):
+                analysis_receipt_path(Path(temp_dir), "../outside")
+
+    def test_analyze_quality_reuses_receipt_after_policy_only_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"ffmpeg")
+            item = _item(root)
+
+            def score(_ffmpeg, _item, _references, bitrate, *_args, **_kwargs):
+                return QualityCandidateResult(
+                    video_bitrate_bps=bitrate,
+                    min_vmaf=96.0 if bitrate >= 800_000 else 92.0,
+                    observed_video_bitrate_bps=bitrate,
+                )
+
+            with (
+                patch(
+                    "core.smart_quality.detect_vmaf_capabilities",
+                    return_value=VmafCapabilities(True, True, True),
+                ),
+                patch("core.smart_quality._run_logged"),
+                patch("core.smart_quality._score_candidate", side_effect=score) as first_score,
+            ):
+                first = analyze_quality(ffmpeg, item, root, root / "analysis.log")
+
+            self.assertEqual(first.status, QualitySearchStatus.FOUND)
+            self.assertGreater(first_score.call_count, 0)
+            receipt = load_analysis_receipt(root, first.measurement_fingerprint)
+            self.assertIsNotNone(receipt)
+
+            changed_policy = replace(
+                item,
+                options=replace(item.options, min_vmaf=93.0),
+                quality_search_result=None,
+            )
+            with (
+                patch("core.smart_quality.detect_vmaf_capabilities") as detect,
+                patch("core.smart_quality._score_candidate") as second_score,
+            ):
+                second = analyze_quality(ffmpeg, changed_policy, root, root / "analysis-2.log")
+
+            self.assertEqual(second.status, QualitySearchStatus.FOUND)
+            self.assertEqual(second.measurement_fingerprint, first.measurement_fingerprint)
+            self.assertNotEqual(second.fingerprint, first.fingerprint)
+            detect.assert_not_called()
+            second_score.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

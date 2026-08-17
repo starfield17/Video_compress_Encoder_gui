@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 from enum import IntEnum
-from pathlib import Path
 
 from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QHeaderView, QStyle, QTableView
 
+from core.analysis_receipts import delete_analysis_receipt
 from core.bitrate_policy import human_kbps
+from core.constraint_resolution import (
+    accept_rejected_output,
+    discard_rejected_output,
+    prepare_size_miss_retry,
+    reselect_after_quality_decision,
+)
 from core.i18n import Translator
+from core.models import DecisionActionCode, DecisionOption, QualitySearchStatus
+from core.smart_quality import build_decision_options
 from gui.queue_state import (
     ACTIVE_ITEM_STATUSES,
     QueueItemRecord,
@@ -421,6 +429,7 @@ class QueueTableModel(QAbstractTableModel):
                 QueueItemStatus.VALIDATING: QColor("#134F5C"),
                 QueueItemStatus.DONE: QColor("#38761D"),
                 QueueItemStatus.FAILED: QColor("#A61C00"),
+                QueueItemStatus.NEEDS_DECISION: QColor("#B45F06"),
                 QueueItemStatus.CANCELLED: QColor("#7F6000"),
                 QueueItemStatus.SKIPPED: QColor("#666666"),
                 QueueItemStatus.PAUSED: QColor("#7F6000"),
@@ -436,6 +445,8 @@ class QueueTableModel(QAbstractTableModel):
                 return style.standardIcon(QStyle.SP_DialogApplyButton)
             if record.status == QueueItemStatus.FAILED:
                 return style.standardIcon(QStyle.SP_MessageBoxCritical)
+            if record.status == QueueItemStatus.NEEDS_DECISION:
+                return style.standardIcon(QStyle.SP_MessageBoxWarning)
             if record.status == QueueItemStatus.CANCELLED:
                 return style.standardIcon(QStyle.SP_DialogCancelButton)
             if record.status == QueueItemStatus.SKIPPED:
@@ -563,6 +574,128 @@ class QueueTableModel(QAbstractTableModel):
         self._emit_rows_changed(changed_rows)
         return retried
 
+    def decision_options_for_row(self, row: int) -> list[DecisionOption]:
+        record = self.record_for_row(row)
+        if record is None or record.status != QueueItemStatus.NEEDS_DECISION:
+            return []
+        result = record.result
+        if result is None or result.rejected_output_path is not None:
+            return []
+        quality = record.plan_item.quality_search_result
+        return build_decision_options(quality) if quality is not None else []
+
+    def apply_quality_decision(self, row: int, decision: DecisionOption) -> bool:
+        record = self.record_for_row(row)
+        if record is None or record.status != QueueItemStatus.NEEDS_DECISION:
+            return False
+        quality = record.plan_item.quality_search_result
+        if quality is None:
+            return False
+        if decision.action_code == DecisionActionCode.SKIP:
+            if record.result is not None:
+                record.result.needs_decision = False
+                record.result.skipped = True
+            record.status = QueueItemStatus.SKIPPED
+            record.error_summary = quality.reason
+            self._emit_rows_changed([row])
+            return True
+        if decision.action_code == DecisionActionCode.REANALYZE:
+            try:
+                if quality.measurement_fingerprint:
+                    delete_analysis_receipt(record.job_snapshot.workdir, quality.measurement_fingerprint)
+            except (OSError, ValueError) as exc:
+                record.error_summary = short_error(str(exc))
+                self._emit_rows_changed([row])
+                return False
+            record.plan_item.quality_search_result = None
+            reset_for_retry(record)
+            self._emit_rows_changed([row])
+            return True
+
+        reselected = reselect_after_quality_decision(
+            record.job_snapshot.ffmpeg_path,
+            record.plan_item,
+            quality,
+            decision,
+        )
+        record.plan_item.quality_search_result = reselected
+        if reselected.status == QualitySearchStatus.FOUND:
+            record.plan_item.target_video_bitrate_bps = reselected.selected_video_bitrate_bps
+            reset_for_retry(record)
+        elif decision.requires_analysis:
+            reselected.fingerprint = ""
+            reset_for_retry(record)
+        else:
+            if record.result is not None:
+                record.result.quality_search_result = reselected
+                record.result.error_message = reselected.reason
+            record.error_summary = reselected.reason
+        self._emit_rows_changed([row])
+        return True
+
+    def accept_size_miss(self, row: int) -> bool:
+        record = self.record_for_row(row)
+        result = record.result if record is not None else None
+        if (
+            record is None
+            or record.status != QueueItemStatus.NEEDS_DECISION
+            or result is None
+            or result.rejected_output_path is None
+        ):
+            return False
+        try:
+            accept_rejected_output(record.plan_item, result)
+        except (OSError, ValueError) as exc:
+            record.error_summary = short_error(str(exc))
+            self._emit_rows_changed([row])
+            return False
+        record.status = QueueItemStatus.DONE
+        record.file_progress = 100.0
+        record.error_summary = None
+        self._emit_rows_changed([row])
+        return True
+
+    def discard_size_miss(self, row: int) -> bool:
+        record = self.record_for_row(row)
+        result = record.result if record is not None else None
+        if (
+            record is None
+            or record.status != QueueItemStatus.NEEDS_DECISION
+            or result is None
+            or result.rejected_output_path is None
+        ):
+            return False
+        try:
+            discard_rejected_output(record.plan_item, result)
+        except (OSError, ValueError) as exc:
+            record.error_summary = short_error(str(exc))
+            self._emit_rows_changed([row])
+            return False
+        record.status = QueueItemStatus.SKIPPED
+        record.error_summary = result.error_message
+        self._emit_rows_changed([row])
+        return True
+
+    def retry_size_miss(self, row: int) -> bool:
+        record = self.record_for_row(row)
+        result = record.result if record is not None else None
+        if (
+            record is None
+            or record.status != QueueItemStatus.NEEDS_DECISION
+            or result is None
+            or result.rejected_output_path is None
+        ):
+            return False
+        try:
+            prepare_size_miss_retry(record.plan_item, result)
+        except ValueError as exc:
+            record.error_summary = short_error(str(exc))
+            self._emit_rows_changed([row])
+            return False
+        reset_for_retry(record)
+        self._emit_rows_changed([row])
+        return True
+
     def prepare_for_execution(self, item_ids: list[str]) -> None:
         changed_rows: list[int] = []
         for item_id in item_ids:
@@ -626,6 +759,8 @@ class QueueTableModel(QAbstractTableModel):
             record.status = QueueItemStatus.ENCODING
         elif state == "validating":
             record.status = QueueItemStatus.VALIDATING
+        elif state == "needs_decision":
+            record.status = QueueItemStatus.NEEDS_DECISION
         candidate_index = event.get("candidate_index")
         if isinstance(candidate_index, int):
             record.analysis_candidate_index = candidate_index
@@ -691,6 +826,10 @@ class QueueTableModel(QAbstractTableModel):
             and self.record_for_row(row).status in {QueueItemStatus.FAILED, QueueItemStatus.CANCELLED}
             for row in rows
         )
+
+    def can_resolve_row(self, row: int) -> bool:
+        record = self.record_for_row(row)
+        return record is not None and record.status == QueueItemStatus.NEEDS_DECISION
 
     def _emit_rows_changed(self, rows: list[int]) -> None:
         clean_rows = sorted({row for row in rows if 0 <= row < len(self._records)})

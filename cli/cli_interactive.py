@@ -3,6 +3,7 @@ from __future__ import annotations
 from core.bitrate_policy import human_kbps
 from core.i18n import Translator
 from core.models import CompressionMode, EncodePlan, EncodeResult, PreviewResult, SmartPreviewResult
+from core.smart_quality import build_decision_options
 
 
 def _human_size(size_bytes: int) -> str:
@@ -25,6 +26,8 @@ def print_plan(plan: EncodePlan, tr: Translator) -> None:
 
         media = item.media_info
         encoder = item.encoder_info
+        if media is None or encoder is None:
+            raise ValueError(f"Planned item is missing media or encoder information: {item.source_path}")
         fps = f"{media.fps:.3f}" if media and media.fps else "n/a"
         wh = f"{media.width}x{media.height}" if media and media.width and media.height else "n/a"
         print(f"[{tr.t('cli.plan_ready')}] {item.source_path}")
@@ -48,7 +51,16 @@ def print_plan(plan: EncodePlan, tr: Translator) -> None:
 
 def print_encode_results(results: list[EncodeResult], tr: Translator) -> None:
     for result in results:
-        if result.skipped:
+        if result.needs_decision:
+            print(f"[{tr.t('cli.result_needs_decision')}] {result.source_path}")
+            print(f"  {tr.t('cli.reason')}: {result.error_message}")
+            if result.rejected_output_path is not None:
+                print(f"  {tr.t('cli.rejected_output')}: {result.rejected_output_path}")
+            elif result.quality_search_result is not None:
+                for option in build_decision_options(result.quality_search_result):
+                    suffix = f"={option.suggested_value}" if option.suggested_value is not None else ""
+                    print(f"  {tr.t('cli.available_decision')}: {option.action_code.value}{suffix}")
+        elif result.skipped:
             print(f"[{tr.t('cli.result_skipped')}] {result.source_path}")
             print(f"  {tr.t('cli.reason')}: {result.error_message}")
         elif result.success:

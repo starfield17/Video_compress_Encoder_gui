@@ -246,7 +246,8 @@ class QueueManager(QObject):
 
     def _on_worker_queue_finished(self) -> None:
         self.busyChanged.emit(False)
-        self.stateChanged.emit("idle")
+        state = "awaiting_decision" if self.model.metrics().needs_decision_items else "idle"
+        self.stateChanged.emit(state)
 
     def _on_worker_thread_finished(self) -> None:
         self._worker = None

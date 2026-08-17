@@ -241,6 +241,7 @@ class NuitkaStagingTestCase(unittest.TestCase):
         (root / "config" / "i18n").mkdir(parents=True)
         (root / "config" / "i18n" / "en.json").write_text("{}", encoding="utf-8")
         (root / "README.md").write_text("README", encoding="utf-8")
+        (root / "LICENSE").write_text("MIT License\n", encoding="utf-8")
         assets = root / "packaging" / "assets"
         assets.mkdir(parents=True)
         (assets / "app.svg").write_text("<svg/>", encoding="utf-8")
@@ -257,6 +258,7 @@ class NuitkaStagingTestCase(unittest.TestCase):
 
             self.assertEqual((package_dir / "config" / "i18n" / "en.json").read_text(encoding="utf-8"), "{}")
             self.assertEqual((package_dir / "README.md").read_text(encoding="utf-8"), "README")
+            self.assertEqual((package_dir / "LICENSE").read_text(encoding="utf-8"), "MIT License\n")
             self.assertTrue((package_dir / "assets" / "app.svg").is_file())
             self.assertFalse((package_dir / "workdir").exists())
 
@@ -373,6 +375,7 @@ class NuitkaStagingTestCase(unittest.TestCase):
                 (app_dir / "Contents" / "Resources" / "config" / "i18n" / "en.json").is_file()
             )
             self.assertTrue((app_dir / "Contents" / "Resources" / "README.md").is_file())
+            self.assertTrue((app_dir / "Contents" / "Resources" / "LICENSE").is_file())
             self.assertFalse((app_dir / "Contents" / "MacOS" / "config").exists())
 
 

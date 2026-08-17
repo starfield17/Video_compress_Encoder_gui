@@ -149,6 +149,10 @@ class EncodeResult:
     log_path: Optional[Path] = None
     error_message: Optional[str] = None
     skipped: bool = False
+    needs_decision: bool = False
+    rejected_output_path: Optional[Path] = None
+    actual_output_bytes: Optional[int] = None
+    allowed_output_bytes: Optional[int] = None
     copied_external_subtitle_paths: list[Path] = field(default_factory=list)
     external_subtitle_warnings: list[str] = field(default_factory=list)
     quality_search_result: Optional["QualitySearchResult"] = None
@@ -192,6 +196,26 @@ class QualitySearchStatus(str, Enum):
     FAILED = "failed"
 
 
+class ConstraintFailureKind(str, Enum):
+    SIZE_BLOCKED = "size_blocked"
+    QUALITY_UNREACHABLE = "quality_unreachable"
+    MEDIA_BUDGET_TOO_SMALL = "media_budget_too_small"
+
+
+class ConstraintPolicy(str, Enum):
+    FAIL = "fail"
+    RELAX_SIZE = "relax_size"
+    RELAX_QUALITY = "relax_quality"
+
+
+class DecisionActionCode(str, Enum):
+    RELAX_SIZE = "relax_size"
+    RELAX_QUALITY = "relax_quality"
+    CHANGE_MEDIA_BUDGET = "change_media_budget"
+    REANALYZE = "reanalyze"
+    SKIP = "skip"
+
+
 @dataclass(slots=True)
 class VmafCapabilities:
     filter_available: bool
@@ -227,13 +251,39 @@ class QualitySearchResult:
     predicted_output_bytes: Optional[int] = None
     predicted_output_ratio: Optional[float] = None
     required_output_ratio: Optional[float] = None
+    required_video_bitrate_bps: int = 0
+    best_size_fitting_candidate_bps: int = 0
+    best_size_fitting_vmaf: Optional[float] = None
     max_output_bytes: Optional[int] = None
+    failure_kind: Optional[ConstraintFailureKind] = None
+    measurement_fingerprint: str = ""
     fingerprint: str = ""
     reason: Optional[str] = None
 
     @property
     def success(self) -> bool:
         return self.status == QualitySearchStatus.FOUND
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionOption:
+    action_code: DecisionActionCode
+    suggested_value: Optional[float | str] = None
+    requires_analysis: bool = False
+    parameters: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class AnalysisReceipt:
+    schema_version: int
+    measurement_fingerprint: str
+    source_identity: dict[str, object]
+    ffmpeg_identity: dict[str, object]
+    encoder_identity: dict[str, object]
+    sample_scheme_version: int
+    sample_windows: list[tuple[float, float]]
+    candidates: list[QualityCandidateResult] = field(default_factory=list)
+    created_at: str = ""
 
 
 @dataclass(slots=True)

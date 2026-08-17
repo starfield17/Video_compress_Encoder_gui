@@ -19,7 +19,6 @@ from core.encoder_caps import default_preset_for_encoder, is_valid_preset, prese
 from core.models import (
     BackendChoice,
     CodecChoice,
-    ContainerChoice,
     EncodeOptions,
     EncodePlanItem,
     EncoderInfo,

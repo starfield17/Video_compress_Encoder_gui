@@ -47,6 +47,7 @@ class QueueWindow(QMainWindow):
             ready=metrics.ready_items,
             running=metrics.running_items,
             failed=metrics.failed_items,
+            decision=metrics.needs_decision_items,
         )
         total_duration = format_duration(metrics.total_duration_sec)
         self.summary_label.setText(

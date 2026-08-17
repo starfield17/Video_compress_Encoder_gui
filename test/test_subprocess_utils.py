@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import subprocess
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from core.exec_encode import _start_command_process

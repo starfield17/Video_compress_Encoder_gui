@@ -58,12 +58,23 @@ python main.py --cli preview input.mp4 \
 Smart mode requires an FFmpeg build whose `libvmaf` filter and required model
 can actually run. It analyzes one full clip for videos up to 30 seconds, or
 three 10-second windows for longer videos. If quality and final-size
-constraints cannot both be met, that file is skipped without creating an
-output. Candidate sizes are estimated from the largest measured encoded sample
+constraints cannot both be met, the item stops in a **Needs decision** state.
+The GUI can accept the measured size requirement, lower the VMAF floor to a
+tested value, change the media budget, or skip the file. The CLI is strict by
+default and exits with code `3`; automation can opt into
+`--constraint-policy relax_size` or `--constraint-policy relax_quality`.
+Candidate sizes are estimated from the largest measured encoded sample
 bitrate (including the existing container safety factor) plus the audio
 budget; the requested video bitrate is not treated as an observed size. Full
 smart encodes are written to a temporary file beside the target and are
-published only after the actual size passes validation.
+published only after the actual size passes validation. A complete encode that
+misses the limit is preserved beside the target as `*.size-miss-<id>.*` for an
+explicit accept, corrected-bitrate retry, or delete decision.
+
+Smart candidate measurements are cached as versioned JSON receipts under
+`workdir/analysis/receipts/`. Changing only VMAF, size, audio, or bitrate policy
+re-evaluates those measurements locally; changing the source, FFmpeg binary,
+encoder, measurement settings, or sample scheme creates a different receipt.
 
 Use the legacy fixed bitrate policy explicitly when VMAF is unavailable:
 
@@ -146,7 +157,7 @@ python main.py --gui --lang zh_cn
 
 The GUI now includes:
 
-- a project-specific film-and-quality-pulse application icon
+- a project-specific light video-file application icon
 - explicit source file and source directory pickers
 - editable output, workdir, ffmpeg, and ffprobe paths
 - preset load/save/delete controls
@@ -287,7 +298,7 @@ Packaging uses Nuitka standalone directory mode. Builds run natively on each
 target platform; this is multi-platform release automation, not single-host
 cross-compilation.
 
-The package includes `config/`, the runtime SVG icon, and `README.md`.
+The package includes `config/`, the runtime SVG icon, `README.md`, and `LICENSE`.
 `workdir/` is created at runtime and is not bundled. Local builds bundle a
 complete compatible pair from `--ffmpeg-dir` or `FFmpeg/` when available.
 Tagged releases require and verify the pinned native FFmpeg/FFprobe pair.
@@ -335,3 +346,9 @@ and choosing **Open**. Linux ARM64 requires a sufficiently recent glibc
 distribution. Windows ARM64 is a native ARM package rather than an x86
 executable relying on emulation. Every tagged package includes FFmpeg 8.1.2
 and FFprobe for its exact operating system and CPU architecture.
+
+## License
+
+Video Compressor is released under the [MIT License](LICENSE). Bundled FFmpeg
+artifacts keep their own license and source/build provenance alongside the
+binary distribution.
