@@ -39,14 +39,19 @@ temporary_root="${TMPDIR:-$project_root/workdir/tmp}"
 mkdir -p "$temporary_root"
 temporary_dir="$(mktemp -d "$temporary_root/video-compressor-dmg.XXXXXXXX")"
 temporary_path="$temporary_dir/image.dmg"
+staging_dir="$temporary_dir/root"
 cleanup() {
     rm -rf "$temporary_dir"
 }
 trap cleanup EXIT
 
+mkdir "$staging_dir"
+/usr/bin/ditto "$source_path" "$staging_dir/$(basename "$source_path")"
+/bin/ln -s /Applications "$staging_dir/Applications"
+
 /usr/bin/hdiutil create \
     -volname "$(basename "$source_path" .app)" \
-    -srcfolder "$source_path" \
+    -srcfolder "$staging_dir" \
     -ov \
     -format UDZO \
     "$temporary_path"

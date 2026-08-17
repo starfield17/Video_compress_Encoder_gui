@@ -613,18 +613,12 @@ def refresh_macos_dmg(app_bundle: Path, dmg_path: Path) -> None:
     """Repack the staged app so wrapper-added resources are present in the DMG."""
     dmg_path = dmg_path.resolve()
     dmg_path.parent.mkdir(parents=True, exist_ok=True)
+    create_dmg = Path(__file__).resolve().with_name("create-dmg")
     subprocess.run(
         [
-            "hdiutil",
-            "create",
-            "-volname",
-            MACOS_APP_NAME,
-            "-srcfolder",
-            str(app_bundle),
-            "-ov",
-            "-format",
-            "UDZO",
+            str(create_dmg),
             str(dmg_path),
+            str(app_bundle),
         ],
         check=True,
         cwd=app_bundle.parent,

@@ -17,6 +17,7 @@ from scripts.build_nuitka import (
     normalize_version,
     normalized_machine,
     patch_nuitka_windows_arm64_clang_probe,
+    refresh_macos_dmg,
     resolve_macos_target_arch,
     resolve_windows_compiler,
     stage_release_resources,
@@ -391,6 +392,26 @@ class NuitkaStagingTestCase(unittest.TestCase):
 
 
 class NuitkaOutputDiscoveryTestCase(unittest.TestCase):
+    def test_refresh_macos_dmg_uses_repository_layout_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            app = root / "dist" / "Video Compressor.app"
+            app.mkdir(parents=True)
+            dmg = root / "dist" / "video-compressor.dmg"
+
+            with patch("scripts.build_nuitka.subprocess.run") as run:
+                refresh_macos_dmg(app, dmg)
+
+            run.assert_called_once_with(
+                [
+                    str(Path(__file__).resolve().parent.parent / "scripts" / "create-dmg"),
+                    str(dmg),
+                    str(app),
+                ],
+                check=True,
+                cwd=app.parent,
+            )
+
     def test_app_and_dmg_discovery_requires_exactly_one_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             build_dir = Path(temp_dir) / "build"

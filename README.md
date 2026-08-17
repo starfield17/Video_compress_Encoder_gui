@@ -281,6 +281,9 @@ dist/Video Compressor.app/
 dist/video-compressor.dmg
 ```
 
+The DMG presents `Video Compressor.app` beside an `Applications` shortcut so
+the app can be installed with the standard drag-to-Applications gesture.
+
 The app's read-only resources are under `Contents/Resources`. Configuration,
 logs, previews, and temporary files are written to
 `~/Library/Application Support/Video Compressor`, outside the app bundle.

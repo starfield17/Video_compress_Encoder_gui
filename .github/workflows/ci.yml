@@ -302,6 +302,16 @@ jobs:
 
           test -f "$dmg"
           hdiutil verify "$dmg"
+          mount_dir="$(mktemp -d)"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir"
+          trap 'hdiutil detach "$mount_dir"' EXIT
+          test -d "$mount_dir/Video Compressor.app"
+          test -L "$mount_dir/Applications"
+          test "$(readlink "$mount_dir/Applications")" = "/Applications"
+          codesign --verify --deep --strict "$mount_dir/Video Compressor.app"
+          hdiutil detach "$mount_dir"
+          trap - EXIT
+          rmdir "$mount_dir"
 
       - name: Upload Nuitka compilation report
         if: always()
