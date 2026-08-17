@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -41,6 +43,16 @@ def _pe_binary(machine: int) -> bytes:
 
 
 class FFmpegManifestTestCase(unittest.TestCase):
+    def test_script_entrypoint_imports_from_an_isolated_interpreter(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-I", str(ROOT / "scripts" / "prepare_ffmpeg.py"), "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_manifest_pins_all_release_targets(self) -> None:
         manifest = load_manifest(ROOT / "packaging" / "ffmpeg" / "manifest.json")
         self.assertEqual(manifest["ffmpeg_version"], "8.1.2")

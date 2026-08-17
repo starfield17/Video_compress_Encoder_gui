@@ -15,7 +15,11 @@ import zipfile
 from pathlib import Path
 from typing import BinaryIO
 
-from core.analysis_runtime import detect_analysis_capabilities, format_analysis_capability_report
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from core.analysis_runtime import detect_analysis_capabilities, format_analysis_capability_report  # noqa: E402
 
 
 USER_AGENT = "Video-compressor-release-ci/1.0"
@@ -252,7 +256,10 @@ def verify_capabilities(ffmpeg_path: Path, ffprobe_path: Path) -> None:
             ]
         )
 
-    print(format_analysis_capability_report(detect_analysis_capabilities(ffmpeg_path)))
+    try:
+        print(format_analysis_capability_report(detect_analysis_capabilities(ffmpeg_path)))
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"Optional analysis capability report skipped: {exc}")
 
 
 def _host_matches(target: dict[str, object]) -> bool:
