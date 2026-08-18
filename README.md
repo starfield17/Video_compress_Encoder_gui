@@ -175,7 +175,27 @@ The GUI now includes:
 - plan summary, preview summary, and encode result summary panels
 - a detailed plan/result table with resolution, duration, bitrate, note, and status columns
 - smart-analysis stages, selected bitrate, lowest sampled-window mean VMAF, and predicted size
-- English and Simplified Chinese language switching
+- language switching across English, Simplified Chinese, and any user-provided language packs
+
+### Translations / language packs
+
+- Built-in language packs live in the read-only `config/i18n/` directory and are shipped
+  with the app. English is the complete baseline; every built-in pack covers the same keys.
+- Explicit user language packs go in the writable runtime `translations/` directory. In a
+  source checkout that is `<repo>/translations/`; in the macOS app it is
+  `~/Library/Application Support/Video Compressor/translations/`. The file name stem is
+  the locale, e.g. `de.json` for German.
+- A pack is a flat JSON object of translation keys and must include a `language.name`
+  value, which is the display name shown in Settings. Unknown keys, non-string values,
+  and entries whose placeholders do not match English are skipped individually; a
+  corrupt file or one without a valid `language.name` is skipped entirely. Skipped
+  entries are reported as startup diagnostics (CLI: stderr; GUI: Activity Log).
+- Overrides are partial: keys you do not provide fall back to the English baseline, so
+  a new language only needs the keys you actually translate.
+- The CLI `--lang` accepts any discovered locale, and the GUI Settings language list is
+  populated from the same catalog.
+- Files left behind in the writable `config/i18n/` by older versions are preserved but
+  no longer used.
 
 ## Notes
 

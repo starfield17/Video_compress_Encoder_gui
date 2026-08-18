@@ -8,12 +8,13 @@ from pathlib import Path
 from typing import TypedDict
 
 from cli.cli_interactive import print_encode_results, print_plan, print_preview_result
+from core.app_paths import app_root
 from core.app_paths import config_dir as app_config_dir
 from core.app_paths import ensure_runtime_layout, workdir_dir
 from core.discover_ffmpeg import discover_ffmpeg_tools
 from core.encoder_caps import list_available_encoders, preset_choices_for_encoder, resolve_encoder
 from core.exec_encode import execute_plan, execute_preview, execute_smart_preview
-from core.i18n import get_translator
+from core.i18n import TranslationCatalog
 from core.analysis_profiles import bind_analysis_profile, parse_analysis_profile_name
 from core.models import (
     AnalysisProfileName,
@@ -170,7 +171,22 @@ def _options_from_args(args: argparse.Namespace, config_dir: Path) -> EncodeOpti
     return _apply_analysis_profile(options, args, config_dir)
 
 
-def _add_runtime_flags(parser: argparse.ArgumentParser, include_input: bool = True) -> None:
+def _default_catalog() -> TranslationCatalog:
+    return TranslationCatalog(
+        bundle_dir=app_config_dir() / "i18n",
+        translations_dir=app_root() / "translations",
+    )
+
+
+def _lang_choices(catalog: TranslationCatalog) -> list[str]:
+    return [info.code for info in catalog.languages()]
+
+
+def _add_runtime_flags(
+    parser: argparse.ArgumentParser,
+    catalog: TranslationCatalog,
+    include_input: bool = True,
+) -> None:
     if include_input:
         parser.add_argument("input", help="Input file or directory")
     parser.add_argument("-o", "--output", help="Output directory")
@@ -178,7 +194,7 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, include_input: bool = Tr
     parser.add_argument("--ffmpeg", help="Path to ffmpeg")
     parser.add_argument("--ffprobe", help="Path to ffprobe")
     parser.add_argument("--preset", help="Saved preset name")
-    parser.add_argument("--lang", choices=["en", "zh_cn"], help="Language pack to load")
+    parser.add_argument("--lang", choices=_lang_choices(catalog), help="Language pack to load")
     parser.add_argument("--recursive", **_bool_action_kwargs(), help="Recursively scan subdirectories")
 
 
@@ -320,16 +336,18 @@ def _validate_encoder_preset(options: EncodeOptions, args: argparse.Namespace) -
         raise ValueError(_invalid_preset_message(preset, encoder_info.encoder_name, choices))
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _build_parser(catalog: TranslationCatalog | None = None) -> argparse.ArgumentParser:
+    if catalog is None:
+        catalog = _default_catalog()
     parser = argparse.ArgumentParser(description="Video compressor CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     plan_parser = subparsers.add_parser("plan", help="Preview the encode plan")
-    _add_runtime_flags(plan_parser)
+    _add_runtime_flags(plan_parser, catalog)
     _add_encode_flags(plan_parser)
 
     encode_parser = subparsers.add_parser("encode", help="Execute the encode plan")
-    _add_runtime_flags(encode_parser)
+    _add_runtime_flags(encode_parser, catalog)
     _add_encode_flags(encode_parser)
     encode_parser.add_argument(
         "--size-blocked-policy",
@@ -356,7 +374,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     preview_parser = subparsers.add_parser("preview", help="Run a manual preview sample")
-    _add_runtime_flags(preview_parser)
+    _add_runtime_flags(preview_parser, catalog)
     _add_encode_flags(preview_parser)
     preview_parser.add_argument("--sample-mode", choices=["middle", "custom"], default="middle")
     preview_parser.add_argument("--sample-duration", dest="sample_duration_sec", type=float, default=30.0)
@@ -366,29 +384,33 @@ def _build_parser() -> argparse.ArgumentParser:
     preset_sub = preset_parser.add_subparsers(dest="preset_command", required=True)
 
     preset_list = preset_sub.add_parser("list", help="List available presets")
-    preset_list.add_argument("--lang", choices=["en", "zh_cn"], help="Language pack to load")
+    preset_list.add_argument("--lang", choices=_lang_choices(catalog), help="Language pack to load")
 
     preset_load = preset_sub.add_parser("load", help="Print a preset")
     preset_load.add_argument("name")
-    preset_load.add_argument("--lang", choices=["en", "zh_cn"], help="Language pack to load")
+    preset_load.add_argument("--lang", choices=_lang_choices(catalog), help="Language pack to load")
 
     preset_delete = preset_sub.add_parser("delete", help="Delete a preset")
     preset_delete.add_argument("name")
-    preset_delete.add_argument("--lang", choices=["en", "zh_cn"], help="Language pack to load")
+    preset_delete.add_argument("--lang", choices=_lang_choices(catalog), help="Language pack to load")
 
     preset_save = preset_sub.add_parser("save", help="Save a preset from current options")
     preset_save.add_argument("name")
     preset_save.add_argument("--preset", help="Base preset name")
-    preset_save.add_argument("--lang", choices=["en", "zh_cn"], help="Language pack to load")
+    preset_save.add_argument("--lang", choices=_lang_choices(catalog), help="Language pack to load")
     _add_encode_flags(preset_save)
 
     return parser
 
 
-def _translator_for_args(args: argparse.Namespace, config_dir: Path):
+def _translator_for_args(
+    args: argparse.Namespace,
+    config_dir: Path,
+    catalog: TranslationCatalog,
+):
     app_config = load_app_config(config_dir)
     language = getattr(args, "lang", None) or app_config.get("language", "en")
-    return get_translator(language, config_dir)
+    return catalog.translator(language)
 
 
 def _first_valid_plan_item(plan):
@@ -398,8 +420,8 @@ def _first_valid_plan_item(plan):
     return None
 
 
-def _run_plan(args: argparse.Namespace, config_dir: Path) -> int:
-    tr = _translator_for_args(args, config_dir)
+def _run_plan(args: argparse.Namespace, config_dir: Path, catalog: TranslationCatalog) -> int:
+    tr = _translator_for_args(args, config_dir, catalog)
     options = _options_from_args(args, config_dir)
     _validate_compression_options(options, args)
     _validate_parallel_options(options, tr)
@@ -417,8 +439,8 @@ def _run_plan(args: argparse.Namespace, config_dir: Path) -> int:
     return 0
 
 
-def _run_encode(args: argparse.Namespace, config_dir: Path) -> int:
-    tr = _translator_for_args(args, config_dir)
+def _run_encode(args: argparse.Namespace, config_dir: Path, catalog: TranslationCatalog) -> int:
+    tr = _translator_for_args(args, config_dir, catalog)
     options = _options_from_args(args, config_dir)
     _validate_compression_options(options, args)
     _validate_parallel_options(options, tr)
@@ -467,8 +489,8 @@ def _run_encode(args: argparse.Namespace, config_dir: Path) -> int:
     return 0 if all(result.success or result.skipped for result in results) else 2
 
 
-def _run_preview(args: argparse.Namespace, config_dir: Path) -> int:
-    tr = _translator_for_args(args, config_dir)
+def _run_preview(args: argparse.Namespace, config_dir: Path, catalog: TranslationCatalog) -> int:
+    tr = _translator_for_args(args, config_dir, catalog)
     input_path = Path(args.input).expanduser().resolve()
     if not input_path.is_file():
         print(tr.t("cli.preview_requires_file"), file=sys.stderr)
@@ -520,8 +542,8 @@ def _run_preview(args: argparse.Namespace, config_dir: Path) -> int:
     return 0 if result.success else 2
 
 
-def _run_preset(args: argparse.Namespace, config_dir: Path) -> int:
-    tr = _translator_for_args(args, config_dir)
+def _run_preset(args: argparse.Namespace, config_dir: Path, catalog: TranslationCatalog) -> int:
+    tr = _translator_for_args(args, config_dir, catalog)
     if args.preset_command == "list":
         names = list_presets(config_dir)
         if not names:
@@ -555,21 +577,27 @@ def _run_preset(args: argparse.Namespace, config_dir: Path) -> int:
 
 def run_cli(argv: list[str] | None = None) -> int:
     ensure_runtime_layout()
-    parser = _build_parser()
+    catalog = _default_catalog()
+    for diagnostic in catalog.diagnostics():
+        print(
+            f"i18n warning ({diagnostic.locale}): {diagnostic.message}",
+            file=sys.stderr,
+        )
+    parser = _build_parser(catalog)
     args = parser.parse_args(argv)
     config_dir = _config_dir()
 
     try:
         if args.command == "plan":
-            return _run_plan(args, config_dir)
+            return _run_plan(args, config_dir, catalog)
         if args.command == "encode":
-            return _run_encode(args, config_dir)
+            return _run_encode(args, config_dir, catalog)
         if args.command == "preview":
-            return _run_preview(args, config_dir)
+            return _run_preview(args, config_dir, catalog)
         if args.command == "preset":
-            return _run_preset(args, config_dir)
+            return _run_preset(args, config_dir, catalog)
     except Exception as exc:
-        tr = _translator_for_args(args, config_dir)
+        tr = _translator_for_args(args, config_dir, catalog)
         print(f"{tr.t('cli.error')}: {exc}", file=sys.stderr)
         return 2
 

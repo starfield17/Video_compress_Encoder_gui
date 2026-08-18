@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.i18n import get_translator
+from core.i18n import TranslationCatalog
 from core.models import (
     AudioMode,
     BackendChoice,
@@ -99,14 +99,25 @@ EXPLICIT_BACKEND_ORDER: tuple[BackendChoice, ...] = (
 class MainWindow(QMainWindow):
     _PRESET_UNSET = object()
 
-    def __init__(self, repo_root: Path, language: str | None = None) -> None:
+    def __init__(
+        self,
+        repo_root: Path,
+        language: str | None = None,
+        catalog: TranslationCatalog | None = None,
+    ) -> None:
         super().__init__()
         self.repo_root = repo_root
         self.config_dir = repo_root / "config"
         self.default_workdir = repo_root / "workdir"
         self.app_config = load_app_config(self.config_dir)
+        self.catalog = catalog or TranslationCatalog(
+            bundle_dir=self.config_dir / "i18n",
+            translations_dir=self.config_dir.parent / "translations",
+        )
         self.language = language or self.app_config.get("language", "en")
-        self.tr = get_translator(self.language, self.config_dir)
+        if not self.catalog.has_locale(self.language):
+            self.language = "en"
+        self.tr = self.catalog.translator(self.language)
 
         self.active_worker = None
         self.encoder_detection_worker = None
@@ -139,6 +150,7 @@ class MainWindow(QMainWindow):
         self._sync_dependent_controls()
         self._update_queue_metrics(self.queue_model.metrics())
         self._refresh_action_state()
+        self._log_catalog_diagnostics()
 
     def closeEvent(self, event) -> None:
         if not self._has_running_task():
@@ -749,7 +761,7 @@ class MainWindow(QMainWindow):
         return parse_analysis_profile_name(self.analysis_profile_combo.currentData())
 
     def _apply_translations(self) -> None:
-        self.tr = get_translator(self.language, self.config_dir)
+        self.tr = self.catalog.translator(self.language)
         self.setWindowTitle(self.tr.t("app.title"))
         self.source_box.setTitle(self.tr.t("gui.group.source"))
         self.jobs_box.setTitle(self.tr.t("gui.group.jobs"))
@@ -882,6 +894,12 @@ class MainWindow(QMainWindow):
     def _append_log(self, message: str) -> None:
         self.activity_log_window.append_message(message)
         self.statusBar().showMessage(message, 5000)
+
+    def _log_catalog_diagnostics(self) -> None:
+        for diagnostic in self.catalog.diagnostics():
+            self._append_log(
+                f"i18n warning ({diagnostic.locale}): {diagnostic.message}"
+            )
 
     def _encoder_capability_summary(self, capabilities: dict) -> str:
         codecs = capabilities.get("codecs", {})
@@ -1070,7 +1088,7 @@ class MainWindow(QMainWindow):
         self._append_log(self.tr.t("gui.log.preset_loaded", name=name))
 
     def _open_settings_dialog(self) -> None:
-        dialog = SettingsDialog(self.tr, self.app_config, self)
+        dialog = SettingsDialog(self.tr, self.app_config, self, languages=self.catalog.languages())
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         values = dialog.values()

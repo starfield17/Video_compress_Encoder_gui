@@ -10,8 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QApplication, QMessageBox, QScrollArea
-from PySide6.QtWidgets import QHeaderView
+from PySide6.QtWidgets import QAbstractButton, QApplication, QMessageBox, QScrollArea
+from PySide6.QtWidgets import QComboBox, QGroupBox, QHeaderView, QLabel, QLineEdit
 
 from core.app_paths import app_root, config_dir
 from core.i18n import get_translator
@@ -150,6 +150,34 @@ class SmokeTestCase(unittest.TestCase):
         window = MainWindow(self.repo_root, language="en")
         try:
             self.assertIsInstance(window.centralWidget(), QScrollArea)
+        finally:
+            window.close()
+
+    def _raw_keys_displayed(self, window: MainWindow) -> list[str]:
+        texts: list[str] = [window.windowTitle()]
+        for child in window.findChildren(QAbstractButton):
+            texts.append(child.text())
+        for child in window.findChildren(QLabel):
+            texts.append(child.text())
+        for child in window.findChildren(QGroupBox):
+            texts.append(child.title())
+        for child in window.findChildren(QComboBox):
+            texts.extend(child.itemText(index) for index in range(child.count()))
+        for child in window.findChildren(QLineEdit):
+            texts.append(child.placeholderText())
+        return [text for text in texts if any(text.startswith(p) for p in ("gui.", "app.", "cli."))]
+
+    def test_gui_en_shows_no_raw_keys(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            self.assertEqual([], self._raw_keys_displayed(window))
+        finally:
+            window.close()
+
+    def test_gui_zh_cn_shows_no_raw_keys(self) -> None:
+        window = MainWindow(self.repo_root, language="zh_cn")
+        try:
+            self.assertEqual([], self._raw_keys_displayed(window))
         finally:
             window.close()
 

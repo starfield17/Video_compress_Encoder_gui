@@ -29,7 +29,7 @@ from core.analysis_profiles import (
     resolve_analysis_settings,
     validate_analysis_settings,
 )
-from core.i18n import Translator
+from core.i18n import LanguageInfo, Translator
 from core.models import (
     AnalysisProfileName,
     AnalysisProfileSettings,
@@ -168,10 +168,20 @@ class _AnalysisProfilePage(QWidget):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, tr: Translator, settings: dict[str, object], parent=None) -> None:
+    def __init__(
+        self,
+        tr: Translator,
+        settings: dict[str, object],
+        parent=None,
+        languages: list[LanguageInfo] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.tr = tr
         self.redetect_requested = False
+        self._languages = languages or [
+            LanguageInfo("en", "English"),
+            LanguageInfo("zh_cn", "简体中文"),
+        ]
         self._profile_pages: dict[AnalysisProfileName, _AnalysisProfilePage] = {}
         self._build_ui()
         self._load_settings(settings)
@@ -196,8 +206,8 @@ class SettingsDialog(QDialog):
 
         self.language_label = QLabel()
         self.language_combo = QComboBox()
-        self.language_combo.addItem("English", "en")
-        self.language_combo.addItem("简体中文", "zh_cn")
+        for info in self._languages:
+            self.language_combo.addItem(info.name, info.code)
 
         self.workdir_label = QLabel()
         self.workdir_edit = QLineEdit()

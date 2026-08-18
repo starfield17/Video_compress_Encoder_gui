@@ -91,10 +91,19 @@ class AppPathsCompiledEnvironmentTestCase(unittest.TestCase):
             )
             self.assertEqual((runtime_config / "presets" / "default.json").read_text(encoding="utf-8"), "default")
             self.assertEqual((runtime_config / "user.json").read_text(encoding="utf-8"), "user")
+            self.assertTrue(
+                (
+                    home
+                    / "Library"
+                    / "Application Support"
+                    / "Video Compressor"
+                    / "translations"
+                ).is_dir()
+            )
             self.assertFalse((app_bundle / "Contents" / "MacOS" / "config").exists())
             self.assertFalse((app_bundle / "Contents" / "MacOS" / "workdir").exists())
 
-    def test_macos_app_upgrade_adds_translation_keys_without_replacing_custom_values(self) -> None:
+    def test_macos_app_upgrade_creates_translations_dir_and_leaves_old_i18n_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             app_bundle = root / "Video Compressor.app"
@@ -118,10 +127,8 @@ class AppPathsCompiledEnvironmentTestCase(unittest.TestCase):
                 / "i18n"
             )
             runtime_i18n.mkdir(parents=True)
-            (runtime_i18n / "en.json").write_text(
-                json.dumps({"existing": "Customized"}),
-                encoding="utf-8",
-            )
+            custom_content = json.dumps({"existing": "Customized"})
+            (runtime_i18n / "en.json").write_text(custom_content, encoding="utf-8")
 
             with (
                 patch.object(app_paths, "__compiled__", object(), create=True),
@@ -130,10 +137,19 @@ class AppPathsCompiledEnvironmentTestCase(unittest.TestCase):
                 patch.object(app_paths.Path, "home", return_value=home),
             ):
                 app_paths.ensure_runtime_layout()
+                # The new writable override dir is created for user language packs.
+                self.assertTrue(app_paths.translations_dir().is_dir())
 
-            messages = json.loads((runtime_i18n / "en.json").read_text(encoding="utf-8"))
-            self.assertEqual(messages["existing"], "Customized")
-            self.assertEqual(messages["new"], "New text")
+            # Legacy runtime config/i18n is never merged or overwritten.
+            self.assertEqual(
+                (runtime_i18n / "en.json").read_text(encoding="utf-8"),
+                custom_content,
+            )
+            # The bundled i18n is not seeded into the writable config tree.
+            self.assertEqual(
+                json.loads((runtime_i18n / "en.json").read_text(encoding="utf-8")),
+                {"existing": "Customized"},
+            )
 
 
 if __name__ == "__main__":
