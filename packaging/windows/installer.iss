@@ -10,10 +10,8 @@
 ; WiX/MSI installs through the Windows Installer before installing this Inno
 ; version (see the Code section at the end of this file). AppId is the stable
 ; identity for all future Inno releases; never change it.
-#define MyAppId "{4478BF58-30E3-5232-AE83-3E33254B3385}"
-
 [Setup]
-AppId={#MyAppId}
+AppId={{4478BF58-30E3-5232-AE83-3E33254B3385}
 AppName=Video Compressor
 AppVersion={#ReleaseVersion}
 AppVerName=Video Compressor {#ReleaseVersion}
@@ -48,8 +46,8 @@ ArchitecturesAllowed={#ArchitecturesAllowed}
 ArchitecturesInstallIn64BitMode={#ArchitecturesInstallIn64BitMode}
 
 ; SignTool stays disabled so Inno does not require a certificate at compile
-; time; sign_windows.ps1 signs Setup.exe and the generated uninstaller after
-; compilation. Enable both lines to sign during compilation instead.
+; time; sign_windows.ps1 signs Setup.exe after compilation. Enable both lines
+; to sign Setup.exe and its generated uninstaller during compilation instead.
 ; SignTool=signtool $f
 ; SignedUninstaller=yes
 
@@ -110,7 +108,7 @@ var
   CurrentName: String;
   CurrentPublisher: String;
   CurrentVersion: String;
-  VersionIsWindowsInstaller: String;
+  VersionIsWindowsInstaller: Cardinal;
 begin
   Result := False;
   ProductCode := '';
@@ -135,9 +133,9 @@ begin
       Continue;
     if CurrentPublisher <> VC_MSI_PUBLISHER then
       Continue;
-    if not RegQueryStringValue(RootKey, CurrentKey, 'WindowsInstaller', VersionIsWindowsInstaller) then
+    if not RegQueryDWordValue(RootKey, CurrentKey, 'WindowsInstaller', VersionIsWindowsInstaller) then
       Continue;
-    if VersionIsWindowsInstaller <> '1' then
+    if VersionIsWindowsInstaller <> 1 then
       Continue;
 
     ProductCode := Names[I];

@@ -28,11 +28,6 @@ ARCHITECTURES = {
     },
 }
 
-# Stable identity shared with the WiX UpgradeCode so this installer supersedes
-# the legacy per-user MSI and owns the same Add/Remove Programs identity.
-APP_ID = "4478BF58-30E3-5232-AE83-3E33254B3385"
-
-
 def _release_version(version: str) -> str:
     value = version.strip()
     # Accept MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH.BUILD (shared validator).
@@ -71,7 +66,6 @@ def build_iscc_command(
         f"/DSetupIcon={icon_path.resolve()}",
         f"/DArchitecturesAllowed={directives['architectures_allowed']}",
         f"/DArchitecturesInstallIn64BitMode={directives['architectures_install_in_64bit_mode']}",
-        f"/DMyAppId={APP_ID}",
         "/Qp",
     ]
 

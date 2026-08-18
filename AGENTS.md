@@ -7,6 +7,8 @@ platform-neutral domain and encoding logic, `cli/` contains command-line
 entrypoints, `gui/` contains the PySide6 user interface, and `main.py` selects an
 entrypoint and is the composition root. Build and packaging helpers live in
 `scripts/`; release resources and installer definitions live in `packaging/`.
+For release workflow ownership, artifact contracts, and platform-specific
+verification, read `docs/release-map.md` before changing those three areas.
 
 ## Dependency policy and invariants
 

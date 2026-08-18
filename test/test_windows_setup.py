@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 
 from scripts.build_setup import (
-    APP_ID,
     build_iscc_command,
     validate_source,
 )
@@ -53,7 +52,7 @@ class WindowsSetupTestCase(unittest.TestCase):
         self.assertIn("/DArchitecturesInstallIn64BitMode=arm64", arm64)
         self.assertIn("/DReleaseVersion=1.6.1", x64)
         self.assertIn("/DVersionInfo=1.6.1.0", x64)
-        self.assertIn(f"/DMyAppId={APP_ID}", x64)
+        self.assertFalse(any(argument.startswith("/DMyAppId=") for argument in x64))
         self.assertIn("/Qp", x64)
 
     def test_build_command_rejects_unknown_architecture(self) -> None:
@@ -139,10 +138,12 @@ class WindowsSetupManifestTestCase(unittest.TestCase):
         self.assertIn("ArchitecturesInstallIn64BitMode={#ArchitecturesInstallIn64BitMode}", self.manifest)
 
     def test_stable_app_id_is_declared(self) -> None:
-        self.assertIn(f'#define MyAppId "{{{APP_ID}}}"', self.manifest)
+        self.assertIn("AppId={{4478BF58-30E3-5232-AE83-3E33254B3385}", self.manifest)
+        self.assertNotIn("#define MyAppId", self.manifest)
 
     def test_legacy_msi_migration_is_present(self) -> None:
-        self.assertIn("WindowsInstaller", self.manifest)
+        self.assertIn("RegQueryDWordValue", self.manifest)
+        self.assertIn("VersionIsWindowsInstaller <> 1", self.manifest)
         self.assertIn("msiexec.exe", self.manifest)
         self.assertIn("PrepareToInstall", self.manifest)
 

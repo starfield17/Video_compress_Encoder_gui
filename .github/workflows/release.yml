@@ -269,6 +269,9 @@ jobs:
             --architecture "${{ matrix.installer_architecture }}" `
             --source-dir ".\dist\video-compressor" `
             --output $setup
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
 
       - name: Sign Windows Setup.exe when certificate secrets are configured
         if: runner.os == 'Windows'

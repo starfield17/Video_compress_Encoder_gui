@@ -258,6 +258,9 @@ jobs:
             --architecture "${{ matrix.installer_architecture }}" `
             --source-dir $source `
             --output $setup
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
 
           $resolvedSetup = (Resolve-Path $setup).Path
           $installed = Join-Path $env:GITHUB_WORKSPACE "workdir\setup-smoke-installed"
