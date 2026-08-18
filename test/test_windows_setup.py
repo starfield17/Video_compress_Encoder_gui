@@ -139,7 +139,7 @@ class WindowsSetupManifestTestCase(unittest.TestCase):
         self.assertIn("ArchitecturesInstallIn64BitMode={#ArchitecturesInstallIn64BitMode}", self.manifest)
 
     def test_stable_app_id_is_declared(self) -> None:
-        self.assertIn(f'#define MyAppId "{APP_ID}"', self.manifest)
+        self.assertIn(f'#define MyAppId "{{{APP_ID}}}"', self.manifest)
 
     def test_legacy_msi_migration_is_present(self) -> None:
         self.assertIn("WindowsInstaller", self.manifest)

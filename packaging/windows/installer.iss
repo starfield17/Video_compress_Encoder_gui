@@ -10,10 +10,10 @@
 ; WiX/MSI installs through the Windows Installer before installing this Inno
 ; version (see the Code section at the end of this file). AppId is the stable
 ; identity for all future Inno releases; never change it.
-#define MyAppId "4478BF58-30E3-5232-AE83-3E33254B3385"
+#define MyAppId "{4478BF58-30E3-5232-AE83-3E33254B3385}"
 
 [Setup]
-AppId={{#MyAppId}
+AppId={#MyAppId}
 AppName=Video Compressor
 AppVersion={#ReleaseVersion}
 AppVerName=Video Compressor {#ReleaseVersion}
