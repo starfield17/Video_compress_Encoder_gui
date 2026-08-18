@@ -338,12 +338,13 @@ The package includes `config/`, the runtime SVG icon, `README.md`, and `LICENSE`
 complete compatible pair from `--ffmpeg-dir` or `FFmpeg/` when available.
 Tagged releases require and verify the pinned native FFmpeg/FFprobe pair.
 
-Windows tagged releases also produce a per-user MSI. It installs without
-administrator privileges, adds a Start menu shortcut, supports major upgrades,
-and includes the same FFmpeg bundle as the portable ZIP. Optional Authenticode
-signing uses the paired `WINDOWS_CERTIFICATE_BASE64` and
+Windows tagged releases also produce a per-user `Setup.exe` (Inno Setup). It
+installs without administrator privileges, adds a Start menu shortcut, includes
+the same FFmpeg bundle as the portable ZIP, and migrates a legacy v1.6.0 MSI
+installation through Windows Installer before installing the new version.
+Optional Authenticode signing uses the paired `WINDOWS_CERTIFICATE_BASE64` and
 `WINDOWS_CERTIFICATE_PASSWORD` repository secrets; when neither is configured,
-the Windows executable and MSI are published unsigned.
+the Windows executable and Setup.exe are published unsigned.
 
 ### Native release matrix
 
@@ -362,9 +363,9 @@ Each tagged release publishes exactly ten platform packages:
 
 ```text
 video-compressor-v1.2.3-windows-x86_64.zip
-video-compressor-v1.2.3-windows-x86_64.msi
+video-compressor-v1.2.3-windows-x86_64-setup.exe
 video-compressor-v1.2.3-windows-arm64.zip
-video-compressor-v1.2.3-windows-arm64.msi
+video-compressor-v1.2.3-windows-arm64-setup.exe
 video-compressor-v1.2.3-linux-x86_64.tar.gz
 video-compressor-v1.2.3-linux-arm64.tar.gz
 video-compressor-v1.2.3-macos-x86_64.tar.gz

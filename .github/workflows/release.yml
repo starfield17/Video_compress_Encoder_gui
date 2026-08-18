@@ -27,14 +27,14 @@ jobs:
           - os: windows-2022
             target: windows-x86_64
             architecture: x64
-            msi_architecture: x86_64
+            installer_architecture: x86_64
             package_kind: standalone
             windows_compiler: msvc
 
           - os: windows-11-arm
             target: windows-arm64
             architecture: arm64
-            msi_architecture: arm64
+            installer_architecture: arm64
             package_kind: standalone
             windows_compiler: clang
 
@@ -241,57 +241,97 @@ jobs:
           .\scripts\sign_windows.ps1 `
             -Files ".\dist\video-compressor\video-compressor.exe"
 
-      - name: Install pinned WiX Toolset
+      - name: Install pinned Inno Setup
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          dotnet tool install `
-            --tool-path ".\workdir\wix-tool" `
-            wix `
-            --version 6.0.2
+          curl.exe -L `
+            -o "$env:TEMP\innosetup-installer.exe" `
+            "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe"
+          $installer = (Resolve-Path "$env:TEMP\innosetup-installer.exe").Path
+          $process = Start-Process $installer `
+            -Wait `
+            -PassThru `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER")
+          if ($process.ExitCode -ne 0) {
+              throw "Inno Setup install failed with exit code $($process.ExitCode)"
+          }
 
-      - name: Build Windows MSI
+      - name: Build Windows Setup.exe
         if: runner.os == 'Windows'
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          $msi = "video-compressor-$env:GITHUB_REF_NAME-${{ matrix.target }}.msi"
-          python .\scripts\build_msi.py `
+          $setup = "video-compressor-$env:GITHUB_REF_NAME-${{ matrix.target }}-setup.exe"
+          python .\scripts\build_setup.py `
             --version "$env:RELEASE_VERSION" `
-            --architecture "${{ matrix.msi_architecture }}" `
+            --architecture "${{ matrix.installer_architecture }}" `
             --source-dir ".\dist\video-compressor" `
-            --output $msi `
-            --wix ".\workdir\wix-tool\wix.exe"
+            --output $setup
 
-      - name: Sign Windows MSI when certificate secrets are configured
+      - name: Sign Windows Setup.exe when certificate secrets are configured
         if: runner.os == 'Windows'
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
+          $setup = "video-compressor-$env:GITHUB_REF_NAME-${{ matrix.target }}-setup.exe"
           .\scripts\sign_windows.ps1 `
-            -Files "video-compressor-$env:GITHUB_REF_NAME-${{ matrix.target }}.msi"
+            -Files $setup
 
-      - name: Administratively extract and inspect Windows MSI
+      - name: Smoke test installed Windows Setup package
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $msi = (Resolve-Path "video-compressor-$env:GITHUB_REF_NAME-${{ matrix.target }}.msi").Path
-          $target = Join-Path $env:GITHUB_WORKSPACE "workdir\msi-expanded"
-          New-Item -ItemType Directory -Force -Path $target | Out-Null
-          $process = Start-Process msiexec.exe `
+          $setup = (Resolve-Path "video-compressor-$env:GITHUB_REF_NAME-${{ matrix.target }}-setup.exe").Path
+          $installed = Join-Path $env:GITHUB_WORKSPACE "workdir\setup-installed"
+          New-Item -ItemType Directory -Force -Path $installed | Out-Null
+
+          $install = Start-Process $setup `
             -Wait `
             -PassThru `
-            -ArgumentList @("/a", "`"$msi`"", "/qn", "TARGETDIR=`"$target`"")
-          if ($process.ExitCode -ne 0) {
-              throw "MSI administrative extraction failed with exit code $($process.ExitCode)"
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$installed`"")
+          if ($install.ExitCode -ne 0) {
+              throw "Setup silent install failed with exit code $($install.ExitCode)"
           }
-          foreach ($name in @("video-compressor.exe", "ffmpeg.exe", "ffprobe.exe")) {
-              if (-not (Get-ChildItem -Path $target -Recurse -File -Filter $name)) {
-                  throw "MSI does not contain $name"
-              }
+
+          & (Join-Path $installed "video-compressor.exe") --cli --help
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+          & (Join-Path $installed "FFmpeg\bin\ffmpeg.exe") -hide_banner -version
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+          & (Join-Path $installed "FFmpeg\bin\ffprobe.exe") -hide_banner -version
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+
+      - name: Silent uninstall of installed Windows Setup package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installed = Join-Path $env:GITHUB_WORKSPACE "workdir\setup-installed"
+          $uninstaller = Get-ChildItem -Path $installed -Recurse -File -Filter "unins*.exe" |
+            Select-Object -First 1
+          if (-not $uninstaller) {
+              throw "Setup install did not produce an Inno uninstaller"
+          }
+          $uninstall = Start-Process $uninstaller.FullName `
+            -Wait `
+            -PassThru `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+          if ($uninstall.ExitCode -ne 0) {
+              throw "Setup silent uninstall failed with exit code $($uninstall.ExitCode)"
+          }
+          if (Test-Path (Join-Path $installed "video-compressor.exe")) {
+              throw "Uninstall did not remove video-compressor.exe"
+          }
+          if (Test-Path (Join-Path $installed "FFmpeg")) {
+              throw "Uninstall did not remove the FFmpeg directory"
           }
 
       - name: Archive Windows package
@@ -357,7 +397,7 @@ jobs:
             packages/*.zip
             packages/*.tar.gz
             packages/*.dmg
-            packages/*.msi
+            packages/*-setup.exe
           )
 
           if [[ "${#archives[@]}" -ne 10 ]]; then
@@ -370,9 +410,9 @@ jobs:
           release="$GITHUB_REF_NAME"
           expected=(
             "video-compressor-${release}-windows-x86_64.zip"
-            "video-compressor-${release}-windows-x86_64.msi"
+            "video-compressor-${release}-windows-x86_64-setup.exe"
             "video-compressor-${release}-windows-arm64.zip"
-            "video-compressor-${release}-windows-arm64.msi"
+            "video-compressor-${release}-windows-arm64-setup.exe"
             "video-compressor-${release}-linux-x86_64.tar.gz"
             "video-compressor-${release}-linux-arm64.tar.gz"
             "video-compressor-${release}-macos-x86_64.tar.gz"
@@ -413,7 +453,7 @@ jobs:
 
           (
             cd packages
-            sha256sum *.zip *.tar.gz *.dmg *.msi > SHA256SUMS.txt
+            sha256sum *.zip *.tar.gz *.dmg *-setup.exe > SHA256SUMS.txt
           )
 
       - name: Create or update GitHub Release

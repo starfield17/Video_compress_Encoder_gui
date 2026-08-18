@@ -110,14 +110,14 @@ jobs:
           - os: windows-2022
             target: windows-x86_64
             architecture: x64
-            msi_architecture: x86_64
+            installer_architecture: x86_64
             package_kind: standalone
             windows_compiler: msvc
 
           - os: windows-11-arm
             target: windows-arm64
             architecture: arm64
-            msi_architecture: arm64
+            installer_architecture: arm64
             package_kind: standalone
             windows_compiler: clang
 
@@ -225,48 +225,79 @@ jobs:
               exit $LASTEXITCODE
           }
 
-      - name: Install pinned WiX Toolset for MSI smoke
+      - name: Install pinned Inno Setup for installer smoke
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          dotnet tool install `
-            --tool-path ".\workdir\wix-tool" `
-            wix `
-            --version 6.0.2
+          curl.exe -L `
+            -o "$env:TEMP\innosetup-installer.exe" `
+            "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe"
+          $installer = (Resolve-Path "$env:TEMP\innosetup-installer.exe").Path
+          $process = Start-Process $installer `
+            -Wait `
+            -PassThru `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER")
+          if ($process.ExitCode -ne 0) {
+              throw "Inno Setup install failed with exit code $($process.ExitCode)"
+          }
 
-      - name: Build and inspect Windows MSI smoke package
+      - name: Build Windows Setup smoke package
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $source = ".\workdir\msi-smoke-source"
+          $source = ".\workdir\setup-smoke-source"
           $ffmpeg = Join-Path $source "FFmpeg\bin"
           New-Item -ItemType Directory -Force -Path $ffmpeg | Out-Null
           Copy-Item ".\dist\video-compressor\video-compressor.exe" $source
           Set-Content -Path (Join-Path $ffmpeg "ffmpeg.exe") -Value "smoke"
           Set-Content -Path (Join-Path $ffmpeg "ffprobe.exe") -Value "smoke"
 
-          $msi = ".\workdir\video-compressor-smoke-${{ matrix.target }}.msi"
-          python .\scripts\build_msi.py `
+          $setup = ".\workdir\video-compressor-smoke-${{ matrix.target }}-setup.exe"
+          python .\scripts\build_setup.py `
             --version "0.0.0" `
-            --architecture "${{ matrix.msi_architecture }}" `
+            --architecture "${{ matrix.installer_architecture }}" `
             --source-dir $source `
-            --output $msi `
-            --wix ".\workdir\wix-tool\wix.exe"
+            --output $setup
 
-          $expanded = Join-Path $env:GITHUB_WORKSPACE "workdir\msi-smoke-expanded"
-          New-Item -ItemType Directory -Force -Path $expanded | Out-Null
-          $resolvedMsi = (Resolve-Path $msi).Path
-          $process = Start-Process msiexec.exe `
+          $resolvedSetup = (Resolve-Path $setup).Path
+          $installed = Join-Path $env:GITHUB_WORKSPACE "workdir\setup-smoke-installed"
+          New-Item -ItemType Directory -Force -Path $installed | Out-Null
+
+          $install = Start-Process $resolvedSetup `
             -Wait `
             -PassThru `
-            -ArgumentList @("/a", "`"$resolvedMsi`"", "/qn", "TARGETDIR=`"$expanded`"")
-          if ($process.ExitCode -ne 0) {
-              throw "MSI smoke extraction failed with exit code $($process.ExitCode)"
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$installed`"")
+          if ($install.ExitCode -ne 0) {
+              throw "Setup silent install failed with exit code $($install.ExitCode)"
           }
           foreach ($name in @("video-compressor.exe", "ffmpeg.exe", "ffprobe.exe")) {
-              if (-not (Get-ChildItem -Path $expanded -Recurse -File -Filter $name)) {
-                  throw "MSI smoke package does not contain $name"
+              if (-not (Get-ChildItem -Path $installed -Recurse -File -Filter $name)) {
+                  throw "Setup package does not contain $name"
               }
+          }
+
+      - name: Verify Windows Setup uninstall smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installed = Join-Path $env:GITHUB_WORKSPACE "workdir\setup-smoke-installed"
+          $uninstaller = Get-ChildItem -Path $installed -Recurse -File -Filter "unins*.exe" |
+            Select-Object -First 1
+          if (-not $uninstaller) {
+              throw "Setup install did not produce an Inno uninstaller"
+          }
+          $uninstall = Start-Process $uninstaller.FullName `
+            -Wait `
+            -PassThru `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+          if ($uninstall.ExitCode -ne 0) {
+              throw "Setup silent uninstall failed with exit code $($uninstall.ExitCode)"
+          }
+          if (Test-Path (Join-Path $installed "video-compressor.exe")) {
+              throw "Uninstall did not remove video-compressor.exe"
+          }
+          if (Test-Path (Join-Path $installed "FFmpeg")) {
+              throw "Uninstall did not remove the FFmpeg directory"
           }
 
       - name: Verify packaged executable on Linux

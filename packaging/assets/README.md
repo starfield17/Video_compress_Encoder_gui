@@ -5,7 +5,7 @@ assets after editing it:
 python scripts/build_icons.py
 ```
 
-- `app.ico`: Windows executable and MSI metadata.
+- `app.ico`: Windows executable and Setup installer metadata.
 - `app.icns`: macOS application bundle icon.
 - `app.png`: high-resolution preview and fallback raster.
 - `app.svg`: runtime window icon on every platform.
