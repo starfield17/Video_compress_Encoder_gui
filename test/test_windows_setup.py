@@ -144,6 +144,7 @@ class WindowsSetupManifestTestCase(unittest.TestCase):
     def test_legacy_msi_migration_is_present(self) -> None:
         self.assertIn("RegQueryDWordValue", self.manifest)
         self.assertIn("VersionIsWindowsInstaller <> 1", self.manifest)
+        self.assertNotIn("SplitString", self.manifest)
         self.assertIn("msiexec.exe", self.manifest)
         self.assertIn("PrepareToInstall", self.manifest)
 

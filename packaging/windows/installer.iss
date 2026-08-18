@@ -71,20 +71,38 @@ const
   VC_MSI_PUBLISHER = 'starfield17';
   VC_UNINSTALL_KEY = 'Software\Microsoft\Windows\CurrentVersion\Uninstall';
 
+procedure ReadVersionPart(var Remaining: String; var Value: Integer);
+var
+  Dot: Integer;
+  Part: String;
+begin
+  Dot := Pos('.', Remaining);
+  if Dot = 0 then
+  begin
+    Part := Remaining;
+    Remaining := '';
+  end
+  else
+  begin
+    Part := Copy(Remaining, 1, Dot - 1);
+    Delete(Remaining, 1, Dot);
+  end;
+  Value := StrToIntDef(Part, 0);
+end;
+
 procedure ParseVersion(const Version: String; var Major, Minor, Patch: Integer);
 var
-  Parts: TArrayOfString;
+  Remaining: String;
 begin
+  Remaining := Version;
   Major := 0;
   Minor := 0;
   Patch := 0;
-  Parts := SplitString(Version, '.');
-  if GetArrayLength(Parts) >= 1 then
-    Major := StrToIntDef(Parts[0], 0);
-  if GetArrayLength(Parts) >= 2 then
-    Minor := StrToIntDef(Parts[1], 0);
-  if GetArrayLength(Parts) >= 3 then
-    Patch := StrToIntDef(Parts[2], 0);
+  ReadVersionPart(Remaining, Major);
+  if Remaining <> '' then
+    ReadVersionPart(Remaining, Minor);
+  if Remaining <> '' then
+    ReadVersionPart(Remaining, Patch);
 end;
 
 { Returns True only for a version older than the first Inno release (1.6.1),
