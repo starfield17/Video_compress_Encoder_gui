@@ -952,11 +952,12 @@ class SmartGuiTestCase(unittest.TestCase):
     def test_smart_controls_and_queue_initial_state(self) -> None:
         window = MainWindow(self.repo_root, language="en")
         try:
-            smart_index = window.compression_mode_combo.findData(CompressionMode.SMART.value)
-            window.compression_mode_combo.setCurrentIndex(smart_index)
-            self.assertFalse(window.ratio_edit.isEnabled())
-            self.assertTrue(window.min_vmaf_spin.isEnabled())
-            self.assertFalse(window.sample_mode_combo.isEnabled())
+            panel = window.options_panel
+            smart_index = panel.compression_mode_combo.findData(CompressionMode.SMART.value)
+            panel.compression_mode_combo.setCurrentIndex(smart_index)
+            self.assertFalse(panel.ratio_edit.isEnabled())
+            self.assertTrue(panel.min_vmaf_spin.isEnabled())
+            self.assertFalse(panel.sample_mode_combo.isEnabled())
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)
@@ -989,11 +990,12 @@ class SmartGuiTestCase(unittest.TestCase):
                     },
                 }
             )
-            smart_index = window.compression_mode_combo.findData(CompressionMode.SMART.value)
-            smart_item = window.compression_mode_combo.model().item(smart_index)
+            panel = window.options_panel
+            smart_index = panel.compression_mode_combo.findData(CompressionMode.SMART.value)
+            smart_item = panel.compression_mode_combo.model().item(smart_index)
             self.assertFalse(smart_item.isEnabled())
             self.assertEqual(
-                window.compression_mode_combo.currentData(),
+                panel.compression_mode_combo.currentData(),
                 CompressionMode.FIXED_BITRATE.value,
             )
         finally:

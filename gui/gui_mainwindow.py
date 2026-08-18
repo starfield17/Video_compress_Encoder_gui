@@ -8,10 +8,8 @@ from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QAbstractScrollArea,
-    QCheckBox,
     QComboBox,
     QDialog,
-    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -25,10 +23,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSpinBox,
     QStatusBar,
     QStyle,
-    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -36,45 +32,29 @@ from PySide6.QtWidgets import (
 
 from core.i18n import TranslationCatalog
 from core.models import (
-    AudioMode,
     BackendChoice,
     CodecChoice,
-    CompressionMode,
-    ContainerChoice,
-    DecodeAcceleration,
     EncodeOptions,
-    AnalysisProfileName,
-    PreviewOptions,
-    PreviewSampleMode,
     SkippedOutputPolicy,
     SmartPreviewResult,
     VideoFileItem,
 )
-from core.discover_ffmpeg import discover_ffmpeg_tools
-from core.encoder_caps import (
-    ENCODER_CANDIDATES,
-    list_available_encoders,
-    preset_choices_for_encoder,
-    resolve_encoder,
-)
-from core.analysis_profiles import analysis_profiles_from_config, parse_analysis_profile_name
 from core.preset_store import (
     delete_preset,
     list_presets,
     load_app_config,
     load_preset,
     save_preset,
-    smart_policies_from_config,
     update_app_config,
 )
 from core.skipped_outputs import is_eligible_skipped_item, publish_skipped_source
-from core.smart_quality import resolve_max_output_ratio
 from gui.activity_log_window import ActivityLogWindow
 from gui.constraint_decision_dialog import (
     SizeMissDecision,
     choose_quality_decision,
     choose_size_miss_decision,
 )
+from gui.encode_options_panel import EncodeOptionsPanel
 from gui.gui_workers import EncoderCapabilityDetectWorker, PlanWorker, PreviewWorker
 from gui.preview_result_dialog import PreviewResultDialog
 from gui.preset_manager_dialog import PresetManagerDialog
@@ -142,12 +122,11 @@ class MainWindow(QMainWindow):
         self.queue_window = QueueWindow(self.tr, self.queue_model, self)
 
         self._build_ui()
-        self._last_codec_for_ratio = CodecChoice(self.codec_combo.currentText())
         self._connect_signals()
         self._load_initial_state()
         self._loading_initial_state = False
         self._apply_translations()
-        self._sync_dependent_controls()
+        self.options_panel.sync_dependent_controls()
         self._update_queue_metrics(self.queue_model.metrics())
         self._refresh_action_state()
         self._log_catalog_diagnostics()
@@ -311,12 +290,12 @@ class MainWindow(QMainWindow):
         source_layout.setColumnStretch(2, 1)
         source_layout.setColumnStretch(3, 1)
 
-        self.options_tabs = QTabWidget()
-        self._build_basic_tab()
-        self._build_video_tab()
-        self._build_audio_tab()
-        self._build_preview_tab()
-        self._build_advanced_tab()
+        self.options_panel = EncodeOptionsPanel(
+            self.tr,
+            self.app_config,
+            self,
+            append_log=self._append_log,
+        )
 
         jobs_box = QGroupBox()
         jobs_layout = QVBoxLayout(jobs_box)
@@ -398,7 +377,7 @@ class MainWindow(QMainWindow):
         jobs_layout.addWidget(self.table_view, 1)
 
         root_layout.addWidget(source_box)
-        root_layout.addWidget(self.options_tabs)
+        root_layout.addWidget(self.options_panel)
         root_layout.addWidget(jobs_box, 1)
 
         self.source_box = source_box
@@ -454,16 +433,7 @@ class MainWindow(QMainWindow):
         self.source_dir_button.clicked.connect(self._browse_source_dir)
         self.output_button.clicked.connect(self._browse_output)
         self.manage_presets_button.clicked.connect(self._open_preset_manager)
-        self.sample_mode_combo.currentIndexChanged.connect(self._sync_dependent_controls)
-        self.compression_mode_combo.currentIndexChanged.connect(self._sync_dependent_controls)
-        self.audio_mode_combo.currentIndexChanged.connect(self._sync_dependent_controls)
-        self.parallel_check.toggled.connect(self._sync_dependent_controls)
-        self.codec_combo.currentIndexChanged.connect(self._on_codec_changed)
-        self.backend_combo.currentIndexChanged.connect(self._refresh_encoder_preset_choices)
-        self.decode_acceleration_combo.currentIndexChanged.connect(self._sync_dependent_controls)
-        self.analysis_profile_combo.currentIndexChanged.connect(
-            lambda _index: self._persist_runtime_state()
-        )
+        self.options_panel.analysis_profile_changed.connect(lambda _name: self._persist_runtime_state())
         self.source_combo.editTextChanged.connect(self._persist_runtime_state)
         self.output_edit.editingFinished.connect(self._persist_runtime_state)
         self.preset_combo.currentIndexChanged.connect(self._preset_combo_changed)
@@ -493,235 +463,6 @@ class MainWindow(QMainWindow):
             header = view.horizontalHeader()
             header.sectionMoved.connect(lambda *_args, source_view=view: self._persist_header_state(source_view))
 
-    def _build_basic_tab(self) -> None:
-        page = QWidget()
-        layout = QGridLayout(page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setHorizontalSpacing(10)
-        layout.setVerticalSpacing(10)
-
-        self.codec_label = QLabel()
-        self.codec_combo = QComboBox()
-        self.codec_combo.addItems(["hevc", "av1"])
-
-        self.compression_mode_label = QLabel()
-        self.compression_mode_combo = QComboBox()
-        self.compression_mode_combo.addItem("smart", CompressionMode.SMART.value)
-        self.compression_mode_combo.addItem("fixed_bitrate", CompressionMode.FIXED_BITRATE.value)
-
-        self.backend_label = QLabel()
-        self.backend_combo = QComboBox()
-        self.backend_combo.addItems(["auto", "cpu"])
-
-        self.container_label = QLabel()
-        self.container_combo = QComboBox()
-        self.container_combo.addItems(["mkv", "mp4"])
-
-        self.ratio_label = QLabel()
-        self.ratio_edit = QLineEdit()
-
-        self.min_vmaf_label = QLabel()
-        self.min_vmaf_spin = QDoubleSpinBox()
-        self.min_vmaf_spin.setRange(1.0, 100.0)
-        self.min_vmaf_spin.setDecimals(1)
-        self.min_vmaf_spin.setValue(95.0)
-
-        self.max_output_ratio_label = QLabel()
-        self.max_output_ratio_spin = QDoubleSpinBox()
-        self.max_output_ratio_spin.setRange(1.0, 100.0)
-        self.max_output_ratio_spin.setDecimals(1)
-        self.max_output_ratio_spin.setSuffix("%")
-        self.max_output_ratio_spin.setValue(70.0)
-
-        self.overwrite_check = QCheckBox()
-        self.recursive_check = QCheckBox()
-        self.parallel_check = QCheckBox()
-        self.parallel_backends_label = QLabel()
-        self.parallel_nvenc_check = QCheckBox("NVENC")
-        self.parallel_qsv_check = QCheckBox("QSV")
-        self.parallel_amf_check = QCheckBox("AMF")
-        self.parallel_videotoolbox_check = QCheckBox("VideoToolbox")
-        self.parallel_cpu_check = QCheckBox("CPU")
-
-        layout.addWidget(self.codec_label, 0, 0)
-        layout.addWidget(self.codec_combo, 0, 1)
-        layout.addWidget(self.compression_mode_label, 0, 2)
-        layout.addWidget(self.compression_mode_combo, 0, 3)
-        layout.addWidget(self.backend_label, 0, 4)
-        layout.addWidget(self.backend_combo, 0, 5)
-        layout.addWidget(self.container_label, 1, 0)
-        layout.addWidget(self.container_combo, 1, 1)
-        layout.addWidget(self.ratio_label, 1, 2)
-        layout.addWidget(self.ratio_edit, 1, 3)
-        layout.addWidget(self.min_vmaf_label, 1, 4)
-        layout.addWidget(self.min_vmaf_spin, 1, 5)
-        layout.addWidget(self.max_output_ratio_label, 2, 0)
-        layout.addWidget(self.max_output_ratio_spin, 2, 1)
-        layout.addWidget(self.overwrite_check, 2, 2)
-        layout.addWidget(self.recursive_check, 2, 3)
-        layout.addWidget(self.parallel_check, 2, 4, 1, 2)
-        layout.addWidget(self.parallel_backends_label, 3, 0)
-        layout.addWidget(self.parallel_nvenc_check, 3, 1)
-        layout.addWidget(self.parallel_qsv_check, 3, 2)
-        layout.addWidget(self.parallel_amf_check, 3, 3)
-        layout.addWidget(self.parallel_videotoolbox_check, 3, 4)
-        layout.addWidget(self.parallel_cpu_check, 3, 5)
-
-        self.analysis_profile_label = QLabel()
-        self.analysis_profile_combo = QComboBox()
-        self._fill_analysis_profile_combo()
-        layout.addWidget(self.analysis_profile_label, 4, 0)
-        layout.addWidget(self.analysis_profile_combo, 4, 1)
-        layout.setColumnStretch(1, 1)
-        layout.setColumnStretch(3, 1)
-        layout.setColumnStretch(5, 1)
-
-        self.options_tabs.addTab(page, "")
-        self.basic_tab = page
-
-    def _build_video_tab(self) -> None:
-        page = QWidget()
-        layout = QGridLayout(page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setHorizontalSpacing(10)
-        layout.setVerticalSpacing(10)
-
-        self.encoder_preset_label = QLabel()
-        self.encoder_preset_combo = QComboBox()
-
-        self.decode_acceleration_label = QLabel()
-        self.decode_acceleration_combo = QComboBox()
-        self.decode_acceleration_combo.addItem("", DecodeAcceleration.SOFTWARE.value)
-        self.decode_acceleration_combo.addItem("", DecodeAcceleration.VIDEOTOOLBOX.value)
-
-        self.pix_fmt_label = QLabel()
-        self.pix_fmt_edit = QLineEdit()
-
-        self.min_bitrate_label = QLabel()
-        self.min_bitrate_spin = QSpinBox()
-        self.min_bitrate_spin.setRange(0, 500000)
-        self.min_bitrate_spin.setValue(250)
-
-        self.max_bitrate_label = QLabel()
-        self.max_bitrate_spin = QSpinBox()
-        self.max_bitrate_spin.setRange(0, 500000)
-        self.max_bitrate_spin.setValue(0)
-
-        self.maxrate_factor_label = QLabel()
-        self.maxrate_factor_spin = QDoubleSpinBox()
-        self.maxrate_factor_spin.setRange(0.1, 20.0)
-        self.maxrate_factor_spin.setDecimals(2)
-        self.maxrate_factor_spin.setSingleStep(0.05)
-        self.maxrate_factor_spin.setValue(1.08)
-
-        self.bufsize_factor_label = QLabel()
-        self.bufsize_factor_spin = QDoubleSpinBox()
-        self.bufsize_factor_spin.setRange(0.1, 20.0)
-        self.bufsize_factor_spin.setDecimals(2)
-        self.bufsize_factor_spin.setSingleStep(0.10)
-        self.bufsize_factor_spin.setValue(2.0)
-
-        self.two_pass_check = QCheckBox()
-
-        layout.addWidget(self.encoder_preset_label, 0, 0)
-        layout.addWidget(self.encoder_preset_combo, 0, 1)
-        layout.addWidget(self.decode_acceleration_label, 0, 2)
-        layout.addWidget(self.decode_acceleration_combo, 0, 3)
-        layout.addWidget(self.pix_fmt_label, 1, 0)
-        layout.addWidget(self.pix_fmt_edit, 1, 1)
-        layout.addWidget(self.min_bitrate_label, 1, 2)
-        layout.addWidget(self.min_bitrate_spin, 1, 3)
-        layout.addWidget(self.max_bitrate_label, 2, 0)
-        layout.addWidget(self.max_bitrate_spin, 2, 1)
-        layout.addWidget(self.maxrate_factor_label, 2, 2)
-        layout.addWidget(self.maxrate_factor_spin, 2, 3)
-        layout.addWidget(self.bufsize_factor_label, 3, 0)
-        layout.addWidget(self.bufsize_factor_spin, 3, 1)
-        layout.addWidget(self.two_pass_check, 3, 2, 1, 2)
-        layout.setColumnStretch(1, 1)
-        layout.setColumnStretch(3, 1)
-
-        self.options_tabs.addTab(page, "")
-        self.video_tab = page
-
-    def _build_audio_tab(self) -> None:
-        page = QWidget()
-        layout = QGridLayout(page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setHorizontalSpacing(10)
-        layout.setVerticalSpacing(10)
-
-        self.audio_mode_label = QLabel()
-        self.audio_mode_combo = QComboBox()
-        self.audio_mode_combo.addItems(["copy", "aac"])
-
-        self.audio_bitrate_label = QLabel()
-        self.audio_bitrate_edit = QLineEdit()
-
-        self.copy_subtitles_check = QCheckBox()
-        self.copy_external_subtitles_check = QCheckBox()
-
-        layout.addWidget(self.audio_mode_label, 0, 0)
-        layout.addWidget(self.audio_mode_combo, 0, 1)
-        layout.addWidget(self.audio_bitrate_label, 0, 2)
-        layout.addWidget(self.audio_bitrate_edit, 0, 3)
-        layout.addWidget(self.copy_subtitles_check, 1, 0, 1, 2)
-        layout.addWidget(self.copy_external_subtitles_check, 1, 2, 1, 2)
-        layout.setColumnStretch(1, 1)
-        layout.setColumnStretch(3, 1)
-
-        self.options_tabs.addTab(page, "")
-        self.audio_tab = page
-
-    def _build_preview_tab(self) -> None:
-        page = QWidget()
-        layout = QGridLayout(page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setHorizontalSpacing(10)
-        layout.setVerticalSpacing(10)
-
-        self.sample_mode_label = QLabel()
-        self.sample_mode_combo = QComboBox()
-        self.sample_mode_combo.addItems(["middle", "custom"])
-
-        self.sample_duration_label = QLabel()
-        self.sample_duration_spin = QDoubleSpinBox()
-        self.sample_duration_spin.setRange(1.0, 3600.0)
-        self.sample_duration_spin.setDecimals(1)
-        self.sample_duration_spin.setValue(30.0)
-
-        self.sample_start_label = QLabel()
-        self.sample_start_spin = QDoubleSpinBox()
-        self.sample_start_spin.setRange(0.0, 86400.0)
-        self.sample_start_spin.setDecimals(1)
-        self.sample_start_spin.setValue(0.0)
-
-        layout.addWidget(self.sample_mode_label, 0, 0)
-        layout.addWidget(self.sample_mode_combo, 0, 1)
-        layout.addWidget(self.sample_duration_label, 0, 2)
-        layout.addWidget(self.sample_duration_spin, 0, 3)
-        layout.addWidget(self.sample_start_label, 1, 0)
-        layout.addWidget(self.sample_start_spin, 1, 1)
-        layout.setColumnStretch(1, 1)
-        layout.setColumnStretch(3, 1)
-
-        self.options_tabs.addTab(page, "")
-        self.preview_tab = page
-
-    def _build_advanced_tab(self) -> None:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
-
-        self.advanced_info = QLabel()
-        self.advanced_info.setWordWrap(True)
-        layout.addWidget(self.advanced_info)
-        layout.addStretch(1)
-
-        self.options_tabs.addTab(page, "")
-        self.advanced_tab = page
-
     def _load_initial_state(self) -> None:
         self._set_source_history(list(self.app_config.get("recent_paths", [])))
         self.source_combo.setEditText(self.app_config.get("last_source_path", ""))
@@ -734,31 +475,17 @@ class MainWindow(QMainWindow):
             if preset_index >= 0:
                 self.preset_combo.setCurrentIndex(preset_index)
                 try:
-                    self._apply_options(load_preset(default_preset, self.config_dir))
+                    self.options_panel.apply_options(load_preset(default_preset, self.config_dir))
                 except FileNotFoundError:
-                    self._apply_options(EncodeOptions())
+                    self.options_panel.apply_options(EncodeOptions())
             else:
-                self._apply_options(EncodeOptions())
+                self.options_panel.apply_options(EncodeOptions())
         else:
-            self._apply_options(EncodeOptions())
-        self._apply_analysis_profile_settings()
+            self.options_panel.apply_options(EncodeOptions())
+        self.options_panel.apply_analysis_profile_settings()
 
         self._set_status_snapshot("-", "-", "-", "-", None)
         self._restore_header_state()
-
-    def _fill_analysis_profile_combo(self) -> None:
-        self.analysis_profile_combo.clear()
-        for name in AnalysisProfileName:
-            self.analysis_profile_combo.addItem("", name.value)
-
-    def _apply_analysis_profile_settings(self) -> None:
-        name, _settings = analysis_profiles_from_config(self.app_config)
-        index = self.analysis_profile_combo.findData(name.value)
-        if index >= 0:
-            self.analysis_profile_combo.setCurrentIndex(index)
-
-    def _current_analysis_profile_name(self) -> AnalysisProfileName:
-        return parse_analysis_profile_name(self.analysis_profile_combo.currentData())
 
     def _apply_translations(self) -> None:
         self.tr = self.catalog.translator(self.language)
@@ -787,70 +514,7 @@ class MainWindow(QMainWindow):
         self.output_button.setText(self.tr.t("gui.button.browse_dir"))
         self.manage_presets_button.setText(self.tr.t("gui.button.manage_presets"))
 
-        self.codec_label.setText(self.tr.t("gui.label.codec"))
-        self.compression_mode_label.setText(self.tr.t("gui.label.compression_mode"))
-        smart_mode_index = self.compression_mode_combo.findData(CompressionMode.SMART.value)
-        fixed_mode_index = self.compression_mode_combo.findData(CompressionMode.FIXED_BITRATE.value)
-        if smart_mode_index >= 0:
-            self.compression_mode_combo.setItemText(
-                smart_mode_index,
-                self.tr.t("gui.value.compression_smart"),
-            )
-        if fixed_mode_index >= 0:
-            self.compression_mode_combo.setItemText(
-                fixed_mode_index,
-                self.tr.t("gui.value.compression_fixed"),
-            )
-        self.backend_label.setText(self.tr.t("gui.label.backend"))
-        self.container_label.setText(self.tr.t("gui.label.container"))
-        self.ratio_label.setText(self.tr.t("gui.label.ratio"))
-        self.min_vmaf_label.setText(self.tr.t("gui.label.min_vmaf"))
-        self.min_vmaf_label.setToolTip(self.tr.t("gui.tooltip.min_vmaf"))
-        self.min_vmaf_spin.setToolTip(self.tr.t("gui.tooltip.min_vmaf"))
-        self.max_output_ratio_label.setText(self.tr.t("gui.label.max_output_ratio"))
-        self.analysis_profile_label.setText(self.tr.t("gui.label.analysis_profile"))
-        self.analysis_profile_combo.setItemText(
-            self.analysis_profile_combo.findData(AnalysisProfileName.FAST.value),
-            self.tr.t("gui.value.analysis_fast"),
-        )
-        self.analysis_profile_combo.setItemText(
-            self.analysis_profile_combo.findData(AnalysisProfileName.BALANCE.value),
-            self.tr.t("gui.value.analysis_balance"),
-        )
-        self.analysis_profile_combo.setItemText(
-            self.analysis_profile_combo.findData(AnalysisProfileName.PRECISE.value),
-            self.tr.t("gui.value.analysis_precise"),
-        )
-        self.analysis_profile_combo.setToolTip(self.tr.t("gui.tooltip.analysis_profile"))
-        self.overwrite_check.setText(self.tr.t("gui.checkbox.overwrite"))
-        self.recursive_check.setText(self.tr.t("gui.checkbox.recursive"))
-        self.parallel_check.setText(self.tr.t("gui.checkbox.parallel_enabled"))
-        self.parallel_backends_label.setText(self.tr.t("gui.label.parallel_backends"))
-        self.parallel_videotoolbox_check.setText(self.tr.t("gui.value.backend_videotoolbox"))
-        self.encoder_preset_label.setText(self.tr.t("gui.label.encoder_preset"))
-        self.decode_acceleration_label.setText(self.tr.t("gui.label.decode_acceleration"))
-        self.decode_acceleration_combo.setItemText(
-            self.decode_acceleration_combo.findData(DecodeAcceleration.SOFTWARE.value),
-            self.tr.t("gui.value.decode_software"),
-        )
-        self.decode_acceleration_combo.setItemText(
-            self.decode_acceleration_combo.findData(DecodeAcceleration.VIDEOTOOLBOX.value),
-            self.tr.t("gui.value.decode_videotoolbox"),
-        )
-        self.pix_fmt_label.setText(self.tr.t("gui.label.pix_fmt"))
-        self.min_bitrate_label.setText(self.tr.t("gui.label.min_video_kbps"))
-        self.max_bitrate_label.setText(self.tr.t("gui.label.max_video_kbps"))
-        self.maxrate_factor_label.setText(self.tr.t("gui.label.maxrate_factor"))
-        self.bufsize_factor_label.setText(self.tr.t("gui.label.bufsize_factor"))
-        self.two_pass_check.setText(self.tr.t("gui.checkbox.two_pass"))
-        self.audio_mode_label.setText(self.tr.t("gui.label.audio_mode"))
-        self.audio_bitrate_label.setText(self.tr.t("gui.label.audio_bitrate"))
-        self.copy_subtitles_check.setText(self.tr.t("gui.checkbox.copy_subtitles"))
-        self.copy_external_subtitles_check.setText(self.tr.t("gui.checkbox.copy_external_subtitles"))
-        self.sample_mode_label.setText(self.tr.t("gui.label.sample_mode"))
-        self.sample_duration_label.setText(self.tr.t("gui.label.sample_duration"))
-        self.sample_start_label.setText(self.tr.t("gui.label.sample_start"))
-        self.advanced_info.setText(self.tr.t("gui.advanced.placeholder"))
+        self.options_panel.set_translator(self.tr)
 
         self.total_items_title.setText(self.tr.t("gui.summary.total_items"))
         self.states_title.setText(self.tr.t("gui.summary.states"))
@@ -859,15 +523,6 @@ class MainWindow(QMainWindow):
 
         self.source_combo.lineEdit().setPlaceholderText(self.tr.t("gui.placeholder.source"))
         self.output_edit.setPlaceholderText(self.tr.t("gui.placeholder.default_output"))
-        self.ratio_edit.setPlaceholderText(self.tr.t("gui.placeholder.auto_ratio"))
-        self.pix_fmt_edit.setPlaceholderText("yuv420p")
-        self.audio_bitrate_edit.setPlaceholderText("128k")
-
-        self.options_tabs.setTabText(self.options_tabs.indexOf(self.basic_tab), self.tr.t("gui.tab.basic"))
-        self.options_tabs.setTabText(self.options_tabs.indexOf(self.video_tab), self.tr.t("gui.tab.video"))
-        self.options_tabs.setTabText(self.options_tabs.indexOf(self.audio_tab), self.tr.t("gui.tab.audio_subtitles"))
-        self.options_tabs.setTabText(self.options_tabs.indexOf(self.preview_tab), self.tr.t("gui.tab.preview"))
-        self.options_tabs.setTabText(self.options_tabs.indexOf(self.advanced_tab), self.tr.t("gui.tab.advanced"))
 
         self.queue_model.set_translator(self.tr)
         self.activity_log_window.apply_translations(self.tr)
@@ -880,8 +535,6 @@ class MainWindow(QMainWindow):
             self._status_percent,
         )
         self._update_queue_metrics(self.queue_model.metrics())
-        self._rebuild_backend_controls()
-        self._refresh_encoder_preset_choices()
 
     def _set_source_history(self, items: list[str]) -> None:
         current = self.source_combo.currentText().strip()
@@ -934,8 +587,7 @@ class MainWindow(QMainWindow):
             self._append_log(self.tr.t("gui.log.encoder_detection_running"))
             return
 
-        self._encoder_capabilities_ready = False
-        self._rebuild_backend_controls()
+        self.options_panel.begin_capability_detection()
         worker = EncoderCapabilityDetectWorker(
             self.config_dir,
             self._selected_ffmpeg(),
@@ -950,29 +602,16 @@ class MainWindow(QMainWindow):
 
     def _on_encoder_capability_detection_completed(self, capabilities: dict) -> None:
         self.app_config["encoder_capabilities"] = capabilities
-        self._encoder_capabilities_ready = True
-        pending_backend = self._pending_backend
-        self._pending_backend = None
-        self._rebuild_backend_controls(
-            preferred_backend=pending_backend,
-            log_reset=pending_backend is not None,
-        )
-        self._refresh_decode_acceleration_choices(log_reset=True)
-        self._refresh_smart_mode_availability()
+        self.options_panel.set_runtime_capabilities(capabilities)
         self._append_log(
             self.tr.t(
                 "gui.log.encoder_detection_done",
                 summary=self._encoder_capability_summary(capabilities),
             )
         )
-        self._refresh_encoder_preset_choices()
 
     def _on_encoder_capability_detection_failed(self, message: str) -> None:
-        self._encoder_capabilities_ready = False
-        self._pending_backend = None
-        self._rebuild_backend_controls()
-        self._refresh_decode_acceleration_choices(log_reset=True, force_unavailable=True)
-        self._refresh_smart_mode_availability(force_unavailable=True)
+        self.options_panel.notify_capability_detection_failed()
         self._append_log(self.tr.t("gui.log.encoder_detection_failed", error=message))
 
     def _on_encoder_capability_detection_finished(self) -> None:
@@ -1044,7 +683,7 @@ class MainWindow(QMainWindow):
         self.app_config["language"] = self.language
         self._persist_runtime_state()
         self._apply_translations()
-        self._sync_dependent_controls()
+        self.options_panel.sync_dependent_controls()
 
     def _browse_source_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, self.tr.t("gui.dialog.select_source_file"))
@@ -1081,7 +720,7 @@ class MainWindow(QMainWindow):
         if not name:
             return
         try:
-            self._apply_options(load_preset(name, self.config_dir))
+            self.options_panel.apply_options(load_preset(name, self.config_dir))
         except Exception as exc:
             QMessageBox.critical(self, self.tr.t("gui.message.error"), str(exc))
             return
@@ -1095,7 +734,7 @@ class MainWindow(QMainWindow):
         old_language = self.language
         old_ffmpeg_path = str(self.app_config.get("ffmpeg_path", "")).strip()
         self.app_config.update(values)
-        self._apply_analysis_profile_settings()
+        self.options_panel.apply_analysis_profile_settings()
         self._persist_runtime_state()
         if values["language"] != old_language:
             self._language_changed(str(values["language"]))
@@ -1119,12 +758,12 @@ class MainWindow(QMainWindow):
         try:
             if action == "load":
                 options = load_preset(name, self.config_dir)
-                self._apply_options(options)
+                self.options_panel.apply_options(options)
                 self.preset_combo.setCurrentText(name)
                 self._append_log(self.tr.t("gui.log.preset_loaded", name=name))
             elif action == "save":
-                options = self._current_options()
-                self._validate_parallel_options_for_gui(options)
+                options = self.options_panel.read_options()
+                self.options_panel.validate_parallel_options(options)
                 path = save_preset(name, options, self.config_dir)
                 self.app_config["default_preset_name"] = name
                 self._refresh_presets()
@@ -1143,393 +782,6 @@ class MainWindow(QMainWindow):
             self._persist_runtime_state()
         except Exception as exc:
             QMessageBox.critical(self, self.tr.t("gui.message.error"), str(exc))
-
-    def _current_options(self) -> EncodeOptions:
-        ratio_text = self.ratio_edit.text().strip()
-        preset_value = self.encoder_preset_combo.currentData()
-        encoder_preset = str(preset_value) if isinstance(preset_value, str) and preset_value else None
-        pix_fmt = self.pix_fmt_edit.text().strip() or "yuv420p"
-        size_policy, unreachable_policy, skipped_policy = smart_policies_from_config(self.app_config)
-        profile_name, profile_settings = analysis_profiles_from_config(
-            {
-                **self.app_config,
-                "analysis_profile": self._current_analysis_profile_name().value,
-            }
-        )
-        return EncodeOptions(
-            codec=CodecChoice(self.codec_combo.currentText()),
-            compression_mode=CompressionMode(
-                self.compression_mode_combo.currentData()
-                or self.compression_mode_combo.currentText()
-            ),
-            backend=BackendChoice(self.backend_combo.currentText()),
-            parallel_enabled=self.parallel_check.isChecked(),
-            parallel_backends=tuple(self._selected_parallel_backends()),
-            ratio=float(ratio_text) if ratio_text else None,
-            min_vmaf=float(self.min_vmaf_spin.value()),
-            max_output_ratio=float(self.max_output_ratio_spin.value()) / 100.0,
-            min_video_kbps=int(self.min_bitrate_spin.value()),
-            max_video_kbps=int(self.max_bitrate_spin.value()),
-            container=ContainerChoice(self.container_combo.currentText()),
-            audio_mode=AudioMode(self.audio_mode_combo.currentText()),
-            audio_bitrate=self.audio_bitrate_edit.text().strip() or "128k",
-            copy_subtitles=self.copy_subtitles_check.isChecked(),
-            copy_external_subtitles=self.copy_external_subtitles_check.isChecked(),
-            two_pass=self.two_pass_check.isChecked(),
-            decode_acceleration=DecodeAcceleration(
-                self.decode_acceleration_combo.currentData()
-                or self.decode_acceleration_combo.currentText()
-            ),
-            encoder_preset=encoder_preset,
-            pix_fmt=pix_fmt,
-            maxrate_factor=float(self.maxrate_factor_spin.value()),
-            bufsize_factor=float(self.bufsize_factor_spin.value()),
-            overwrite=self.overwrite_check.isChecked(),
-            recursive=self.recursive_check.isChecked(),
-            size_blocked_policy=size_policy,
-            quality_unreachable_policy=unreachable_policy,
-            skipped_output_policy=skipped_policy,
-            analysis_profile=profile_name,
-            analysis_settings=profile_settings,
-        )
-
-    def _apply_options(self, options: EncodeOptions) -> None:
-        self.codec_combo.setCurrentText(options.codec.value)
-        mode_index = self.compression_mode_combo.findData(options.compression_mode.value)
-        if mode_index >= 0:
-            self.compression_mode_combo.setCurrentIndex(mode_index)
-        self._rebuild_backend_controls(preferred_backend=options.backend, log_reset=options.backend != BackendChoice.AUTO)
-        self._refresh_decode_acceleration_choices(
-            preferred=options.decode_acceleration,
-            log_reset=options.decode_acceleration != DecodeAcceleration.SOFTWARE,
-        )
-        self.parallel_check.setChecked(options.parallel_enabled)
-        selected = set(options.parallel_backends)
-        for checkbox, backend in self._parallel_backend_widgets():
-            checkbox.setChecked(backend in selected and not checkbox.isHidden())
-        self.ratio_edit.setText("" if options.ratio is None else str(options.ratio))
-        self.min_vmaf_spin.setValue(options.min_vmaf)
-        self.max_output_ratio_spin.setValue(
-            resolve_max_output_ratio(options.codec, options.max_output_ratio) * 100.0
-        )
-        self.container_combo.setCurrentText(options.container.value)
-        self.audio_mode_combo.setCurrentText(options.audio_mode.value)
-        self.audio_bitrate_edit.setText(options.audio_bitrate)
-        self.pix_fmt_edit.setText(options.pix_fmt)
-        self.min_bitrate_spin.setValue(options.min_video_kbps)
-        self.max_bitrate_spin.setValue(options.max_video_kbps)
-        self.maxrate_factor_spin.setValue(options.maxrate_factor)
-        self.bufsize_factor_spin.setValue(options.bufsize_factor)
-        self.copy_subtitles_check.setChecked(options.copy_subtitles)
-        self.copy_external_subtitles_check.setChecked(options.copy_external_subtitles)
-        self.two_pass_check.setChecked(options.two_pass)
-        self.overwrite_check.setChecked(options.overwrite)
-        self.recursive_check.setChecked(options.recursive)
-        self._refresh_encoder_preset_choices(preset=options.encoder_preset, log_invalid=options.encoder_preset is not None)
-        self._sync_dependent_controls()
-
-    def _on_codec_changed(self, *_args) -> None:
-        current_codec = self._current_codec()
-        previous_default = resolve_max_output_ratio(self._last_codec_for_ratio, None) * 100.0
-        if abs(self.max_output_ratio_spin.value() - previous_default) < 0.05:
-            self.max_output_ratio_spin.setValue(
-                resolve_max_output_ratio(current_codec, None) * 100.0
-            )
-        self._last_codec_for_ratio = current_codec
-        self._rebuild_backend_controls()
-        self._refresh_encoder_preset_choices()
-
-    def _selected_input(self) -> Path | None:
-        text = self.source_combo.currentText().strip()
-        return Path(text).expanduser().resolve() if text else None
-
-    def _selected_output(self) -> Path | None:
-        text = self.output_edit.text().strip()
-        return Path(text).expanduser().resolve() if text else None
-
-    def _selected_workdir(self) -> Path:
-        text = str(self.app_config.get("workdir_path", "")).strip()
-        return Path(text).expanduser().resolve() if text else self.default_workdir.resolve()
-
-    def _selected_ffmpeg(self) -> str | None:
-        text = str(self.app_config.get("ffmpeg_path", "")).strip()
-        return text or None
-
-    def _selected_ffprobe(self) -> str | None:
-        text = str(self.app_config.get("ffprobe_path", "")).strip()
-        return text or None
-
-    def _parallel_backend_widgets(self) -> list[tuple[QCheckBox, BackendChoice]]:
-        return [
-            (self.parallel_nvenc_check, BackendChoice.NVENC),
-            (self.parallel_qsv_check, BackendChoice.QSV),
-            (self.parallel_amf_check, BackendChoice.AMF),
-            (self.parallel_videotoolbox_check, BackendChoice.VIDEOTOOLBOX),
-            (self.parallel_cpu_check, BackendChoice.CPU),
-        ]
-
-    def _current_codec(self) -> CodecChoice:
-        return CodecChoice(self.codec_combo.currentText())
-
-    def _runtime_capabilities(self) -> dict | None:
-        capabilities = self.app_config.get("encoder_capabilities")
-        return capabilities if self._encoder_capabilities_ready and isinstance(capabilities, dict) else None
-
-    def _refresh_decode_acceleration_choices(
-        self,
-        *,
-        preferred=_PRESET_UNSET,
-        log_reset: bool = False,
-        force_unavailable: bool = False,
-    ) -> None:
-        current_value = self.decode_acceleration_combo.currentData()
-        desired_value = current_value if preferred is self._PRESET_UNSET else preferred
-        try:
-            desired = DecodeAcceleration(desired_value)
-        except ValueError:
-            desired = DecodeAcceleration.SOFTWARE
-
-        capabilities = self._runtime_capabilities()
-        runtime_known = capabilities is not None or force_unavailable
-        hwaccels = capabilities.get("hwaccels", []) if capabilities is not None else []
-        videotoolbox_available = (
-            not force_unavailable
-            and isinstance(hwaccels, list)
-            and "videotoolbox" in {str(item).strip().lower() for item in hwaccels}
-        )
-
-        videotoolbox_index = self.decode_acceleration_combo.findData(DecodeAcceleration.VIDEOTOOLBOX.value)
-        model = self.decode_acceleration_combo.model()
-        item_getter = getattr(model, "item", None)
-        if videotoolbox_index >= 0 and callable(item_getter):
-            item = item_getter(videotoolbox_index)
-            if item is not None:
-                item.setEnabled(videotoolbox_available)
-        if runtime_known and not videotoolbox_available:
-            self.decode_acceleration_combo.setToolTip(
-                self.tr.t("gui.tooltip.decode_acceleration_unavailable")
-            )
-        else:
-            self.decode_acceleration_combo.setToolTip("")
-
-        if desired == DecodeAcceleration.VIDEOTOOLBOX and runtime_known and not videotoolbox_available:
-            desired = DecodeAcceleration.SOFTWARE
-            if log_reset:
-                self._append_log(self.tr.t("gui.log.decode_acceleration_reset"))
-
-        selected_index = self.decode_acceleration_combo.findData(desired.value)
-        if selected_index < 0:
-            selected_index = self.decode_acceleration_combo.findData(DecodeAcceleration.SOFTWARE.value)
-        if selected_index >= 0:
-            self.decode_acceleration_combo.blockSignals(True)
-            self.decode_acceleration_combo.setCurrentIndex(selected_index)
-            self.decode_acceleration_combo.blockSignals(False)
-
-    def _capability_has_backend(self, codec: CodecChoice, backend: BackendChoice) -> bool:
-        if backend not in ENCODER_CANDIDATES[codec]:
-            return False
-        capabilities = self._runtime_capabilities()
-        if capabilities is None:
-            return backend == BackendChoice.CPU
-        codecs = capabilities.get("codecs")
-        if not isinstance(codecs, dict):
-            return False
-        items = codecs.get(codec.value)
-        if not isinstance(items, list):
-            return False
-        return any(
-            isinstance(item, dict)
-            and str(item.get("backend", "")).strip() == backend.value
-            for item in items
-        )
-
-    def _available_explicit_backends_for_current_codec(self) -> list[BackendChoice]:
-        codec = self._current_codec()
-        return [backend for backend in EXPLICIT_BACKEND_ORDER if self._capability_has_backend(codec, backend)]
-
-    def _rebuild_backend_controls(
-        self,
-        *,
-        preferred_backend: BackendChoice | None = None,
-        log_reset: bool = False,
-    ) -> None:
-        current_text = self.backend_combo.currentText().strip()
-        try:
-            current_backend = BackendChoice(current_text) if current_text else BackendChoice.AUTO
-        except ValueError:
-            current_backend = BackendChoice.AUTO
-        desired_backend = preferred_backend or current_backend
-
-        choices = [BackendChoice.AUTO, *self._available_explicit_backends_for_current_codec()]
-        if self._runtime_capabilities() is None and BackendChoice.CPU not in choices:
-            choices.append(BackendChoice.CPU)
-
-        if desired_backend in choices:
-            selected_backend = desired_backend
-        else:
-            selected_backend = BackendChoice.AUTO
-            if self._runtime_capabilities() is None and desired_backend == BackendChoice.VIDEOTOOLBOX:
-                self._pending_backend = desired_backend
-            if log_reset and desired_backend != BackendChoice.AUTO:
-                if not (
-                    self._runtime_capabilities() is None
-                    and desired_backend == BackendChoice.VIDEOTOOLBOX
-                ):
-                    self._append_log(
-                        self.tr.t(
-                            "gui.log.backend_reset",
-                            backend=desired_backend.value,
-                            fallback=selected_backend.value,
-                        )
-                    )
-
-        self.backend_combo.blockSignals(True)
-        self.backend_combo.clear()
-        for backend in choices:
-            self.backend_combo.addItem(backend.value, backend.value)
-        self.backend_combo.setCurrentText(selected_backend.value)
-        self.backend_combo.blockSignals(False)
-        tooltip_key = "gui.tooltip.backend_filtered" if self._runtime_capabilities() is not None else "gui.tooltip.backend_detecting"
-        self.backend_combo.setToolTip(self.tr.t(tooltip_key))
-
-        available_parallel = set(choices) - {BackendChoice.AUTO}
-        for checkbox, backend in self._parallel_backend_widgets():
-            visible = backend in available_parallel
-            checkbox.setVisible(visible)
-            if not visible:
-                checkbox.setChecked(False)
-            checkbox.setToolTip("" if visible else self.tr.t("gui.tooltip.parallel_backend_unavailable"))
-        self._sync_dependent_controls()
-
-    def _sync_dependent_controls(self) -> None:
-        mode_value = self.compression_mode_combo.currentData() or self.compression_mode_combo.currentText()
-        smart_mode = mode_value == CompressionMode.SMART.value
-        self.ratio_edit.setEnabled(not smart_mode)
-        self.min_vmaf_spin.setEnabled(smart_mode)
-        self.max_output_ratio_spin.setEnabled(smart_mode)
-        self.analysis_profile_combo.setEnabled(smart_mode)
-        self.sample_mode_combo.setEnabled(not smart_mode)
-        self.sample_duration_spin.setEnabled(not smart_mode)
-        custom_sample = (
-            not smart_mode
-            and self.sample_mode_combo.currentText() == PreviewSampleMode.CUSTOM.value
-        )
-        self.sample_start_spin.setEnabled(custom_sample)
-        self.audio_bitrate_edit.setEnabled(self.audio_mode_combo.currentText() == AudioMode.AAC.value)
-        parallel_enabled = self.parallel_check.isChecked()
-        self.backend_combo.setEnabled(not parallel_enabled)
-        for widget, _backend in self._parallel_backend_widgets():
-            widget.setEnabled(parallel_enabled and not widget.isHidden())
-
-    def _refresh_smart_mode_availability(self, *, force_unavailable: bool = False) -> None:
-        capabilities = self._runtime_capabilities()
-        vmaf = capabilities.get("vmaf") if capabilities else None
-        known = force_unavailable or isinstance(vmaf, dict)
-        available = bool(isinstance(vmaf, dict) and vmaf.get("standard_model"))
-        index = self.compression_mode_combo.findData(CompressionMode.SMART.value)
-        if index >= 0:
-            item = self.compression_mode_combo.model().item(index)
-            if item is not None:
-                item.setEnabled(not known or available)
-        if known and not available:
-            if self.compression_mode_combo.currentData() == CompressionMode.SMART.value:
-                fixed_index = self.compression_mode_combo.findData(CompressionMode.FIXED_BITRATE.value)
-                if fixed_index >= 0:
-                    self.compression_mode_combo.setCurrentIndex(fixed_index)
-            message = ""
-            if isinstance(vmaf, dict):
-                message = str(vmaf.get("error_message") or "")
-            self.compression_mode_combo.setToolTip(
-                message or self.tr.t("gui.tooltip.smart_unavailable")
-            )
-        else:
-            self.compression_mode_combo.setToolTip("")
-        self._sync_dependent_controls()
-
-    def _default_preset_text(self) -> str:
-        return self.tr.t("gui.value.encoder_preset_default")
-
-    def _current_encoder_preset(self) -> str | None:
-        value = self.encoder_preset_combo.currentData()
-        return value if isinstance(value, str) and value else None
-
-    def _resolve_encoder_for_preset_choices(self):
-        try:
-            ffmpeg_path, _ffprobe_path = discover_ffmpeg_tools(self._selected_ffmpeg(), self._selected_ffprobe())
-            runtime_capabilities = self._runtime_capabilities()
-            available_encoders = set() if runtime_capabilities is not None else list_available_encoders(ffmpeg_path)
-            encoder_info = resolve_encoder(
-                CodecChoice(self.codec_combo.currentText()),
-                BackendChoice(self.backend_combo.currentText()),
-                available_encoders,
-                ffmpeg_path,
-                runtime_capabilities=runtime_capabilities,
-            )
-            return ffmpeg_path, encoder_info
-        except Exception:
-            return None
-
-    def _set_encoder_preset_items(self, choices: list[str]) -> None:
-        self.encoder_preset_combo.blockSignals(True)
-        self.encoder_preset_combo.clear()
-        self.encoder_preset_combo.addItem(self._default_preset_text(), None)
-        for choice in choices:
-            self.encoder_preset_combo.addItem(choice, choice)
-        self.encoder_preset_combo.blockSignals(False)
-
-    def _select_encoder_preset(self, preset: str | None, *, log_invalid: bool) -> None:
-        if preset is None:
-            self.encoder_preset_combo.setCurrentIndex(0)
-            return
-        index = self.encoder_preset_combo.findData(preset)
-        if index >= 0:
-            self.encoder_preset_combo.setCurrentIndex(index)
-            return
-        self.encoder_preset_combo.setCurrentIndex(0)
-        if log_invalid:
-            self._append_log(self.tr.t("gui.log.encoder_preset_reset"))
-
-    def _refresh_encoder_preset_choices(self, *_args, preset=_PRESET_UNSET, log_invalid: bool = False) -> None:
-        desired_preset = self._current_encoder_preset() if preset is self._PRESET_UNSET else preset
-        if self.backend_combo.currentText() == BackendChoice.AUTO.value:
-            self._set_encoder_preset_items([])
-            self.encoder_preset_combo.setEnabled(False)
-            self.encoder_preset_combo.setToolTip(self.tr.t("gui.tooltip.encoder_preset_auto"))
-            self._select_encoder_preset(None, log_invalid=False)
-            return
-        resolved = self._resolve_encoder_for_preset_choices()
-        if resolved is None:
-            self._set_encoder_preset_items([])
-            self.encoder_preset_combo.setEnabled(False)
-            self.encoder_preset_combo.setToolTip(self.tr.t("gui.tooltip.encoder_preset_unavailable"))
-            self._select_encoder_preset(None, log_invalid=log_invalid and desired_preset is not None)
-            return
-        ffmpeg_path, encoder_info = resolved
-        choices = preset_choices_for_encoder(ffmpeg_path, encoder_info.encoder_name)
-        self._set_encoder_preset_items(choices)
-        self.encoder_preset_combo.setEnabled(bool(choices))
-        tooltip_key = "gui.tooltip.encoder_preset_unavailable" if not choices else ""
-        self.encoder_preset_combo.setToolTip(self.tr.t(tooltip_key) if tooltip_key else "")
-        self._select_encoder_preset(desired_preset, log_invalid=log_invalid)
-
-    def _selected_parallel_backends(self) -> list[BackendChoice]:
-        selected: list[BackendChoice] = []
-        for checkbox, backend in self._parallel_backend_widgets():
-            if not checkbox.isHidden() and checkbox.isChecked():
-                selected.append(backend)
-        return selected
-
-    def _validate_parallel_options_for_gui(self, options: EncodeOptions, *, allow_parallel: bool = True) -> None:
-        if not options.parallel_enabled:
-            return
-        if not allow_parallel:
-            raise ValueError(self.tr.t("gui.message.parallel_preview_not_supported"))
-        if not options.parallel_backends:
-            raise ValueError(self.tr.t("gui.message.parallel_requires_backends"))
-        if options.two_pass:
-            raise ValueError(self.tr.t("gui.message.parallel_two_pass_not_supported"))
-        if options.encoder_preset:
-            raise ValueError(self.tr.t("gui.message.parallel_preset_not_supported"))
 
     def _save_app_config_preserving_capabilities(self) -> None:
         snapshot = {key: value for key, value in self.app_config.items() if key != "encoder_capabilities"}
@@ -1553,7 +805,7 @@ class MainWindow(QMainWindow):
         self.app_config.setdefault("ffprobe_path", "")
         self.app_config.setdefault("keep_preview_temp", True)
         self.app_config.setdefault("log_level", "info")
-        self.app_config["analysis_profile"] = self._current_analysis_profile_name().value
+        self.app_config["analysis_profile"] = self.options_panel.current_analysis_profile_name().value
 
         recent_paths = list(self.app_config.get("recent_paths", []))
         if source_text:
@@ -1572,9 +824,9 @@ class MainWindow(QMainWindow):
             self.source_combo,
             self.preset_combo,
             self.output_edit,
-            self.options_tabs,
         ]:
             widget.setEnabled(enabled)
+        self.options_panel.set_busy(not enabled)
 
     def _refresh_action_state(self) -> None:
         plan_preview_busy = self.active_worker is not None
@@ -1757,8 +1009,8 @@ class MainWindow(QMainWindow):
         input_path = self._selected_input()
         if input_path is None:
             raise ValueError(self.tr.t("gui.message.select_source"))
-        options = self._current_options()
-        self._validate_parallel_options_for_gui(options)
+        options = self.options_panel.read_options()
+        self.options_panel.validate_parallel_options(options)
         output_dir = self._selected_output()
         workdir = self._selected_workdir()
         ffmpeg_path = self._selected_ffmpeg()
@@ -1789,9 +1041,9 @@ class MainWindow(QMainWindow):
     def _start_plan_for_files(self, files: list[Path]) -> None:
         if not files:
             return
-        options = self._current_options()
+        options = self.options_panel.read_options()
         try:
-            self._validate_parallel_options_for_gui(options)
+            self.options_panel.validate_parallel_options(options)
         except Exception as exc:
             QMessageBox.warning(self, self.tr.t("gui.message.warning"), str(exc))
             return
@@ -1842,17 +1094,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, self.tr.t("gui.message.warning"), self.tr.t("gui.message.preview_requires_file"))
             return
 
-        preview_options = PreviewOptions(
-            sample_mode=PreviewSampleMode(self.sample_mode_combo.currentText()),
-            sample_duration_sec=float(self.sample_duration_spin.value()),
-            custom_start_sec=(
-                float(self.sample_start_spin.value())
-                if self.sample_mode_combo.currentText() == PreviewSampleMode.CUSTOM.value
-                else None
-            ),
-        )
+        preview_options = self.options_panel.read_preview_options()
         try:
-            self._validate_parallel_options_for_gui(options, allow_parallel=False)
+            self.options_panel.validate_parallel_options(options, allow_parallel=False)
         except Exception as exc:
             QMessageBox.warning(self, self.tr.t("gui.message.warning"), str(exc))
             return

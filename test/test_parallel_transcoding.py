@@ -300,15 +300,16 @@ class ParallelGuiTestCase(unittest.TestCase):
             window._on_encoder_capability_detection_completed(
                 _capabilities([(BackendChoice.NVENC, "hevc_nvenc"), (BackendChoice.QSV, "hevc_qsv")])
             )
-            window.parallel_check.setChecked(True)
-            window.parallel_nvenc_check.setChecked(True)
-            window.parallel_qsv_check.setChecked(True)
-            window._sync_dependent_controls()
-            options = window._current_options()
+            panel = window.options_panel
+            panel.parallel_check.setChecked(True)
+            panel.parallel_nvenc_check.setChecked(True)
+            panel.parallel_qsv_check.setChecked(True)
+            panel.sync_dependent_controls()
+            options = panel.read_options()
             self.assertTrue(options.parallel_enabled)
             self.assertEqual(options.parallel_backends, (BackendChoice.NVENC, BackendChoice.QSV))
-            self.assertFalse(window.backend_combo.isEnabled())
-            self.assertTrue(window.parallel_nvenc_check.isEnabled())
+            self.assertFalse(panel.backend_combo.isEnabled())
+            self.assertTrue(panel.parallel_nvenc_check.isEnabled())
         finally:
             window.close()
 
@@ -316,13 +317,13 @@ class ParallelGuiTestCase(unittest.TestCase):
         window = MainWindow(self.repo_root, language="en")
         try:
             with self.assertRaisesRegex(ValueError, "requires at least one backend"):
-                window._validate_parallel_options_for_gui(EncodeOptions(parallel_enabled=True))
+                window.options_panel.validate_parallel_options(EncodeOptions(parallel_enabled=True))
             with self.assertRaisesRegex(ValueError, "does not support two-pass"):
-                window._validate_parallel_options_for_gui(
+                window.options_panel.validate_parallel_options(
                     EncodeOptions(parallel_enabled=True, parallel_backends=(BackendChoice.NVENC,), two_pass=True)
                 )
             with self.assertRaisesRegex(ValueError, "does not support a manual encoder preset"):
-                window._validate_parallel_options_for_gui(
+                window.options_panel.validate_parallel_options(
                     EncodeOptions(
                         parallel_enabled=True,
                         parallel_backends=(BackendChoice.NVENC,),

@@ -135,20 +135,20 @@ class AnalysisProfileGuiTestCase(unittest.TestCase):
             self.assertFalse(hasattr(window, "size_blocked_policy_combo"))
             self.assertFalse(hasattr(window, "quality_unreachable_policy_combo"))
             self.assertFalse(hasattr(window, "skipped_output_policy_combo"))
-            self.assertGreaterEqual(window.analysis_profile_combo.count(), 3)
-            balance_index = window.analysis_profile_combo.findData(AnalysisProfileName.BALANCE.value)
-            self.assertEqual(window.analysis_profile_combo.itemText(balance_index), "Balance")
+            self.assertGreaterEqual(window.options_panel.analysis_profile_combo.count(), 3)
+            balance_index = window.options_panel.analysis_profile_combo.findData(AnalysisProfileName.BALANCE.value)
+            self.assertEqual(window.options_panel.analysis_profile_combo.itemText(balance_index), "Balance")
 
             window.app_config["size_blocked_policy"] = SizeBlockedPolicy.ASK.value
             window.app_config["analysis_profiles"] = {"fast": {"sample_duration_sec": 4.0}}
-            fast_index = window.analysis_profile_combo.findData(AnalysisProfileName.FAST.value)
+            fast_index = window.options_panel.analysis_profile_combo.findData(AnalysisProfileName.FAST.value)
             with patch.object(window, "_save_app_config_preserving_capabilities") as save_config:
-                window.analysis_profile_combo.setCurrentIndex(balance_index)
+                window.options_panel.analysis_profile_combo.setCurrentIndex(balance_index)
                 save_config.reset_mock()
-                window.analysis_profile_combo.setCurrentIndex(fast_index)
+                window.options_panel.analysis_profile_combo.setCurrentIndex(fast_index)
                 save_config.assert_called_once()
             self.assertEqual(window.app_config["analysis_profile"], AnalysisProfileName.FAST.value)
-            options = window._current_options()
+            options = window.options_panel.read_options()
             self.assertEqual(options.size_blocked_policy, SizeBlockedPolicy.ASK)
             self.assertEqual(options.analysis_profile, AnalysisProfileName.FAST)
             self.assertEqual(options.analysis_settings.sample_duration_sec, 4.0)
@@ -165,7 +165,7 @@ class AnalysisProfileGuiTestCase(unittest.TestCase):
             window = MainWindow(self.repo_root, language="en")
         try:
             self.assertEqual(
-                window.analysis_profile_combo.currentData(),
+                window.options_panel.analysis_profile_combo.currentData(),
                 AnalysisProfileName.PRECISE.value,
             )
             self.assertEqual(

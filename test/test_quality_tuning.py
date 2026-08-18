@@ -77,7 +77,8 @@ def _capabilities_by_codec(
 
 
 def _backend_combo_items(window: MainWindow) -> list[str]:
-    return [window.backend_combo.itemText(index) for index in range(window.backend_combo.count())]
+    combo = window.options_panel.backend_combo
+    return [combo.itemText(index) for index in range(combo.count())]
 
 
 def _plan_item(encoder_name: str, backend: BackendChoice, options: EncodeOptions | None = None) -> EncodePlanItem:
@@ -250,10 +251,10 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
                 )
             )
             with (
-                patch("gui.gui_mainwindow.discover_ffmpeg_tools", return_value=(Path("ffmpeg"), Path("ffprobe"))),
-                patch("gui.gui_mainwindow.list_available_encoders", return_value={"hevc_nvenc", "hevc_qsv"}),
+                patch("gui.encode_options_panel.discover_ffmpeg_tools", return_value=(Path("ffmpeg"), Path("ffprobe"))),
+                patch("gui.encode_options_panel.list_available_encoders", return_value={"hevc_nvenc", "hevc_qsv"}),
                 patch(
-                    "gui.gui_mainwindow.resolve_encoder",
+                    "gui.encode_options_panel.resolve_encoder",
                     side_effect=lambda codec, backend, available, ffmpeg_path=None, runtime_capabilities=None: _encoder_info(
                         "hevc_nvenc" if backend == BackendChoice.NVENC else "hevc_qsv",
                         backend,
@@ -261,16 +262,17 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "gui.gui_mainwindow.preset_choices_for_encoder",
+                    "gui.encode_options_panel.preset_choices_for_encoder",
                     side_effect=lambda ffmpeg_path, encoder_name: ["p1", "p2", "p3"] if encoder_name == "hevc_nvenc" else ["veryfast", "fast", "slow"],
                 ),
             ):
-                window.backend_combo.setCurrentText("nvenc")
-                window._refresh_encoder_preset_choices()
-                self.assertEqual(window.encoder_preset_combo.itemText(1), "p1")
-                window.backend_combo.setCurrentText("qsv")
-                window._refresh_encoder_preset_choices()
-                self.assertEqual(window.encoder_preset_combo.itemText(1), "veryfast")
+                panel = window.options_panel
+                panel.backend_combo.setCurrentText("nvenc")
+                panel.refresh_encoder_preset_choices()
+                self.assertEqual(panel.encoder_preset_combo.itemText(1), "p1")
+                panel.backend_combo.setCurrentText("qsv")
+                panel.refresh_encoder_preset_choices()
+                self.assertEqual(panel.encoder_preset_combo.itemText(1), "veryfast")
         finally:
             window.close()
 
@@ -291,10 +293,11 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
                 )
             )
             self.assertEqual(_backend_combo_items(window), ["auto", "cpu"])
-            self.assertTrue(window.parallel_qsv_check.isHidden())
-            self.assertTrue(window.parallel_nvenc_check.isHidden())
-            self.assertTrue(window.parallel_amf_check.isHidden())
-            self.assertFalse(window.parallel_cpu_check.isHidden())
+            panel = window.options_panel
+            self.assertTrue(panel.parallel_qsv_check.isHidden())
+            self.assertTrue(panel.parallel_nvenc_check.isHidden())
+            self.assertTrue(panel.parallel_amf_check.isHidden())
+            self.assertFalse(panel.parallel_cpu_check.isHidden())
         finally:
             window.close()
 
@@ -307,13 +310,14 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
                     [(BackendChoice.CPU, "libsvtav1")],
                 )
             )
-            window.codec_combo.setCurrentText("hevc")
+            panel = window.options_panel
+            panel.codec_combo.setCurrentText("hevc")
             self.assertEqual(_backend_combo_items(window), ["auto", "qsv", "cpu"])
-            self.assertFalse(window.parallel_qsv_check.isHidden())
+            self.assertFalse(panel.parallel_qsv_check.isHidden())
 
-            window.codec_combo.setCurrentText("av1")
+            panel.codec_combo.setCurrentText("av1")
             self.assertEqual(_backend_combo_items(window), ["auto", "cpu"])
-            self.assertTrue(window.parallel_qsv_check.isHidden())
+            self.assertTrue(panel.parallel_qsv_check.isHidden())
         finally:
             window.close()
 
@@ -326,15 +330,16 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
                     [(BackendChoice.CPU, "libsvtav1")],
                 )
             )
-            window._apply_options(
+            panel = window.options_panel
+            panel.apply_options(
                 EncodeOptions(
                     backend=BackendChoice.QSV,
                     parallel_enabled=True,
                     parallel_backends=(BackendChoice.QSV, BackendChoice.CPU),
                 )
             )
-            self.assertEqual(window.backend_combo.currentText(), "auto")
-            options = window._current_options()
+            self.assertEqual(panel.backend_combo.currentText(), "auto")
+            options = panel.read_options()
             self.assertEqual(options.backend, BackendChoice.AUTO)
             self.assertEqual(options.parallel_backends, (BackendChoice.CPU,))
         finally:
@@ -343,8 +348,9 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
     def test_encoder_detection_failure_keeps_safe_backend_choices(self) -> None:
         window = MainWindow(self.repo_root, language="en")
         try:
-            window.backend_combo.clear()
-            window.backend_combo.addItems(["auto", "nvenc", "qsv", "cpu"])
+            panel = window.options_panel
+            panel.backend_combo.clear()
+            panel.backend_combo.addItems(["auto", "nvenc", "qsv", "cpu"])
             window._on_encoder_capability_detection_failed("boom")
             self.assertEqual(_backend_combo_items(window), ["auto", "cpu"])
         finally:
@@ -353,10 +359,11 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
     def test_gui_auto_backend_uses_default_only_and_disables_combo(self) -> None:
         window = MainWindow(self.repo_root, language="en")
         try:
-            window.backend_combo.setCurrentText("auto")
-            window._refresh_encoder_preset_choices()
-            self.assertEqual(window.encoder_preset_combo.count(), 1)
-            self.assertFalse(window.encoder_preset_combo.isEnabled())
+            panel = window.options_panel
+            panel.backend_combo.setCurrentText("auto")
+            panel.refresh_encoder_preset_choices()
+            self.assertEqual(panel.encoder_preset_combo.count(), 1)
+            self.assertFalse(panel.encoder_preset_combo.isEnabled())
         finally:
             window.close()
 
@@ -364,16 +371,16 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
         window = MainWindow(self.repo_root, language="en")
         try:
             with (
-                patch("gui.gui_mainwindow.discover_ffmpeg_tools", return_value=(Path("ffmpeg"), Path("ffprobe"))),
-                patch("gui.gui_mainwindow.list_available_encoders", return_value={"hevc_nvenc"}),
+                patch("gui.encode_options_panel.discover_ffmpeg_tools", return_value=(Path("ffmpeg"), Path("ffprobe"))),
+                patch("gui.encode_options_panel.list_available_encoders", return_value={"hevc_nvenc"}),
                 patch(
-                    "gui.gui_mainwindow.resolve_encoder",
+                    "gui.encode_options_panel.resolve_encoder",
                     return_value=_encoder_info("hevc_nvenc", BackendChoice.NVENC, "p6"),
                 ),
-                patch("gui.gui_mainwindow.preset_choices_for_encoder", return_value=["p5", "p6"]),
+                patch("gui.encode_options_panel.preset_choices_for_encoder", return_value=["p5", "p6"]),
             ):
-                window._apply_options(EncodeOptions(backend=BackendChoice.NVENC, encoder_preset="invalid"))
-                self.assertIsNone(window.encoder_preset_combo.currentData())
+                window.options_panel.apply_options(EncodeOptions(backend=BackendChoice.NVENC, encoder_preset="invalid"))
+                self.assertIsNone(window.options_panel.encoder_preset_combo.currentData())
         finally:
             window.close()
 

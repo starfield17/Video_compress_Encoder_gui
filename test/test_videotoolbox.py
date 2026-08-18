@@ -361,25 +361,26 @@ class VideoToolboxCliAndGuiTestCase(unittest.TestCase):
                 hwaccels=["videotoolbox"],
             )
             window._on_encoder_capability_detection_completed(capabilities)
-            self.assertIn("videotoolbox", [window.backend_combo.itemText(i) for i in range(window.backend_combo.count())])
-            self.assertFalse(window.parallel_videotoolbox_check.isHidden())
+            panel = window.options_panel
+            self.assertIn("videotoolbox", [panel.backend_combo.itemText(i) for i in range(panel.backend_combo.count())])
+            self.assertFalse(panel.parallel_videotoolbox_check.isHidden())
             self.assertEqual(
-                [window.decode_acceleration_combo.itemData(i) for i in range(window.decode_acceleration_combo.count())],
+                [panel.decode_acceleration_combo.itemData(i) for i in range(panel.decode_acceleration_combo.count())],
                 ["software", "videotoolbox"],
             )
-            self.assertTrue(window.decode_acceleration_combo.model().item(1).isEnabled())
+            self.assertTrue(panel.decode_acceleration_combo.model().item(1).isEnabled())
 
-            window._apply_options(
+            panel.apply_options(
                 EncodeOptions(
                     backend=BackendChoice.VIDEOTOOLBOX,
                     decode_acceleration=DecodeAcceleration.VIDEOTOOLBOX,
                 )
             )
-            self.assertEqual(window._current_options().decode_acceleration, DecodeAcceleration.VIDEOTOOLBOX)
+            self.assertEqual(panel.read_options().decode_acceleration, DecodeAcceleration.VIDEOTOOLBOX)
 
-            window.codec_combo.setCurrentText("av1")
-            self.assertNotIn("videotoolbox", [window.backend_combo.itemText(i) for i in range(window.backend_combo.count())])
-            self.assertEqual(window.backend_combo.currentText(), "auto")
+            panel.codec_combo.setCurrentText("av1")
+            self.assertNotIn("videotoolbox", [panel.backend_combo.itemText(i) for i in range(panel.backend_combo.count())])
+            self.assertEqual(panel.backend_combo.currentText(), "auto")
         finally:
             window.close()
 
@@ -389,9 +390,10 @@ class VideoToolboxCliAndGuiTestCase(unittest.TestCase):
             window._on_encoder_capability_detection_completed(
                 _capabilities([("cpu", "libx265")], [("cpu", "libsvtav1")], hwaccels=[])
             )
-            window._apply_options(EncodeOptions(decode_acceleration=DecodeAcceleration.VIDEOTOOLBOX))
-            self.assertEqual(window.decode_acceleration_combo.currentData(), "software")
-            self.assertFalse(window.decode_acceleration_combo.model().item(1).isEnabled())
+            panel = window.options_panel
+            panel.apply_options(EncodeOptions(decode_acceleration=DecodeAcceleration.VIDEOTOOLBOX))
+            self.assertEqual(panel.decode_acceleration_combo.currentData(), "software")
+            self.assertFalse(panel.decode_acceleration_combo.model().item(1).isEnabled())
         finally:
             window.close()
 
