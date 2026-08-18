@@ -1,4 +1,5 @@
 {
+  "language.name": "English",
   "app.title": "Video Compressor",
   "cli.plan_header": "Plan items: {count}",
   "cli.plan_ready": "READY",
