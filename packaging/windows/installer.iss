@@ -8,8 +8,8 @@
 ;
 ; v1.6.1 is the installer-backend bridge release: it migrates legacy per-user
 ; WiX/MSI installs through the Windows Installer before installing this Inno
-; version (see the [Code] section). AppId is the stable identity for all
-; future Inno releases; never change it.
+; version (see the Code section at the end of this file). AppId is the stable
+; identity for all future Inno releases; never change it.
 #define MyAppId "4478BF58-30E3-5232-AE83-3E33254B3385"
 
 [Setup]
@@ -33,7 +33,7 @@ PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\Video Compressor
 DefaultGroupName=Video Compressor
 
-; Stable per-user Add/Remove Programs registration (no [Registry] section).
+; Stable per-user Add/Remove Programs registration (no custom registry keys).
 UninstallDisplayName=Video Compressor
 UninstallDisplayIcon={app}\video-compressor.exe
 OutputBaseFilename=video-compressor-setup
@@ -69,13 +69,9 @@ Name: "{group}\Video Compressor"; Filename: "{app}\video-compressor.exe"; Workin
 
 [Code]
 const
-  VC_PROGRAM_GUID = '{4478BF58-30E3-5232-AE83-3E33254B3385}';
   VC_MSI_DISPLAY_NAME = 'Video Compressor';
   VC_MSI_PUBLISHER = 'starfield17';
   VC_UNINSTALL_KEY = 'Software\Microsoft\Windows\CurrentVersion\Uninstall';
-
-var
-  LegacyMsiErrorMessage: String;
 
 procedure ParseVersion(const Version: String; var Major, Minor, Patch: Integer);
 var
@@ -196,11 +192,10 @@ begin
   begin
     ExitCode := MsiUninstallProduct(ProductCode, True);
     if ExitCode <> 0 then
-      Result := Format(
-        'The legacy MSI installation (version %s) could not be removed. ' +
-        'Windows Installer returned error code %d. Aborting the new install ' +
-        'to avoid two conflicting Video Compressor registrations.',
-        [MsiVersion, ExitCode]);
+      Result := 'The legacy MSI installation (version ' + MsiVersion + ') could not be removed. ' +
+        'Windows Installer returned error code ' + IntToStr(ExitCode) + '. Aborting the new install ' +
+        'to avoid two conflicting Video Compressor registrations.';
+    { On success, run without an else branch: the fresh Inno install proceeds. }
     Exit;
   end;
 
@@ -215,9 +210,8 @@ begin
 
   ExitCode := MsiUninstallProduct(ProductCode, False);
   if ExitCode <> 0 then
-    RaiseException(Format(
-      'Setup could not remove the legacy MSI installation (version %s). ' +
-      'Windows Installer returned error code %d. Aborting the new install ' +
-      'to avoid two conflicting Video Compressor registrations.',
-      [MsiVersion, ExitCode]));
+    RaiseException(
+      'Setup could not remove the legacy MSI installation (version ' + MsiVersion + '). ' +
+      'Windows Installer returned error code ' + IntToStr(ExitCode) + '. Aborting the new install ' +
+      'to avoid two conflicting Video Compressor registrations.');
 end;
