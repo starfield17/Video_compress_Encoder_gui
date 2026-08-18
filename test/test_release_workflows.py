@@ -85,6 +85,12 @@ class ReleaseWorkflowMatrixTestCase(unittest.TestCase):
         self.assertIn("INNO_ISCC", workflow)
         self.assertGreaterEqual(workflow.count('--iscc "$env:INNO_ISCC"'), 2)
         self.assertIn("-setup.exe", workflow)
+        self.assertIn(
+            """path: |
+            video-compressor-${{ github.ref_name }}-${{ matrix.target }}.*
+            video-compressor-${{ github.ref_name }}-${{ matrix.target }}-setup.exe""",
+            workflow,
+        )
         self.assertEqual(rows["windows-x86_64"]["installer_architecture"], "x86_64")
         self.assertEqual(rows["windows-arm64"]["installer_architecture"], "arm64")
         self.assertIn('python-version: "3.13"', workflow)

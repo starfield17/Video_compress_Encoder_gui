@@ -452,7 +452,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: release-package-${{ matrix.target }}
-          path: video-compressor-${{ github.ref_name }}-${{ matrix.target }}.*
+          path: |
+            video-compressor-${{ github.ref_name }}-${{ matrix.target }}.*
+            video-compressor-${{ github.ref_name }}-${{ matrix.target }}-setup.exe
           include-hidden-files: true
           if-no-files-found: error
 
