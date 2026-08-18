@@ -117,7 +117,7 @@ begin
     or ((Major = 1) and (Minor = 6) and (Patch < 1));
 end;
 
-function QueryMsiRegistration(const RootKey: Integer; const Subkey: String;
+function QueryMsiRegistration(const RootKey: HKEY; const Subkey: String;
   out ProductCode: String; out MsiVersion: String): Boolean;
 var
   Names: TArrayOfString;
@@ -164,9 +164,6 @@ begin
 end;
 
 function IsLegacyMsiInstalled(out ProductCode: String; out MsiVersion: String): Boolean;
-const
-  HKCU = $80000001;
-  HKLM = $80000002;
 begin
   Result := False;
   ProductCode := '';

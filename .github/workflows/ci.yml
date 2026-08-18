@@ -99,9 +99,78 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s test -p "test_*.py" -v
 
+  windows-installer-contract:
+    name: Windows installer contract (ISCC 7.1.0)
+    runs-on: windows-2022
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          architecture: x64
+
+      - name: Install pinned Inno Setup
+        shell: pwsh
+        run: |
+          curl.exe -L `
+            -o "$env:TEMP\innosetup-installer.exe" `
+            "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe"
+          $installer = (Resolve-Path "$env:TEMP\innosetup-installer.exe").Path
+          $innoDir = Join-Path $env:GITHUB_WORKSPACE "workdir\innosetup-7.1.0"
+          New-Item -ItemType Directory -Force -Path $innoDir | Out-Null
+          $process = Start-Process $installer `
+            -Wait `
+            -PassThru `
+            -ArgumentList @(
+              "/VERYSILENT",
+              "/SUPPRESSMSGBOXES",
+              "/NORESTART",
+              "/SP-",
+              "/PORTABLE=1",
+              "/DIR=`"$innoDir`""
+            )
+          if ($process.ExitCode -ne 0) {
+              throw "Inno Setup install failed with exit code $($process.ExitCode)"
+          }
+          $iscc = Join-Path $innoDir "ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+              throw "Pinned ISCC.exe was not found: $iscc"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "INNO_ISCC=$iscc"
+
+      - name: Compile installer manifest for both Windows targets
+        shell: pwsh
+        run: |
+          $source = Join-Path $env:GITHUB_WORKSPACE "workdir\installer-contract-source"
+          $ffmpeg = Join-Path $source "FFmpeg\bin"
+          $output = Join-Path $env:GITHUB_WORKSPACE "workdir\installer-contract-output"
+          New-Item -ItemType Directory -Force -Path $ffmpeg, $output | Out-Null
+          Set-Content -Path (Join-Path $source "video-compressor.exe") -Value "contract"
+          Set-Content -Path (Join-Path $ffmpeg "ffmpeg.exe") -Value "contract"
+          Set-Content -Path (Join-Path $ffmpeg "ffprobe.exe") -Value "contract"
+
+          foreach ($architecture in @("x86_64", "arm64")) {
+              $setup = Join-Path $output "video-compressor-contract-$architecture-setup.exe"
+              python .\scripts\build_setup.py `
+                --version "0.0.0" `
+                --architecture $architecture `
+                --source-dir $source `
+                --output $setup `
+                --iscc "$env:INNO_ISCC"
+              if ($LASTEXITCODE -ne 0) {
+                  exit $LASTEXITCODE
+              }
+              if (-not (Test-Path $setup)) {
+                  throw "ISCC did not produce expected Setup package: $setup"
+              }
+          }
+
   packaging-smoke:
     name: Nuitka packaging smoke (${{ matrix.target }})
-    needs: [quality, test]
+    needs: [quality, test, windows-installer-contract]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -233,13 +302,27 @@ jobs:
             -o "$env:TEMP\innosetup-installer.exe" `
             "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe"
           $installer = (Resolve-Path "$env:TEMP\innosetup-installer.exe").Path
+          $innoDir = Join-Path $env:GITHUB_WORKSPACE "workdir\innosetup-7.1.0"
+          New-Item -ItemType Directory -Force -Path $innoDir | Out-Null
           $process = Start-Process $installer `
             -Wait `
             -PassThru `
-            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER")
+            -ArgumentList @(
+              "/VERYSILENT",
+              "/SUPPRESSMSGBOXES",
+              "/NORESTART",
+              "/SP-",
+              "/PORTABLE=1",
+              "/DIR=`"$innoDir`""
+            )
           if ($process.ExitCode -ne 0) {
               throw "Inno Setup install failed with exit code $($process.ExitCode)"
           }
+          $iscc = Join-Path $innoDir "ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+              throw "Pinned ISCC.exe was not found: $iscc"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "INNO_ISCC=$iscc"
 
       - name: Build Windows Setup smoke package
         if: runner.os == 'Windows'
@@ -257,7 +340,8 @@ jobs:
             --version "0.0.0" `
             --architecture "${{ matrix.installer_architecture }}" `
             --source-dir $source `
-            --output $setup
+            --output $setup `
+            --iscc "$env:INNO_ISCC"
           if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
           }

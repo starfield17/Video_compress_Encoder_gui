@@ -148,6 +148,22 @@ class WindowsSetupManifestTestCase(unittest.TestCase):
         self.assertIn("msiexec.exe", self.manifest)
         self.assertIn("PrepareToInstall", self.manifest)
 
+    def test_registry_helpers_use_inno_root_key_contract(self) -> None:
+        self.assertIn(
+            "function QueryMsiRegistration(const RootKey: HKEY;",
+            self.manifest,
+        )
+        self.assertNotIn("HKCU = $80000001", self.manifest)
+        self.assertNotIn("HKLM = $80000002", self.manifest)
+        self.assertIn(
+            "QueryMsiRegistration(HKCU, VC_UNINSTALL_KEY",
+            self.manifest,
+        )
+        self.assertIn(
+            "QueryMsiRegistration(HKLM, VC_UNINSTALL_KEY",
+            self.manifest,
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
