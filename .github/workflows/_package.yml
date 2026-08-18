@@ -120,6 +120,13 @@ jobs:
               echo "numeric=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Restore pinned FFmpeg download cache (candidate / release)
+        if: inputs.mode != 'smoke'
+        uses: actions/cache@v5
+        with:
+          path: workdir/ffmpeg-cache
+          key: ffmpeg-${{ inputs.target }}-${{ hashFiles('packaging/ffmpeg/manifest.json') }}
+
       - name: Prepare native FFmpeg and FFprobe bundle (candidate / release)
         if: runner.os != 'Windows' && inputs.mode != 'smoke'
         shell: bash
@@ -127,20 +134,6 @@ jobs:
           python scripts/prepare_ffmpeg.py \
             --target "${{ inputs.target }}" \
             --output "workdir/ffmpeg/${{ inputs.target }}"
-
-      - name: Restore pinned FFmpeg download cache (candidate / release)
-        if: runner.os != 'Windows' && inputs.mode != 'smoke'
-        uses: actions/cache@v5
-        with:
-          path: workdir/ffmpeg-cache
-          key: ffmpeg-${{ inputs.target }}-${{ hashFiles('packaging/ffmpeg/manifest.json') }}
-
-      - name: Restore pinned FFmpeg download cache (Windows candidate / release)
-        if: runner.os == 'Windows' && inputs.mode != 'smoke'
-        uses: actions/cache@v5
-        with:
-          path: workdir/ffmpeg-cache
-          key: ffmpeg-${{ inputs.target }}-${{ hashFiles('packaging/ffmpeg/manifest.json') }}
 
       - name: Prepare native FFmpeg and FFprobe bundle (Windows candidate / release)
         if: runner.os == 'Windows' && inputs.mode != 'smoke'
@@ -156,15 +149,23 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.numeric }}
         run: |
-          $ffmpegArg = ""
+          $buildArgs = @(
+            ".\scripts\build_nuitka.py",
+            "--clean",
+            "--version", "$env:RELEASE_VERSION",
+            "--windows-compiler", "${{ inputs.windows_compiler }}"
+          )
           if ("${{ inputs.mode }}" -ne "smoke") {
-              $ffmpegArg = "--ffmpeg-dir ""workdir\ffmpeg\${{ inputs.target }}"" --require-ffmpeg"
+              $buildArgs += @(
+                "--ffmpeg-dir",
+                "workdir\ffmpeg\${{ inputs.target }}",
+                "--require-ffmpeg"
+              )
             }
-          python .\scripts\build_nuitka.py `
-            --clean `
-            --version "$env:RELEASE_VERSION" `
-            --windows-compiler "${{ inputs.windows_compiler }}" `
-            $ffmpegArg
+          & python @buildArgs
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
 
       - name: Build Linux standalone package
         if: runner.os == 'Linux'
@@ -271,15 +272,18 @@ jobs:
         run: |
           if ("${{ inputs.mode }}" -eq "release") {
               $setup = "video-compressor-$env:GITHUB_REF_NAME-${{ inputs.target }}-setup.exe"
-              $source = ".\dist\video-compressor"
             } else {
               $setup = "workdir\setup-${{ inputs.mode }}-${{ inputs.target }}-setup.exe"
+            }
+          if ("${{ inputs.mode }}" -eq "smoke") {
               $source = ".\workdir\setup-${{ inputs.mode }}-source"
               $ffmpeg = Join-Path $source "FFmpeg\bin"
               New-Item -ItemType Directory -Force -Path $ffmpeg | Out-Null
               Copy-Item ".\dist\video-compressor\video-compressor.exe" $source
               Set-Content -Path (Join-Path $ffmpeg "ffmpeg.exe") -Value "${{ inputs.mode }}"
               Set-Content -Path (Join-Path $ffmpeg "ffprobe.exe") -Value "${{ inputs.mode }}"
+            } else {
+              $source = ".\dist\video-compressor"
             }
           python .\scripts\build_setup.py `
             --version "$env:RELEASE_VERSION" `
@@ -321,7 +325,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
           }
-          if ("${{ inputs.mode }}" -eq "release") {
+          if ("${{ inputs.mode }}" -ne "smoke") {
               & (Join-Path $installed "FFmpeg\bin\ffmpeg.exe") -hide_banner -version
               if ($LASTEXITCODE -ne 0) {
                   exit $LASTEXITCODE

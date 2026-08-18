@@ -35,8 +35,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: List changed files
-        id: changes
+      - name: Compute verification plan
+        id: plan
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -47,29 +47,23 @@ jobs:
           echo "base=$base"
           echo "head=$GITHUB_SHA"
 
-          # Fail closed: if we cannot identify the base, run the full plan by
-          # feeding no paths, which the planner treats as full verification.
-          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
-              echo "changed=[]" >> "$GITHUB_OUTPUT"
-              exit 0
+          # Fail closed: an unknown or invalid base runs the full plan.
+          if [ -z "$base" ] || \
+             [ "$base" = "0000000000000000000000000000000000000000" ] || \
+             ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+              python3 scripts/ci_plan.py
+              exit $?
           fi
 
-          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-              echo "changed=[]" >> "$GITHUB_OUTPUT"
-              exit 0
+          changed_file="$RUNNER_TEMP/changed-files"
+          if ! git diff --name-only -z "$base" "$GITHUB_SHA" > "$changed_file"; then
+              # Fail closed: a diff failure must never downgrade verification.
+              python3 scripts/ci_plan.py
+              exit $?
           fi
 
-          json="$(git diff --name-only "$base" "$GITHUB_SHA" \
-              | python3 -c 'import json,sys; print(json.dumps([l.rstrip("\n") for l in sys.stdin]))')"
-          echo "changed=$json" >> "$GITHUB_OUTPUT"
-
-      - name: Compute verification plan
-        id: plan
-        shell: bash
-        run: |
-          changed="${{ steps.changes.outputs.changed }}"
-          # shellcheck disable=SC2086
-          python3 scripts/ci_plan.py $changed
+          mapfile -d '' changed < "$changed_file"
+          python3 scripts/ci_plan.py "${changed[@]}"
 
   quality:
     name: Quality

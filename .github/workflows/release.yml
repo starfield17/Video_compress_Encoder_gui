@@ -23,23 +23,46 @@ jobs:
     with:
       ref: ${{ github.ref }}
 
+  matrix_plan:
+    name: Release matrix plan
+    runs-on: ubuntu-22.04
+    outputs:
+      test_matrix: ${{ steps.matrix.outputs.test_matrix }}
+      package_matrix: ${{ steps.matrix.outputs.package_matrix }}
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Generate canonical release matrices
+        id: matrix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          from scripts.ci_plan import PACKAGE_TARGETS, TEST_TARGETS
+
+          values = {
+              "test_matrix": list(TEST_TARGETS.values()),
+              "package_matrix": list(PACKAGE_TARGETS.values()),
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for name, value in values.items():
+                  encoded = json.dumps(value, separators=(",", ":"))
+                  output.write(f"{name}={encoded}\n")
+          PY
+
   tests:
     name: Tests
-    needs: quality
-    if: needs.quality.result == 'success'
+    needs: [quality, matrix_plan]
+    if: needs.quality.result == 'success' && needs.matrix_plan.result == 'success'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: linux
-            runner: ubuntu-22.04
-            architecture: x64
-          - platform: windows
-            runner: windows-2022
-            architecture: x64
-          - platform: macos
-            runner: macos-15
-            architecture: arm64
+        include: ${{ fromJSON(needs.matrix_plan.outputs.test_matrix) }}
     uses: ./.github/workflows/_test.yml
     with:
       ref: ${{ github.ref }}
@@ -78,48 +101,13 @@ jobs:
 
   build:
     name: Build (${{ matrix.target }})
-    needs: preflight
-    if: needs.preflight.result == 'success'
+    needs: [preflight, matrix_plan]
+    if: needs.preflight.result == 'success' && needs.matrix_plan.result == 'success'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: windows-x86_64
-            runner: windows-2022
-            architecture: x64
-            installer_architecture: x86_64
-            package_kind: standalone
-            windows_compiler: msvc
-
-          - target: windows-arm64
-            runner: windows-11-arm
-            architecture: arm64
-            installer_architecture: arm64
-            package_kind: standalone
-            windows_compiler: clang
-
-          - target: linux-x86_64
-            runner: ubuntu-22.04
-            architecture: x64
-            package_kind: standalone
-
-          - target: linux-arm64
-            runner: ubuntu-24.04-arm
-            architecture: arm64
-            package_kind: standalone
-
-          - target: macos-x86_64
-            runner: macos-15-intel
-            architecture: x64
-            target_arch: x86_64
-            package_kind: macos-app
-
-          - target: macos-arm64
-            runner: macos-15
-            architecture: arm64
-            target_arch: arm64
-            package_kind: macos-app
+        include: ${{ fromJSON(needs.matrix_plan.outputs.package_matrix) }}
     uses: ./.github/workflows/_package.yml
     with:
       ref: ${{ github.ref }}

@@ -107,6 +107,7 @@ jobs:
             "$pkg_macos_x86_64" "$pkg_macos_arm64" <<'EOF'
           import json
           import sys
+          from scripts.ci_plan import PACKAGE_TARGETS, TEST_TARGETS
 
           profile = sys.argv[1]
           flags = [a.lower() == "true" for a in sys.argv[2:]]
@@ -122,23 +123,6 @@ jobs:
               pkg_macos_arm64,
           ) = flags
 
-          FULL_PACKAGE_MATRIX = [
-              {"target": "windows-x86_64", "runner": "windows-2022", "architecture": "x64",
-               "package_kind": "standalone", "windows_compiler": "msvc",
-               "installer_architecture": "x86_64"},
-              {"target": "windows-arm64", "runner": "windows-11-arm", "architecture": "arm64",
-               "package_kind": "standalone", "windows_compiler": "clang",
-               "installer_architecture": "arm64"},
-              {"target": "linux-x86_64", "runner": "ubuntu-22.04", "architecture": "x64",
-               "package_kind": "standalone"},
-              {"target": "linux-arm64", "runner": "ubuntu-24.04-arm", "architecture": "arm64",
-               "package_kind": "standalone"},
-              {"target": "macos-x86_64", "runner": "macos-15-intel", "architecture": "x64",
-               "target_arch": "x86_64", "package_kind": "macos-app"},
-              {"target": "macos-arm64", "runner": "macos-15", "architecture": "arm64",
-               "target_arch": "arm64", "package_kind": "macos-app"},
-          ]
-
           def emit(**kwargs):
               for key, value in kwargs.items():
                   if isinstance(value, (list, dict)):
@@ -149,7 +133,7 @@ jobs:
               emit(
                   profile=profile,
                   has_tests="true",
-                  test_matrix=[{"platform": "linux", "runner": "ubuntu-22.04", "architecture": "x64"}],
+                  test_matrix=[TEST_TARGETS["linux"]],
                   run_installer_contract="false",
                   has_packages="false",
                   package_matrix="[]",
@@ -173,14 +157,10 @@ jobs:
               emit(
                   profile=profile,
                   has_tests="true",
-                  test_matrix=[
-                      {"platform": "linux", "runner": "ubuntu-22.04", "architecture": "x64"},
-                      {"platform": "windows", "runner": "windows-2022", "architecture": "x64"},
-                      {"platform": "macos", "runner": "macos-15", "architecture": "arm64"},
-                  ],
+                  test_matrix=list(TEST_TARGETS.values()),
                   run_installer_contract="true",
                   has_packages="true",
-                  package_matrix=FULL_PACKAGE_MATRIX,
+                  package_matrix=list(PACKAGE_TARGETS.values()),
                   package_mode="candidate",
               )
               sys.exit(0)
@@ -193,38 +173,31 @@ jobs:
               print("::error::targeted profile selected no targets; refusing to become quality-only")
               sys.exit(1)
 
-          test_matrix = []
-          if test_linux:
-              test_matrix.append({"platform": "linux", "runner": "ubuntu-22.04", "architecture": "x64"})
-          if test_windows:
-              test_matrix.append({"platform": "windows", "runner": "windows-2022", "architecture": "x64"})
-          if test_macos:
-              test_matrix.append({"platform": "macos", "runner": "macos-15", "architecture": "arm64"})
+          test_matrix = [
+              TEST_TARGETS[name]
+              for name, selected in (
+                  ("linux", test_linux),
+                  ("windows", test_windows),
+                  ("macos", test_macos),
+              )
+              if selected
+          ]
 
           # Any selected Windows package implies the installer contract.
           run_installer = pkg_windows_x86_64 or pkg_windows_arm64
 
-          package_matrix = []
-          if pkg_windows_x86_64:
-              package_matrix.append({"target": "windows-x86_64", "runner": "windows-2022", "architecture": "x64",
-                                     "package_kind": "standalone", "windows_compiler": "msvc",
-                                     "installer_architecture": "x86_64"})
-          if pkg_windows_arm64:
-              package_matrix.append({"target": "windows-arm64", "runner": "windows-11-arm", "architecture": "arm64",
-                                     "package_kind": "standalone", "windows_compiler": "clang",
-                                     "installer_architecture": "arm64"})
-          if pkg_linux_x86_64:
-              package_matrix.append({"target": "linux-x86_64", "runner": "ubuntu-22.04", "architecture": "x64",
-                                     "package_kind": "standalone"})
-          if pkg_linux_arm64:
-              package_matrix.append({"target": "linux-arm64", "runner": "ubuntu-24.04-arm", "architecture": "arm64",
-                                     "package_kind": "standalone"})
-          if pkg_macos_x86_64:
-              package_matrix.append({"target": "macos-x86_64", "runner": "macos-15-intel", "architecture": "x64",
-                                     "target_arch": "x86_64", "package_kind": "macos-app"})
-          if pkg_macos_arm64:
-              package_matrix.append({"target": "macos-arm64", "runner": "macos-15", "architecture": "arm64",
-                                     "target_arch": "arm64", "package_kind": "macos-app"})
+          package_matrix = [
+              PACKAGE_TARGETS[target]
+              for target, selected in (
+                  ("windows-x86_64", pkg_windows_x86_64),
+                  ("windows-arm64", pkg_windows_arm64),
+                  ("linux-x86_64", pkg_linux_x86_64),
+                  ("linux-arm64", pkg_linux_arm64),
+                  ("macos-x86_64", pkg_macos_x86_64),
+                  ("macos-arm64", pkg_macos_arm64),
+              )
+              if selected
+          ]
 
           emit(
               profile=profile,

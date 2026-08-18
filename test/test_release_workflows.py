@@ -147,6 +147,15 @@ class VerifyWorkflowTestCase(unittest.TestCase):
             self.assertIn(f"uses: ./.github/workflows/{name}", self.workflow, name)
         self.assertIn("Verify Gate", self.workflow)
 
+    def test_verify_uses_canonical_target_matrices(self) -> None:
+        self.assertIn(
+            "from scripts.ci_plan import PACKAGE_TARGETS, TEST_TARGETS",
+            self.workflow,
+        )
+        self.assertNotIn("FULL_PACKAGE_MATRIX", self.workflow)
+        self.assertEqual(_matrix_rows(self.workflow), {})
+        self.assertNotIn('"runner": "', self.workflow)
+
 
 class ReleaseWorkflowTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -168,17 +177,24 @@ class ReleaseWorkflowTestCase(unittest.TestCase):
         self.assertIn("secrets: inherit", self.workflow)
         self.assertIn("ref: ${{ github.ref }}", self.workflow)
 
-    def test_release_matrix_has_six_native_targets(self) -> None:
-        rows = _matrix_rows(self.workflow)
-        self.assertEqual(set(rows), set(PACKAGE_TARGETS))
-        for target, expected in PACKAGE_TARGETS.items():
-            self.assertEqual(rows[target]["runner"], expected["runner"])
-            self.assertEqual(rows[target]["architecture"], expected["architecture"])
-            self.assertEqual(rows[target]["package_kind"], expected["package_kind"])
-        self.assertEqual(rows["windows-x86_64"]["windows_compiler"], "msvc")
-        self.assertEqual(rows["windows-arm64"]["windows_compiler"], "clang")
-        self.assertEqual(rows["windows-x86_64"]["installer_architecture"], "x86_64")
-        self.assertEqual(rows["windows-arm64"]["installer_architecture"], "arm64")
+    def test_release_matrices_use_canonical_planner_outputs(self) -> None:
+        self.assertIn("matrix_plan:", self.workflow)
+        self.assertIn(
+            "from scripts.ci_plan import PACKAGE_TARGETS, TEST_TARGETS",
+            self.workflow,
+        )
+        self.assertIn("test_matrix: ${{ steps.matrix.outputs.test_matrix }}", self.workflow)
+        self.assertIn("package_matrix: ${{ steps.matrix.outputs.package_matrix }}", self.workflow)
+        self.assertIn(
+            "include: ${{ fromJSON(needs.matrix_plan.outputs.test_matrix) }}",
+            self.workflow,
+        )
+        self.assertIn(
+            "include: ${{ fromJSON(needs.matrix_plan.outputs.package_matrix) }}",
+            self.workflow,
+        )
+        self.assertEqual(_matrix_rows(self.workflow), {})
+        self.assertNotIn('"runner": "', self.workflow)
 
     def test_release_preflight_requires_all_prerequisites(self) -> None:
         self.assertIn("preflight:", self.workflow)
@@ -229,6 +245,18 @@ class QualityWorkflowTestCase(unittest.TestCase):
         self.assertIn("pyright", self.workflow)
         self.assertIn("python -m compileall -q main.py cli core gui scripts test", self.workflow)
         self.assertIn("python scripts/build_icons.py --check", self.workflow)
+
+    def test_quality_provisions_linux_qt_runtime_before_icon_check(self) -> None:
+        self.assertIn("Install Linux Qt runtime dependencies", self.workflow)
+        icon_check = self.workflow.index("python scripts/build_icons.py --check")
+        for package in (
+            "libegl1",
+            "libgl1",
+            "libxkbcommon-x11-0",
+            "libxcb-cursor0",
+        ):
+            self.assertIn(package, self.workflow)
+            self.assertLess(self.workflow.index(package), icon_check, package)
 
 
 class TestWorkflowTestCase(unittest.TestCase):
@@ -309,6 +337,46 @@ class PackageWorkflowTestCase(unittest.TestCase):
         self.assertIn("prepare_ffmpeg.py", self.workflow)
         self.assertIn("--require-ffmpeg", self.workflow)
         self.assertIn("hashFiles('packaging/ffmpeg/manifest.json')", self.workflow)
+
+    def test_windows_package_uses_a_structured_argument_array(self) -> None:
+        start = self.workflow.index("- name: Build Windows standalone package")
+        end = self.workflow.index("- name: Build Linux standalone package", start)
+        windows_build = self.workflow[start:end]
+
+        self.assertIn("$buildArgs = @(", windows_build)
+        self.assertIn("& python @buildArgs", windows_build)
+        self.assertIn('if ("${{ inputs.mode }}" -ne "smoke")', windows_build)
+        self.assertNotIn("$ffmpegArg", self.workflow)
+
+    def test_windows_setup_preserves_real_candidate_payload_and_mode_validation(self) -> None:
+        setup_start = self.workflow.index("- name: Build Windows Setup package")
+        setup_end = self.workflow.index("- name: Sign Windows Setup.exe", setup_start)
+        setup = self.workflow[setup_start:setup_end]
+
+        smoke = setup.index('if ("${{ inputs.mode }}" -eq "smoke")')
+        dummy = setup.index('Set-Content -Path (Join-Path $ffmpeg "ffmpeg.exe")')
+        non_smoke = setup.index("} else {", dummy)
+        real_source = setup.index('$source = ".\\dist\\video-compressor"')
+        self.assertLess(smoke, dummy)
+        self.assertLess(dummy, non_smoke)
+        self.assertLess(non_smoke, real_source)
+        self.assertEqual(setup.count("Set-Content -Path (Join-Path $ffmpeg"), 2)
+
+        install_start = self.workflow.index("- name: Install and smoke test Windows Setup package")
+        install_end = self.workflow.index("- name: Silent uninstall of installed Windows Setup package", install_start)
+        install = self.workflow[install_start:install_end]
+        self.assertIn('if ("${{ inputs.mode }}" -ne "smoke")', install)
+        self.assertIn('"FFmpeg\\bin\\ffmpeg.exe"', install)
+        self.assertIn('"FFmpeg\\bin\\ffprobe.exe"', install)
+        self.assertNotIn('inputs.mode }}" -eq "release"', install)
+
+    def test_ffmpeg_cache_is_restored_once_before_unix_and_windows_prepare(self) -> None:
+        self.assertEqual(self.workflow.count("uses: actions/cache@v5"), 1)
+        cache = self.workflow.index("uses: actions/cache@v5")
+        unix_prepare = self.workflow.index("python scripts/prepare_ffmpeg.py")
+        windows_prepare = self.workflow.index("python .\\scripts\\prepare_ffmpeg.py")
+        self.assertLess(cache, unix_prepare)
+        self.assertLess(cache, windows_prepare)
 
     def test_package_workflow_release_uploads(self) -> None:
         self.assertIn("release-package-${{ inputs.target }}", self.workflow)

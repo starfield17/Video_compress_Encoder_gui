@@ -244,6 +244,36 @@ class CliTestCase(unittest.TestCase):
         self.assertTrue(contract["has_tests"])
         self.assertFalse(contract["has_packages"])
 
+    def test_cli_receives_multiple_changed_paths_as_exact_arguments(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "ci_plan.py"),
+                "core/foo.py",
+                "docs/release notes/verification.md",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        contract = json.loads(result.stdout)
+        self.assertTrue(contract["has_tests"])
+        self.assertFalse(contract["has_packages"])
+        self.assertFalse(contract["run_installer_contract"])
+
+
+class CIWorkflowBoundaryTestCase(unittest.TestCase):
+    def test_changed_paths_use_nul_separated_bash_array(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("git diff --name-only -z", workflow)
+        self.assertIn("mapfile -d '' changed", workflow)
+        self.assertIn('python3 scripts/ci_plan.py "${changed[@]}"', workflow)
+        self.assertNotIn("steps.changes.outputs.changed", workflow)
+        self.assertNotIn("json.dumps", workflow)
+
 
 class GithubOutputTestCase(unittest.TestCase):
     def test_outputs_are_written_when_env_vars_are_present(self) -> None:
