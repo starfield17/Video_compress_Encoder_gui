@@ -17,455 +17,122 @@ env:
   PYTHONUTF8: "1"
 
 jobs:
-  windows-installer-contract:
-    name: Windows installer contract (ISCC 7.1.0)
-    runs-on: windows-2022
-    steps:
-      - name: Check out tagged commit
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.ref }}
+  quality:
+    name: Quality
+    uses: ./.github/workflows/_quality.yml
+    with:
+      ref: ${{ github.ref }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-          architecture: x64
-
-      - name: Install pinned Inno Setup
-        shell: pwsh
-        run: |
-          curl.exe -L `
-            -o "$env:TEMP\innosetup-installer.exe" `
-            "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe"
-          $installer = (Resolve-Path "$env:TEMP\innosetup-installer.exe").Path
-          $innoDir = Join-Path $env:GITHUB_WORKSPACE "workdir\innosetup-7.1.0"
-          New-Item -ItemType Directory -Force -Path $innoDir | Out-Null
-          $process = Start-Process $installer `
-            -Wait `
-            -PassThru `
-            -ArgumentList @(
-              "/VERYSILENT",
-              "/SUPPRESSMSGBOXES",
-              "/NORESTART",
-              "/SP-",
-              "/PORTABLE=1",
-              "/DIR=`"$innoDir`""
-            )
-          if ($process.ExitCode -ne 0) {
-              throw "Inno Setup install failed with exit code $($process.ExitCode)"
-          }
-          $iscc = Join-Path $innoDir "ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-              throw "Pinned ISCC.exe was not found: $iscc"
-          }
-          Add-Content -Path $env:GITHUB_ENV -Value "INNO_ISCC=$iscc"
-
-      - name: Compile installer manifest for both Windows targets
-        shell: pwsh
-        run: |
-          $releaseVersion = $env:GITHUB_REF_NAME -replace '^v', ''
-          $source = Join-Path $env:GITHUB_WORKSPACE "workdir\installer-contract-source"
-          $ffmpeg = Join-Path $source "FFmpeg\bin"
-          $output = Join-Path $env:GITHUB_WORKSPACE "workdir\installer-contract-output"
-          New-Item -ItemType Directory -Force -Path $ffmpeg, $output | Out-Null
-          Set-Content -Path (Join-Path $source "video-compressor.exe") -Value "contract"
-          Set-Content -Path (Join-Path $ffmpeg "ffmpeg.exe") -Value "contract"
-          Set-Content -Path (Join-Path $ffmpeg "ffprobe.exe") -Value "contract"
-
-          foreach ($architecture in @("x86_64", "arm64")) {
-              $setup = Join-Path $output "video-compressor-contract-$architecture-setup.exe"
-              python .\scripts\build_setup.py `
-                --version $releaseVersion `
-                --architecture $architecture `
-                --source-dir $source `
-                --output $setup `
-                --iscc "$env:INNO_ISCC"
-              if ($LASTEXITCODE -ne 0) {
-                  exit $LASTEXITCODE
-              }
-              if (-not (Test-Path $setup)) {
-                  throw "ISCC did not produce expected Setup package: $setup"
-              }
-          }
-
-  build:
-    name: Build (${{ matrix.target }})
-    needs: windows-installer-contract
-    runs-on: ${{ matrix.os }}
+  tests:
+    name: Tests
+    needs: quality
+    if: needs.quality.result == 'success'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-2022
-            target: windows-x86_64
+          - platform: linux
+            runner: ubuntu-22.04
+            architecture: x64
+          - platform: windows
+            runner: windows-2022
+            architecture: x64
+          - platform: macos
+            runner: macos-15
+            architecture: arm64
+    uses: ./.github/workflows/_test.yml
+    with:
+      ref: ${{ github.ref }}
+      runner: ${{ matrix.runner }}
+      platform: ${{ matrix.platform }}
+      architecture: ${{ matrix.architecture }}
+
+  installer:
+    name: Windows Installer Contract
+    needs: quality
+    if: needs.quality.result == 'success'
+    uses: ./.github/workflows/_windows-installer-contract.yml
+    with:
+      ref: ${{ github.ref }}
+      version: ${{ github.ref_name }}
+
+  preflight:
+    name: Preflight
+    needs: [quality, tests, installer]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require quality, all three OS tests, and installer contract
+        shell: bash
+        run: |
+          for status in \
+              "${{ needs.quality.result }}" \
+              "${{ needs.tests.result }}" \
+              "${{ needs.installer.result }}"; do
+              if [ "$status" = "failure" ] || [ "$status" = "cancelled" ] || [ "$status" = "skipped" ]; then
+                  echo "Preflight prerequisite failed: $status" >&2
+                  exit 1
+              fi
+          done
+          exit 0
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: preflight
+    if: needs.preflight.result == 'success'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x86_64
+            runner: windows-2022
             architecture: x64
             installer_architecture: x86_64
             package_kind: standalone
             windows_compiler: msvc
 
-          - os: windows-11-arm
-            target: windows-arm64
+          - target: windows-arm64
+            runner: windows-11-arm
             architecture: arm64
             installer_architecture: arm64
             package_kind: standalone
             windows_compiler: clang
 
-          - os: ubuntu-22.04
-            target: linux-x86_64
+          - target: linux-x86_64
+            runner: ubuntu-22.04
             architecture: x64
             package_kind: standalone
 
-          - os: ubuntu-24.04-arm
-            target: linux-arm64
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
             architecture: arm64
             package_kind: standalone
 
-          - os: macos-15-intel
-            target: macos-x86_64
+          - target: macos-x86_64
+            runner: macos-15-intel
             architecture: x64
             target_arch: x86_64
             package_kind: macos-app
 
-          - os: macos-15
-            target: macos-arm64
+          - target: macos-arm64
+            runner: macos-15
             architecture: arm64
             target_arch: arm64
             package_kind: macos-app
-    steps:
-      - name: Check out tagged commit
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.ref }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-          architecture: ${{ matrix.architecture }}
-          cache: pip
-          cache-dependency-path: requirements-build.txt
-
-      - name: Configure project temp directory
-        shell: bash
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/workdir/tmp"
-          echo "TMPDIR=$GITHUB_WORKSPACE/workdir/tmp" >> "$GITHUB_ENV"
-          echo "TMP=$GITHUB_WORKSPACE/workdir/tmp" >> "$GITHUB_ENV"
-          echo "TEMP=$GITHUB_WORKSPACE/workdir/tmp" >> "$GITHUB_ENV"
-
-      - name: Install Linux packaging dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            patchelf \
-            libegl1 \
-            libgl1 \
-            libxkbcommon-x11-0 \
-            libxcb-cursor0
-
-      - name: Install build dependencies
-        run: python -m pip install -r requirements-build.txt
-
-      - name: Verify generated icon assets
-        run: python scripts/build_icons.py --check
-
-      - name: Diagnose packaging interpreter
-        run: python -c "import platform, PySide6; print(platform.platform()); print(platform.machine()); print(PySide6.__version__)"
-
-      - name: Run unit tests
-        run: python -m unittest discover -s test -p "test_*.py" -v
-
-      - name: Derive numeric release version
-        id: version
-        shell: bash
-        run: |
-          release_version="${GITHUB_REF_NAME#v}"
-          echo "version=${release_version}" >> "$GITHUB_OUTPUT"
-
-      - name: Restore pinned FFmpeg download cache
-        uses: actions/cache@v5
-        with:
-          path: workdir/ffmpeg-cache
-          key: ffmpeg-${{ matrix.target }}-${{ hashFiles('packaging/ffmpeg/manifest.json') }}
-
-      - name: Prepare native FFmpeg and FFprobe bundle
-        shell: bash
-        run: |
-          python scripts/prepare_ffmpeg.py \
-            --target "${{ matrix.target }}" \
-            --output "workdir/ffmpeg/${{ matrix.target }}"
-
-      - name: Build Windows standalone package
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          python .\scripts\build_nuitka.py `
-            --clean `
-            --version "$env:RELEASE_VERSION" `
-            --windows-compiler "${{ matrix.windows_compiler }}" `
-            --ffmpeg-dir "workdir\ffmpeg\${{ matrix.target }}" `
-            --require-ffmpeg
-
-      - name: Build Linux standalone package
-        if: runner.os == 'Linux'
-        shell: bash
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          python scripts/build_nuitka.py \
-            --clean \
-            --version "$RELEASE_VERSION" \
-            --ffmpeg-dir "workdir/ffmpeg/${{ matrix.target }}" \
-            --require-ffmpeg
-
-      - name: Build macOS app bundle
-        if: runner.os == 'macOS' && matrix.package_kind == 'macos-app'
-        shell: bash
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          python scripts/build_nuitka.py \
-            --clean \
-            --version "$RELEASE_VERSION" \
-            --macos-app-bundle \
-            --target-arch "${{ matrix.target_arch }}" \
-            --ffmpeg-dir "workdir/ffmpeg/${{ matrix.target }}" \
-            --require-ffmpeg
-
-      - name: Smoke test packaged executable on Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $executable = ".\dist\video-compressor\video-compressor.exe"
-          if (-not (Test-Path $executable)) {
-              throw "Packaged executable not found: $executable"
-          }
-          & $executable --cli --help
-          if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
-          }
-          & ".\dist\video-compressor\FFmpeg\bin\ffmpeg.exe" -hide_banner -version
-          if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
-          }
-          & ".\dist\video-compressor\FFmpeg\bin\ffprobe.exe" -hide_banner -version
-          if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
-          }
-
-      - name: Smoke test packaged executable on Linux
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          test -f dist/video-compressor/video-compressor
-          chmod +x dist/video-compressor/video-compressor
-          ./dist/video-compressor/video-compressor --cli --help
-          dist/video-compressor/FFmpeg/bin/ffmpeg -hide_banner -version
-          dist/video-compressor/FFmpeg/bin/ffprobe -hide_banner -version
-
-      - name: Smoke test macOS app bundle and DMG
-        if: runner.os == 'macOS' && matrix.package_kind == 'macos-app'
-        shell: bash
-        env:
-          TARGET_ARCH: ${{ matrix.target_arch }}
-        run: |
-          app="dist/Video Compressor.app"
-          executable="$app/Contents/MacOS/video-compressor"
-          dmg="dist/video-compressor.dmg"
-          test -d "$app"
-          test -f "$app/Contents/Info.plist"
-          test -x "$executable"
-          "$executable" --cli --help
-          test -x "$app/Contents/Resources/FFmpeg/bin/ffmpeg"
-          test -x "$app/Contents/Resources/FFmpeg/bin/ffprobe"
-          "$app/Contents/Resources/FFmpeg/bin/ffmpeg" -hide_banner -version
-          "$app/Contents/Resources/FFmpeg/bin/ffprobe" -hide_banner -version
-          codesign --verify --deep --strict "$app"
-          file "$executable"
-          archs="$(lipo -archs "$executable")"
-          if [[ "$archs" != "$TARGET_ARCH" ]]; then
-              printf 'Expected native %s executable, found %s\n' "$TARGET_ARCH" "$archs" >&2
-              exit 1
-          fi
-          test -f "$dmg"
-          hdiutil verify "$dmg"
-          mount_dir="$(mktemp -d)"
-          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir"
-          trap 'hdiutil detach "$mount_dir"' EXIT
-          test -d "$mount_dir/Video Compressor.app"
-          test -L "$mount_dir/Applications"
-          test "$(readlink "$mount_dir/Applications")" = "/Applications"
-          codesign --verify --deep --strict "$mount_dir/Video Compressor.app"
-          hdiutil detach "$mount_dir"
-          trap - EXIT
-          rmdir "$mount_dir"
-
-      - name: Sign Windows executable when certificate secrets are configured
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          .\scripts\sign_windows.ps1 `
-            -Files ".\dist\video-compressor\video-compressor.exe"
-
-      - name: Install pinned Inno Setup
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          curl.exe -L `
-            -o "$env:TEMP\innosetup-installer.exe" `
-            "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe"
-          $installer = (Resolve-Path "$env:TEMP\innosetup-installer.exe").Path
-          $innoDir = Join-Path $env:GITHUB_WORKSPACE "workdir\innosetup-7.1.0"
-          New-Item -ItemType Directory -Force -Path $innoDir | Out-Null
-          $process = Start-Process $installer `
-            -Wait `
-            -PassThru `
-            -ArgumentList @(
-              "/VERYSILENT",
-              "/SUPPRESSMSGBOXES",
-              "/NORESTART",
-              "/SP-",
-              "/PORTABLE=1",
-              "/DIR=`"$innoDir`""
-            )
-          if ($process.ExitCode -ne 0) {
-              throw "Inno Setup install failed with exit code $($process.ExitCode)"
-          }
-          $iscc = Join-Path $innoDir "ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-              throw "Pinned ISCC.exe was not found: $iscc"
-          }
-          Add-Content -Path $env:GITHUB_ENV -Value "INNO_ISCC=$iscc"
-
-      - name: Build Windows Setup.exe
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          $setup = "video-compressor-$env:GITHUB_REF_NAME-${{ matrix.target }}-setup.exe"
-          python .\scripts\build_setup.py `
-            --version "$env:RELEASE_VERSION" `
-            --architecture "${{ matrix.installer_architecture }}" `
-            --source-dir ".\dist\video-compressor" `
-            --output $setup `
-            --iscc "$env:INNO_ISCC"
-          if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
-          }
-
-      - name: Sign Windows Setup.exe when certificate secrets are configured
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          $setup = "video-compressor-$env:GITHUB_REF_NAME-${{ matrix.target }}-setup.exe"
-          .\scripts\sign_windows.ps1 `
-            -Files $setup
-
-      - name: Smoke test installed Windows Setup package
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $setup = (Resolve-Path "video-compressor-$env:GITHUB_REF_NAME-${{ matrix.target }}-setup.exe").Path
-          $installed = Join-Path $env:GITHUB_WORKSPACE "workdir\setup-installed"
-          New-Item -ItemType Directory -Force -Path $installed | Out-Null
-
-          $install = Start-Process $setup `
-            -Wait `
-            -PassThru `
-            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$installed`"")
-          if ($install.ExitCode -ne 0) {
-              throw "Setup silent install failed with exit code $($install.ExitCode)"
-          }
-
-          & (Join-Path $installed "video-compressor.exe") --cli --help
-          if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
-          }
-          & (Join-Path $installed "FFmpeg\bin\ffmpeg.exe") -hide_banner -version
-          if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
-          }
-          & (Join-Path $installed "FFmpeg\bin\ffprobe.exe") -hide_banner -version
-          if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
-          }
-
-      - name: Silent uninstall of installed Windows Setup package
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $installed = Join-Path $env:GITHUB_WORKSPACE "workdir\setup-installed"
-          $uninstaller = Get-ChildItem -Path $installed -Recurse -File -Filter "unins*.exe" |
-            Select-Object -First 1
-          if (-not $uninstaller) {
-              throw "Setup install did not produce an Inno uninstaller"
-          }
-          $uninstall = Start-Process $uninstaller.FullName `
-            -Wait `
-            -PassThru `
-            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
-          if ($uninstall.ExitCode -ne 0) {
-              throw "Setup silent uninstall failed with exit code $($uninstall.ExitCode)"
-          }
-          if (Test-Path (Join-Path $installed "video-compressor.exe")) {
-              throw "Uninstall did not remove video-compressor.exe"
-          }
-          if (Test-Path (Join-Path $installed "FFmpeg")) {
-              throw "Uninstall did not remove the FFmpeg directory"
-          }
-
-      - name: Archive Windows package
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $archive = "video-compressor-$env:GITHUB_REF_NAME-${{ matrix.target }}.zip"
-          7z a -tzip $archive ".\dist\video-compressor"
-
-      - name: Archive Linux package
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          tar -czf "video-compressor-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" \
-            -C dist video-compressor
-
-      - name: Archive macOS app bundle
-        if: runner.os == 'macOS' && matrix.package_kind == 'macos-app'
-        shell: bash
-        run: |
-          tar -czf "video-compressor-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" \
-            -C dist "Video Compressor.app"
-          cp "dist/video-compressor.dmg" \
-            "video-compressor-${GITHUB_REF_NAME}-${{ matrix.target }}.dmg"
-
-      - name: Upload release packages
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-package-${{ matrix.target }}
-          path: |
-            video-compressor-${{ github.ref_name }}-${{ matrix.target }}.*
-            video-compressor-${{ github.ref_name }}-${{ matrix.target }}-setup.exe
-          include-hidden-files: true
-          if-no-files-found: error
-
-      - name: Upload Nuitka compilation report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: nuitka-report-${{ matrix.target }}
-          path: build/reports/**
-          include-hidden-files: true
-          if-no-files-found: warn
+    uses: ./.github/workflows/_package.yml
+    with:
+      ref: ${{ github.ref }}
+      version: ${{ github.ref_name }}
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+      architecture: ${{ matrix.architecture }}
+      package_kind: ${{ matrix.package_kind }}
+      windows_compiler: ${{ matrix.windows_compiler }}
+      installer_architecture: ${{ matrix.installer_architecture }}
+      target_arch: ${{ matrix.target_arch }}
+      mode: release
+    secrets: inherit
 
   publish:
     name: Publish GitHub Release

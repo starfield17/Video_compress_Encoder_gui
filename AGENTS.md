@@ -40,3 +40,14 @@ python -m unittest discover -s test -p "test_*.py" -v
 
 Run architecture checks alone with
 `python -m unittest discover -s test -p "test_architecture.py" -v`.
+
+## Verification policy
+
+- Do not weaken CI routing to make a change pass.
+- Automatic CI defines the minimum verification set.
+- Agents may dispatch `Verify` to add targeted or full checks.
+- For platform-sensitive changes, prefer targeted platform verification.
+- Before proposing a release tag, run `Verify/full`.
+- Release workflow is always full and may not be selectively reduced.
+
+See `docs/ci-workflows.md` for the routing policy and workflow profiles.

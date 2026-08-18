@@ -1,0 +1,317 @@
+name: Verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Verification profile: fast, targeted, installer, or full."
+        required: true
+        type: choice
+        options:
+          - fast
+          - targeted
+          - installer
+          - full
+      test_linux:
+        description: "Run Linux unit tests (targeted profile)."
+        required: false
+        type: boolean
+        default: false
+      test_windows:
+        description: "Run Windows unit tests (targeted profile)."
+        required: false
+        type: boolean
+        default: false
+      test_macos:
+        description: "Run macOS unit tests (targeted profile)."
+        required: false
+        type: boolean
+        default: false
+      package_windows_x86_64:
+        description: "Windows x86_64 package smoke (targeted profile)."
+        required: false
+        type: boolean
+        default: false
+      package_windows_arm64:
+        description: "Windows ARM64 package smoke (targeted profile)."
+        required: false
+        type: boolean
+        default: false
+      package_linux_x86_64:
+        description: "Linux x86_64 package smoke (targeted profile)."
+        required: false
+        type: boolean
+        default: false
+      package_linux_arm64:
+        description: "Linux ARM64 package smoke (targeted profile)."
+        required: false
+        type: boolean
+        default: false
+      package_macos_x86_64:
+        description: "macOS x86_64 package smoke (targeted profile)."
+        required: false
+        type: boolean
+        default: false
+      package_macos_arm64:
+        description: "macOS ARM64 package smoke (targeted profile)."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_QPA_PLATFORM: offscreen
+  PYTHONUTF8: "1"
+
+jobs:
+  plan:
+    name: Verify plan
+    runs-on: ubuntu-22.04
+    outputs:
+      profile: ${{ steps.resolve.outputs.profile }}
+      has_tests: ${{ steps.resolve.outputs.has_tests }}
+      test_matrix: ${{ steps.resolve.outputs.test_matrix }}
+      run_installer_contract: ${{ steps.resolve.outputs.run_installer_contract }}
+      has_packages: ${{ steps.resolve.outputs.has_packages }}
+      package_matrix: ${{ steps.resolve.outputs.package_matrix }}
+      package_mode: ${{ steps.resolve.outputs.package_mode }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Resolve verification request
+        id: resolve
+        shell: bash
+        run: |
+          profile="${{ inputs.profile }}"
+          test_linux="${{ inputs.test_linux }}"
+          test_windows="${{ inputs.test_windows }}"
+          test_macos="${{ inputs.test_macos }}"
+          pkg_windows_x86_64="${{ inputs.package_windows_x86_64 }}"
+          pkg_windows_arm64="${{ inputs.package_windows_arm64 }}"
+          pkg_linux_x86_64="${{ inputs.package_linux_x86_64 }}"
+          pkg_linux_arm64="${{ inputs.package_linux_arm64 }}"
+          pkg_macos_x86_64="${{ inputs.package_macos_x86_64 }}"
+          pkg_macos_arm64="${{ inputs.package_macos_arm64 }}"
+
+          python3 - "$profile" \
+            "$test_linux" "$test_windows" "$test_macos" \
+            "$pkg_windows_x86_64" "$pkg_windows_arm64" \
+            "$pkg_linux_x86_64" "$pkg_linux_arm64" \
+            "$pkg_macos_x86_64" "$pkg_macos_arm64" <<'EOF'
+          import json
+          import sys
+
+          profile = sys.argv[1]
+          flags = [a.lower() == "true" for a in sys.argv[2:]]
+          (
+              test_linux,
+              test_windows,
+              test_macos,
+              pkg_windows_x86_64,
+              pkg_windows_arm64,
+              pkg_linux_x86_64,
+              pkg_linux_arm64,
+              pkg_macos_x86_64,
+              pkg_macos_arm64,
+          ) = flags
+
+          FULL_PACKAGE_MATRIX = [
+              {"target": "windows-x86_64", "runner": "windows-2022", "architecture": "x64",
+               "package_kind": "standalone", "windows_compiler": "msvc",
+               "installer_architecture": "x86_64"},
+              {"target": "windows-arm64", "runner": "windows-11-arm", "architecture": "arm64",
+               "package_kind": "standalone", "windows_compiler": "clang",
+               "installer_architecture": "arm64"},
+              {"target": "linux-x86_64", "runner": "ubuntu-22.04", "architecture": "x64",
+               "package_kind": "standalone"},
+              {"target": "linux-arm64", "runner": "ubuntu-24.04-arm", "architecture": "arm64",
+               "package_kind": "standalone"},
+              {"target": "macos-x86_64", "runner": "macos-15-intel", "architecture": "x64",
+               "target_arch": "x86_64", "package_kind": "macos-app"},
+              {"target": "macos-arm64", "runner": "macos-15", "architecture": "arm64",
+               "target_arch": "arm64", "package_kind": "macos-app"},
+          ]
+
+          def emit(**kwargs):
+              for key, value in kwargs.items():
+                  if isinstance(value, (list, dict)):
+                      value = json.dumps(value, separators=(",", ":"))
+                  print(f"{key}={value}")
+
+          if profile == "fast":
+              emit(
+                  profile=profile,
+                  has_tests="true",
+                  test_matrix=[{"platform": "linux", "runner": "ubuntu-22.04", "architecture": "x64"}],
+                  run_installer_contract="false",
+                  has_packages="false",
+                  package_matrix="[]",
+                  package_mode="smoke",
+              )
+              sys.exit(0)
+
+          if profile == "installer":
+              emit(
+                  profile=profile,
+                  has_tests="false",
+                  test_matrix="[]",
+                  run_installer_contract="true",
+                  has_packages="false",
+                  package_matrix="[]",
+                  package_mode="smoke",
+              )
+              sys.exit(0)
+
+          if profile == "full":
+              emit(
+                  profile=profile,
+                  has_tests="true",
+                  test_matrix=[
+                      {"platform": "linux", "runner": "ubuntu-22.04", "architecture": "x64"},
+                      {"platform": "windows", "runner": "windows-2022", "architecture": "x64"},
+                      {"platform": "macos", "runner": "macos-15", "architecture": "arm64"},
+                  ],
+                  run_installer_contract="true",
+                  has_packages="true",
+                  package_matrix=FULL_PACKAGE_MATRIX,
+                  package_mode="candidate",
+              )
+              sys.exit(0)
+
+          # targeted profile
+          if not (test_linux or test_windows or test_macos or
+                  pkg_windows_x86_64 or pkg_windows_arm64 or
+                  pkg_linux_x86_64 or pkg_linux_arm64 or
+                  pkg_macos_x86_64 or pkg_macos_arm64):
+              print("::error::targeted profile selected no targets; refusing to become quality-only")
+              sys.exit(1)
+
+          test_matrix = []
+          if test_linux:
+              test_matrix.append({"platform": "linux", "runner": "ubuntu-22.04", "architecture": "x64"})
+          if test_windows:
+              test_matrix.append({"platform": "windows", "runner": "windows-2022", "architecture": "x64"})
+          if test_macos:
+              test_matrix.append({"platform": "macos", "runner": "macos-15", "architecture": "arm64"})
+
+          # Any selected Windows package implies the installer contract.
+          run_installer = pkg_windows_x86_64 or pkg_windows_arm64
+
+          package_matrix = []
+          if pkg_windows_x86_64:
+              package_matrix.append({"target": "windows-x86_64", "runner": "windows-2022", "architecture": "x64",
+                                     "package_kind": "standalone", "windows_compiler": "msvc",
+                                     "installer_architecture": "x86_64"})
+          if pkg_windows_arm64:
+              package_matrix.append({"target": "windows-arm64", "runner": "windows-11-arm", "architecture": "arm64",
+                                     "package_kind": "standalone", "windows_compiler": "clang",
+                                     "installer_architecture": "arm64"})
+          if pkg_linux_x86_64:
+              package_matrix.append({"target": "linux-x86_64", "runner": "ubuntu-22.04", "architecture": "x64",
+                                     "package_kind": "standalone"})
+          if pkg_linux_arm64:
+              package_matrix.append({"target": "linux-arm64", "runner": "ubuntu-24.04-arm", "architecture": "arm64",
+                                     "package_kind": "standalone"})
+          if pkg_macos_x86_64:
+              package_matrix.append({"target": "macos-x86_64", "runner": "macos-15-intel", "architecture": "x64",
+                                     "target_arch": "x86_64", "package_kind": "macos-app"})
+          if pkg_macos_arm64:
+              package_matrix.append({"target": "macos-arm64", "runner": "macos-15", "architecture": "arm64",
+                                     "target_arch": "arm64", "package_kind": "macos-app"})
+
+          emit(
+              profile=profile,
+              has_tests="true" if test_matrix else "false",
+              test_matrix=test_matrix,
+              run_installer_contract="true" if run_installer else "false",
+              has_packages="true" if package_matrix else "false",
+              package_matrix=package_matrix,
+              package_mode="smoke",
+          )
+          EOF
+
+  quality:
+    name: Quality
+    uses: ./.github/workflows/_quality.yml
+
+  tests:
+    name: Tests
+    needs: plan
+    if: needs.plan.outputs.has_tests == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.test_matrix) }}
+    uses: ./.github/workflows/_test.yml
+    with:
+      runner: ${{ matrix.runner }}
+      platform: ${{ matrix.platform }}
+      architecture: ${{ matrix.architecture }}
+
+  installer:
+    name: Windows Installer Contract
+    needs: plan
+    if: needs.plan.outputs.run_installer_contract == 'true'
+    uses: ./.github/workflows/_windows-installer-contract.yml
+
+  packages:
+    name: Packages
+    needs: plan
+    if: needs.plan.outputs.has_packages == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.package_matrix) }}
+    uses: ./.github/workflows/_package.yml
+    with:
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+      architecture: ${{ matrix.architecture }}
+      package_kind: ${{ matrix.package_kind }}
+      windows_compiler: ${{ matrix.windows_compiler }}
+      installer_architecture: ${{ matrix.installer_architecture }}
+      target_arch: ${{ matrix.target_arch }}
+      mode: ${{ needs.plan.outputs.package_mode }}
+
+  gate:
+    name: Verify Gate
+    needs: [plan, quality, tests, installer, packages]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check planner contract wiring
+        shell: bash
+        run: |
+          if [ "${{ needs.plan.outputs.has_tests }}" = "true" ]; then
+              [ "${{ needs.tests.result }}" != "skipped" ] || exit 1
+          fi
+          if [ "${{ needs.plan.outputs.run_installer_contract }}" = "true" ]; then
+              [ "${{ needs.installer.result }}" != "skipped" ] || exit 1
+          fi
+          if [ "${{ needs.plan.outputs.has_packages }}" = "true" ]; then
+              [ "${{ needs.packages.result }}" != "skipped" ] || exit 1
+          fi
+
+      - name: Fail if any required job failed or was cancelled
+        shell: bash
+        run: |
+          statuses=(
+            "${{ needs.quality.result }}"
+            "${{ needs.tests.result }}"
+            "${{ needs.installer.result }}"
+            "${{ needs.packages.result }}"
+          )
+          for status in "${statuses[@]}"; do
+              if [ "$status" = "failure" ] || [ "$status" = "cancelled" ]; then
+                  echo "A required job failed: $status" >&2
+                  exit 1
+              fi
+          done
+          exit 0

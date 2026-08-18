@@ -1,0 +1,454 @@
+name: Package
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to check out (empty uses the workflow default)."
+        required: false
+        type: string
+        default: ""
+      version:
+        description: "Numeric release version baked into the package."
+        required: false
+        type: string
+        default: "0.0.0"
+      target:
+        description: "Native target name (e.g. windows-x86_64)."
+        required: true
+        type: string
+      runner:
+        description: "GitHub runner OS label for this target."
+        required: true
+        type: string
+      architecture:
+        description: "Python interpreter architecture (x64 or arm64)."
+        required: true
+        type: string
+      package_kind:
+        description: "standalone or macos-app."
+        required: true
+        type: string
+      windows_compiler:
+        description: "Windows compiler backend (msvc/clang) for Windows targets."
+        required: false
+        type: string
+        default: "auto"
+      installer_architecture:
+        description: "Inno Setup architecture (x86_64/arm64) for Windows targets."
+        required: false
+        type: string
+        default: ""
+      target_arch:
+        description: "Native target architecture for macOS app builds."
+        required: false
+        type: string
+        default: "native"
+      mode:
+        description: "smoke, candidate, or release."
+        required: true
+        type: string
+
+    secrets:
+      WINDOWS_CERTIFICATE_BASE64:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  QT_QPA_PLATFORM: offscreen
+  PYTHONUTF8: "1"
+
+jobs:
+  package:
+    name: Package ${{ inputs.mode }} (${{ inputs.target }})
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          architecture: ${{ inputs.architecture }}
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+
+      - name: Configure project temp directory
+        shell: bash
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/workdir/tmp"
+          echo "TMPDIR=$GITHUB_WORKSPACE/workdir/tmp" >> "$GITHUB_ENV"
+          echo "TMP=$GITHUB_WORKSPACE/workdir/tmp" >> "$GITHUB_ENV"
+          echo "TEMP=$GITHUB_WORKSPACE/workdir/tmp" >> "$GITHUB_ENV"
+
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            patchelf \
+            libegl1 \
+            libgl1 \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Verify generated icon assets
+        run: python scripts/build_icons.py --check
+
+      - name: Diagnose packaging interpreter
+        run: python -c "import platform, PySide6; print(platform.platform()); print(platform.machine()); print(PySide6.__version__)"
+
+      - name: Derive numeric release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ inputs.mode }}" = "release" ]; then
+              # Release passes the tag name (vMAJOR.MINOR.PATCH); the build
+              # scripts validate numeric versions only, so strip the 'v'.
+              echo "numeric=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+              echo "numeric=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare native FFmpeg and FFprobe bundle (candidate / release)
+        if: runner.os != 'Windows' && inputs.mode != 'smoke'
+        shell: bash
+        run: |
+          python scripts/prepare_ffmpeg.py \
+            --target "${{ inputs.target }}" \
+            --output "workdir/ffmpeg/${{ inputs.target }}"
+
+      - name: Restore pinned FFmpeg download cache (candidate / release)
+        if: runner.os != 'Windows' && inputs.mode != 'smoke'
+        uses: actions/cache@v5
+        with:
+          path: workdir/ffmpeg-cache
+          key: ffmpeg-${{ inputs.target }}-${{ hashFiles('packaging/ffmpeg/manifest.json') }}
+
+      - name: Restore pinned FFmpeg download cache (Windows candidate / release)
+        if: runner.os == 'Windows' && inputs.mode != 'smoke'
+        uses: actions/cache@v5
+        with:
+          path: workdir/ffmpeg-cache
+          key: ffmpeg-${{ inputs.target }}-${{ hashFiles('packaging/ffmpeg/manifest.json') }}
+
+      - name: Prepare native FFmpeg and FFprobe bundle (Windows candidate / release)
+        if: runner.os == 'Windows' && inputs.mode != 'smoke'
+        shell: pwsh
+        run: |
+          python .\scripts\prepare_ffmpeg.py `
+            --target "${{ inputs.target }}" `
+            --output "workdir\ffmpeg\${{ inputs.target }}"
+
+      - name: Build Windows standalone package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.numeric }}
+        run: |
+          $ffmpegArg = ""
+          if ("${{ inputs.mode }}" -ne "smoke") {
+              $ffmpegArg = "--ffmpeg-dir ""workdir\ffmpeg\${{ inputs.target }}"" --require-ffmpeg"
+            }
+          python .\scripts\build_nuitka.py `
+            --clean `
+            --version "$env:RELEASE_VERSION" `
+            --windows-compiler "${{ inputs.windows_compiler }}" `
+            $ffmpegArg
+
+      - name: Build Linux standalone package
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.numeric }}
+        run: |
+          ffmpeg_arg=""
+          if [ "${{ inputs.mode }}" != "smoke" ]; then
+              ffmpeg_arg="--ffmpeg-dir workdir/ffmpeg/${{ inputs.target }} --require-ffmpeg"
+            fi
+          # shellcheck disable=SC2086
+          python scripts/build_nuitka.py \
+            --clean \
+            --version "$RELEASE_VERSION" \
+            $ffmpeg_arg
+
+      - name: Build macOS app bundle
+        if: runner.os == 'macOS' && inputs.package_kind == 'macos-app'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.numeric }}
+        run: |
+          ffmpeg_arg=""
+          if [ "${{ inputs.mode }}" != "smoke" ]; then
+              ffmpeg_arg="--ffmpeg-dir workdir/ffmpeg/${{ inputs.target }} --require-ffmpeg"
+            fi
+          # shellcheck disable=SC2086
+          python scripts/build_nuitka.py \
+            --clean \
+            --version "$RELEASE_VERSION" \
+            --macos-app-bundle \
+            --target-arch "${{ inputs.target_arch }}" \
+            $ffmpeg_arg
+
+      - name: Smoke test packaged executable on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $executable = ".\dist\video-compressor\video-compressor.exe"
+          if (-not (Test-Path $executable)) {
+              throw "Packaged executable not found: $executable"
+          }
+          & $executable --cli --help
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+          if ("${{ inputs.mode }}" -ne "smoke") {
+              & ".\dist\video-compressor\FFmpeg\bin\ffmpeg.exe" -hide_banner -version
+              if ($LASTEXITCODE -ne 0) {
+                  exit $LASTEXITCODE
+              }
+              & ".\dist\video-compressor\FFmpeg\bin\ffprobe.exe" -hide_banner -version
+              if ($LASTEXITCODE -ne 0) {
+                  exit $LASTEXITCODE
+              }
+          }
+
+      - name: Sign Windows executable when certificate secrets are configured
+        if: runner.os == 'Windows' && inputs.mode == 'release'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          .\scripts\sign_windows.ps1 `
+            -Files ".\dist\video-compressor\video-compressor.exe"
+
+      - name: Install pinned Inno Setup for Windows installer smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          curl.exe -L `
+            -o "$env:TEMP\innosetup-installer.exe" `
+            "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe"
+          $installer = (Resolve-Path "$env:TEMP\innosetup-installer.exe").Path
+          $innoDir = Join-Path $env:GITHUB_WORKSPACE "workdir\innosetup-7.1.0"
+          New-Item -ItemType Directory -Force -Path $innoDir | Out-Null
+          $process = Start-Process $installer `
+            -Wait `
+            -PassThru `
+            -ArgumentList @(
+              "/VERYSILENT",
+              "/SUPPRESSMSGBOXES",
+              "/NORESTART",
+              "/SP-",
+              "/PORTABLE=1",
+              "/DIR=`"$innoDir`""
+            )
+          if ($process.ExitCode -ne 0) {
+              throw "Inno Setup install failed with exit code $($process.ExitCode)"
+          }
+          $iscc = Join-Path $innoDir "ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+              throw "Pinned ISCC.exe was not found: $iscc"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "INNO_ISCC=$iscc"
+
+      - name: Build Windows Setup package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.numeric }}
+        run: |
+          if ("${{ inputs.mode }}" -eq "release") {
+              $setup = "video-compressor-$env:GITHUB_REF_NAME-${{ inputs.target }}-setup.exe"
+              $source = ".\dist\video-compressor"
+            } else {
+              $setup = "workdir\setup-${{ inputs.mode }}-${{ inputs.target }}-setup.exe"
+              $source = ".\workdir\setup-${{ inputs.mode }}-source"
+              $ffmpeg = Join-Path $source "FFmpeg\bin"
+              New-Item -ItemType Directory -Force -Path $ffmpeg | Out-Null
+              Copy-Item ".\dist\video-compressor\video-compressor.exe" $source
+              Set-Content -Path (Join-Path $ffmpeg "ffmpeg.exe") -Value "${{ inputs.mode }}"
+              Set-Content -Path (Join-Path $ffmpeg "ffprobe.exe") -Value "${{ inputs.mode }}"
+            }
+          python .\scripts\build_setup.py `
+            --version "$env:RELEASE_VERSION" `
+            --architecture "${{ inputs.installer_architecture }}" `
+            --source-dir $source `
+            --output $setup `
+            --iscc "$env:INNO_ISCC"
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "SETUP_PATH=$((Resolve-Path $setup).Path)"
+
+      - name: Sign Windows Setup.exe when certificate secrets are configured
+        if: runner.os == 'Windows' && inputs.mode == 'release'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          .\scripts\sign_windows.ps1 `
+            -Files "$env:SETUP_PATH"
+
+      - name: Install and smoke test Windows Setup package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installed = Join-Path $env:GITHUB_WORKSPACE "workdir\setup-installed"
+          New-Item -ItemType Directory -Force -Path $installed | Out-Null
+          $setup = (Resolve-Path "$env:SETUP_PATH").Path
+          $install = Start-Process $setup `
+            -Wait `
+            -PassThru `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$installed`"")
+          if ($install.ExitCode -ne 0) {
+              throw "Setup silent install failed with exit code $($install.ExitCode)"
+          }
+
+          & (Join-Path $installed "video-compressor.exe") --cli --help
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+          if ("${{ inputs.mode }}" -eq "release") {
+              & (Join-Path $installed "FFmpeg\bin\ffmpeg.exe") -hide_banner -version
+              if ($LASTEXITCODE -ne 0) {
+                  exit $LASTEXITCODE
+              }
+              & (Join-Path $installed "FFmpeg\bin\ffprobe.exe") -hide_banner -version
+              if ($LASTEXITCODE -ne 0) {
+                  exit $LASTEXITCODE
+              }
+          }
+
+      - name: Silent uninstall of installed Windows Setup package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installed = Join-Path $env:GITHUB_WORKSPACE "workdir\setup-installed"
+          $uninstaller = Get-ChildItem -Path $installed -Recurse -File -Filter "unins*.exe" |
+            Select-Object -First 1
+          if (-not $uninstaller) {
+              throw "Setup install did not produce an Inno uninstaller"
+          }
+          $uninstall = Start-Process $uninstaller.FullName `
+            -Wait `
+            -PassThru `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+          if ($uninstall.ExitCode -ne 0) {
+              throw "Setup silent uninstall failed with exit code $($uninstall.ExitCode)"
+          }
+          if (Test-Path (Join-Path $installed "video-compressor.exe")) {
+              throw "Uninstall did not remove video-compressor.exe"
+          }
+          if (Test-Path (Join-Path $installed "FFmpeg")) {
+              throw "Uninstall did not remove the FFmpeg directory"
+          }
+
+      - name: Smoke test packaged executable on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          test -f dist/video-compressor/video-compressor
+          chmod +x dist/video-compressor/video-compressor
+          ./dist/video-compressor/video-compressor --cli --help
+          if [ "${{ inputs.mode }}" != "smoke" ]; then
+              dist/video-compressor/FFmpeg/bin/ffmpeg -hide_banner -version
+              dist/video-compressor/FFmpeg/bin/ffprobe -hide_banner -version
+            fi
+
+      - name: Smoke test macOS app bundle and DMG
+        if: runner.os == 'macOS' && inputs.package_kind == 'macos-app'
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ inputs.target_arch }}
+        run: |
+          app="dist/Video Compressor.app"
+          executable="$app/Contents/MacOS/video-compressor"
+          dmg="dist/video-compressor.dmg"
+          test -d "$app"
+          test -f "$app/Contents/Info.plist"
+          test -x "$executable"
+          "$executable" --cli --help
+          codesign --verify --deep --strict "$app"
+          file "$executable"
+
+          archs="$(lipo -archs "$executable")"
+          if [[ "$archs" != "$TARGET_ARCH" ]]; then
+              printf 'Expected native %s executable, found %s\n' "$TARGET_ARCH" "$archs" >&2
+              exit 1
+          fi
+
+          if [ "${{ inputs.mode }}" != "smoke" ]; then
+              test -x "$app/Contents/Resources/FFmpeg/bin/ffmpeg"
+              test -x "$app/Contents/Resources/FFmpeg/bin/ffprobe"
+              "$app/Contents/Resources/FFmpeg/bin/ffmpeg" -hide_banner -version
+              "$app/Contents/Resources/FFmpeg/bin/ffprobe" -hide_banner -version
+            fi
+
+          test -f "$dmg"
+          hdiutil verify "$dmg"
+          mount_dir="$(mktemp -d)"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir"
+          trap 'hdiutil detach "$mount_dir"' EXIT
+          test -d "$mount_dir/Video Compressor.app"
+          test -L "$mount_dir/Applications"
+          test "$(readlink "$mount_dir/Applications")" = "/Applications"
+          codesign --verify --deep --strict "$mount_dir/Video Compressor.app"
+          hdiutil detach "$mount_dir"
+          trap - EXIT
+          rmdir "$mount_dir"
+
+      - name: Archive Windows package (release)
+        if: runner.os == 'Windows' && inputs.mode == 'release'
+        shell: pwsh
+        run: |
+          $archive = "video-compressor-$env:GITHUB_REF_NAME-${{ inputs.target }}.zip"
+          7z a -tzip $archive ".\dist\video-compressor"
+
+      - name: Archive Linux package (release)
+        if: runner.os == 'Linux' && inputs.mode == 'release'
+        shell: bash
+        run: |
+          tar -czf "video-compressor-${GITHUB_REF_NAME}-${{ inputs.target }}.tar.gz" \
+            -C dist video-compressor
+
+      - name: Archive macOS app bundle (release)
+        if: runner.os == 'macOS' && inputs.package_kind == 'macos-app' && inputs.mode == 'release'
+        shell: bash
+        run: |
+          tar -czf "video-compressor-${GITHUB_REF_NAME}-${{ inputs.target }}.tar.gz" \
+            -C dist "Video Compressor.app"
+          cp "dist/video-compressor.dmg" \
+            "video-compressor-${GITHUB_REF_NAME}-${{ inputs.target }}.dmg"
+
+      - name: Upload release packages
+        if: inputs.mode == 'release'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-package-${{ inputs.target }}
+          path: |
+            video-compressor-${{ github.ref_name }}-${{ inputs.target }}.*
+            video-compressor-${{ github.ref_name }}-${{ inputs.target }}-setup.exe
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - name: Upload Nuitka compilation report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nuitka-report-${{ inputs.target }}
+          path: build/reports/**
+          include-hidden-files: true
+          if-no-files-found: warn
