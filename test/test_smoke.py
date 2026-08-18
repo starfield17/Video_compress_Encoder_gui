@@ -3,7 +3,9 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -79,6 +81,36 @@ class SmokeTestCase(unittest.TestCase):
             self.assertEqual(window.queue_model.rowCount(), 0)
             self.assertFalse(window.queue_busy)
             self.assertEqual(window.queue_progress_bar.value(), 0)
+        finally:
+            window.close()
+
+    def test_start_encoder_detection_uses_selected_paths(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            with patch("gui.gui_mainwindow.EncoderCapabilityDetectWorker") as worker_cls:
+                window._start_encoder_capability_detection(force_refresh=False)
+            worker_cls.assert_called_once()
+            worker_cls.return_value.start.assert_called_once()
+        finally:
+            window.encoder_detection_worker = None
+            window.close()
+
+    def test_build_context_reads_selected_paths_and_options(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                source = Path(temp_dir) / "source.mp4"
+                source.write_bytes(b"source")
+                window.source_combo.setEditText(str(source))
+                window.output_edit.setText(temp_dir)
+                with patch("gui.gui_mainwindow.update_app_config"):
+                    input_path, options, output_dir, workdir, ffmpeg_path, ffprobe_path = window._build_context()
+            self.assertEqual(input_path, source.resolve())
+            self.assertEqual(output_dir, Path(temp_dir).resolve())
+            self.assertEqual(workdir, window.default_workdir.resolve())
+            self.assertIsNone(ffmpeg_path)
+            self.assertIsNone(ffprobe_path)
+            self.assertIsInstance(options, EncodeOptions)
         finally:
             window.close()
 

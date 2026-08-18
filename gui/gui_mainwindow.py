@@ -545,6 +545,26 @@ class MainWindow(QMainWindow):
         self.source_combo.setEditText(current)
         self.source_combo.blockSignals(False)
 
+    def _selected_input(self) -> Path | None:
+        text = self.source_combo.currentText().strip()
+        return Path(text).expanduser().resolve() if text else None
+
+    def _selected_output(self) -> Path | None:
+        text = self.output_edit.text().strip()
+        return Path(text).expanduser().resolve() if text else None
+
+    def _selected_workdir(self) -> Path:
+        text = str(self.app_config.get("workdir_path", "")).strip()
+        return Path(text).expanduser().resolve() if text else self.default_workdir.resolve()
+
+    def _selected_ffmpeg(self) -> str | None:
+        text = str(self.app_config.get("ffmpeg_path", "")).strip()
+        return text or None
+
+    def _selected_ffprobe(self) -> str | None:
+        text = str(self.app_config.get("ffprobe_path", "")).strip()
+        return text or None
+
     def _append_log(self, message: str) -> None:
         self.activity_log_window.append_message(message)
         self.statusBar().showMessage(message, 5000)
