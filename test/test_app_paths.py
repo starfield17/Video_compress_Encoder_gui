@@ -8,6 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import core.app_paths as app_paths
+from cli import cli_entry
+from core.app_paths import source_root
 
 
 class AppPathsCompiledEnvironmentTestCase(unittest.TestCase):
@@ -150,6 +152,31 @@ class AppPathsCompiledEnvironmentTestCase(unittest.TestCase):
                 json.loads((runtime_i18n / "en.json").read_text(encoding="utf-8")),
                 {"existing": "Customized"},
             )
+
+    def test_cli_default_catalog_uses_bundle_i18n_in_macos_app(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            resources = root / "Video Compressor.app" / "Contents" / "Resources"
+            i18n_dir = resources / "config" / "i18n"
+            i18n_dir.mkdir(parents=True)
+            for name in ("en.json", "zh_cn.json"):
+                (i18n_dir / name).write_text(
+                    (source_root() / "config" / "i18n" / name).read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            app_support = (
+                root / "Library" / "Application Support" / "Video Compressor"
+            )
+            app_support.mkdir(parents=True)
+
+            with (
+                patch("cli.cli_entry.bundle_root", return_value=resources),
+                patch("cli.cli_entry.app_root", return_value=app_support),
+            ):
+                catalog = cli_entry._default_catalog()
+            self.assertIn("en", catalog.known_locales())
+            self.assertIn("zh_cn", catalog.known_locales())
+            self.assertEqual(catalog.translator("zh_cn").t("app.title"), "视频压缩器")
 
 
 if __name__ == "__main__":

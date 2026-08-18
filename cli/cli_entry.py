@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from cli.cli_interactive import print_encode_results, print_plan, print_preview_result
-from core.app_paths import app_root
+from core.app_paths import app_root, bundle_root
 from core.app_paths import config_dir as app_config_dir
 from core.app_paths import ensure_runtime_layout, workdir_dir
 from core.discover_ffmpeg import discover_ffmpeg_tools
@@ -173,7 +173,7 @@ def _options_from_args(args: argparse.Namespace, config_dir: Path) -> EncodeOpti
 
 def _default_catalog() -> TranslationCatalog:
     return TranslationCatalog(
-        bundle_dir=app_config_dir() / "i18n",
+        bundle_dir=bundle_root() / "config" / "i18n",
         translations_dir=app_root() / "translations",
     )
 
