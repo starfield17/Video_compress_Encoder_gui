@@ -10,7 +10,7 @@ from core.exec_encode import execute_plan
 from core.models import EncodePlan, EncodeResult, OperationCancelledError
 from core.parallel_queue_exec import execute_plan_parallel, normalize_parallel_backends
 from gui.queue_state import QueueItemRecord, create_queue_records
-from gui.queue_table import QueueTableModel
+from gui.queue_model import QueueTableModel
 
 
 @dataclass(slots=True)

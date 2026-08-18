@@ -20,7 +20,8 @@ from core.plan_encode import build_encode_plan
 from core.preset_store import app_config_path
 from gui.gui_mainwindow import MainWindow
 from gui.queue_manager import QueueManager
-from gui.queue_table import QueueColumn, QueueTableModel, create_queue_view
+from gui.queue_model import QueueColumn, QueueTableModel
+from gui.queue_view import create_queue_view
 from main import main
 
 

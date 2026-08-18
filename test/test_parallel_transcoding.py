@@ -30,7 +30,7 @@ from core.parallel_queue_exec import execute_plan_parallel
 from core.preset_store import encode_options_to_preset_data, preset_data_to_encode_options
 from gui.gui_mainwindow import MainWindow
 from gui.queue_state import create_queue_records
-from gui.queue_table import QueueColumn, QueueTableModel
+from gui.queue_model import QueueColumn, QueueTableModel
 
 
 def _media(path: Path) -> MediaInfo:

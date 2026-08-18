@@ -60,7 +60,8 @@ from gui.preview_result_dialog import PreviewResultDialog
 from gui.preset_manager_dialog import PresetManagerDialog
 from gui.queue_manager import QueueManager
 from gui.queue_state import QueueItemRecord
-from gui.queue_table import QueueTableModel, create_queue_view, format_duration, format_size
+from gui.queue_model import QueueTableModel, format_duration, format_size
+from gui.queue_view import create_queue_view
 from gui.queue_window import QueueWindow
 from gui.settings_dialog import SettingsDialog
 from gui.theme import apply_theme

@@ -3,7 +3,8 @@ from __future__ import annotations
 from PySide6.QtWidgets import QLabel, QMainWindow, QProgressBar, QVBoxLayout, QWidget
 
 from core.i18n import Translator
-from gui.queue_table import QueueTableModel, create_queue_view, format_duration
+from gui.queue_model import QueueTableModel, format_duration
+from gui.queue_view import create_queue_view
 from gui.window_geometry import clamped_window_size
 
 

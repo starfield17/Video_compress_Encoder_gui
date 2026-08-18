@@ -48,7 +48,7 @@ from core.smart_quality import (
     reselect_from_candidates,
 )
 from core.i18n import get_translator
-from gui.queue_table import QueueTableModel
+from gui.queue_model import QueueTableModel
 from gui.queue_state import QueueItemRecord, QueueItemStatus, compute_metrics, mark_finished
 from gui.queue_state import QueueJobSnapshot
 
