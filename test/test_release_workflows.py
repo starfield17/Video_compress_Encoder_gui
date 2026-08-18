@@ -156,6 +156,10 @@ class VerifyWorkflowTestCase(unittest.TestCase):
         self.assertEqual(_matrix_rows(self.workflow), {})
         self.assertNotIn('"runner": "', self.workflow)
 
+    def test_verify_plan_writes_resolved_values_to_job_outputs(self) -> None:
+        self.assertIn('with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8")', self.workflow)
+        self.assertIn('output.write("\\n".join(lines) + "\\n")', self.workflow)
+
 
 class ReleaseWorkflowTestCase(unittest.TestCase):
     def setUp(self) -> None:

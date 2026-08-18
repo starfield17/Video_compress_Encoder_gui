@@ -106,6 +106,7 @@ jobs:
             "$pkg_linux_x86_64" "$pkg_linux_arm64" \
             "$pkg_macos_x86_64" "$pkg_macos_arm64" <<'EOF'
           import json
+          import os
           import sys
           from scripts.ci_plan import PACKAGE_TARGETS, TEST_TARGETS
 
@@ -124,10 +125,14 @@ jobs:
           ) = flags
 
           def emit(**kwargs):
+              lines = []
               for key, value in kwargs.items():
                   if isinstance(value, (list, dict)):
                       value = json.dumps(value, separators=(",", ":"))
-                  print(f"{key}={value}")
+                  lines.append(f"{key}={value}")
+              print("\n".join(lines))
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                  output.write("\n".join(lines) + "\n")
 
           if profile == "fast":
               emit(
