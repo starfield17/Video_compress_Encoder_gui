@@ -154,6 +154,60 @@ class ArchitectureTestCase(unittest.TestCase):
             "logic into a lower layer to break this cycle:\n" + rendered,
         )
 
+    def test_gui_submodules_do_not_import_main_window(self) -> None:
+        violations: list[str] = []
+        modules = _app_modules()
+        for source, path in modules.items():
+            if not source.startswith("gui.") or source == "gui.gui_entry":
+                continue
+            for imported in _imports(source, path):
+                if imported.startswith("gui.gui_mainwindow"):
+                    violations.append(f"{path.relative_to(ROOT)} imports {imported!r}")
+        self.assertFalse(
+            violations,
+            "gui.gui_entry is the only GUI entrypoint; other gui sub-modules must not "
+            "import MainWindow (it is the composition root):\n" + "\n".join(sorted(violations)),
+        )
+
+    def test_queue_state_and_model_do_not_import_queue_view(self) -> None:
+        violations: list[str] = []
+        modules = _app_modules()
+        for source, path in modules.items():
+            if source not in {"gui.queue_state", "gui.queue_model"}:
+                continue
+            for imported in _imports(source, path):
+                if imported.startswith(("gui.queue_view", "gui.queue_table")):
+                    violations.append(f"{path.relative_to(ROOT)} imports {imported!r}")
+        self.assertFalse(
+            violations,
+            "queue_state is Qt-free and queue_model is the model layer; neither may "
+            "depend on the view:\n" + "\n".join(sorted(violations)),
+        )
+
+    def test_no_module_imports_removed_queue_table(self) -> None:
+        violations: list[str] = []
+        modules = _app_modules()
+        for source, path in modules.items():
+            for imported in _imports(source, path):
+                if imported.startswith("gui.queue_table"):
+                    violations.append(f"{path.relative_to(ROOT)} imports {imported!r}")
+        self.assertFalse(
+            violations,
+            "gui.queue_table was split into gui.queue_model and gui.queue_view; "
+            "importers must be updated:\n" + "\n".join(sorted(violations)),
+        )
+
+    def test_queue_view_depends_on_model(self) -> None:
+        view_path = _app_modules().get("gui.queue_view")
+        self.assertIsNotNone(view_path)
+        self.assertTrue(
+            any(
+                imported.startswith("gui.queue_model")
+                for imported in _imports("gui.queue_view", view_path)
+            ),
+            "gui.queue_view must use the column definitions from gui.queue_model",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
