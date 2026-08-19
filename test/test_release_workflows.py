@@ -304,6 +304,12 @@ class InstallerContractWorkflowTestCase(unittest.TestCase):
         self.assertIn("installer-contract-source", self.workflow)
         self.assertIn("runs-on: windows-2022", self.workflow)
 
+    def test_contract_normalizes_a_v_prefixed_release_tag(self) -> None:
+        self.assertIn('$version = "${{ inputs.version }}"', self.workflow)
+        self.assertIn('$version.StartsWith("v")', self.workflow)
+        self.assertIn('$version = $version.Substring(1)', self.workflow)
+        self.assertIn('--version "$version"', self.workflow)
+
 
 class PackageWorkflowTestCase(unittest.TestCase):
     def setUp(self) -> None:

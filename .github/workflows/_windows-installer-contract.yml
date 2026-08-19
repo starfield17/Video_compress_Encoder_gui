@@ -9,7 +9,7 @@ on:
         type: string
         default: ""
       version:
-        description: "Numeric release version baked into the contract compile."
+        description: "Numeric or v-prefixed release version baked into the contract compile."
         required: false
         type: string
         default: "0.0.0"
@@ -68,6 +68,10 @@ jobs:
       - name: Compile installer manifest for both Windows targets
         shell: pwsh
         run: |
+          $version = "${{ inputs.version }}"
+          if ($version.StartsWith("v")) {
+              $version = $version.Substring(1)
+          }
           $source = Join-Path $env:GITHUB_WORKSPACE "workdir\installer-contract-source"
           $ffmpeg = Join-Path $source "FFmpeg\bin"
           $output = Join-Path $env:GITHUB_WORKSPACE "workdir\installer-contract-output"
@@ -79,7 +83,7 @@ jobs:
           foreach ($architecture in @("x86_64", "arm64")) {
               $setup = Join-Path $output "video-compressor-contract-$architecture-setup.exe"
               python .\scripts\build_setup.py `
-                --version "${{ inputs.version }}" `
+                --version "$version" `
                 --architecture $architecture `
                 --source-dir $source `
                 --output $setup `
