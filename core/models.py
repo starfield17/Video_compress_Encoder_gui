@@ -81,6 +81,11 @@ class PreviewSampleMode(str, Enum):
     CUSTOM = "custom"
 
 
+class VmafBackend(str, Enum):
+    CPU = "cpu"
+    CUDA = "cuda"
+
+
 class OperationCancelledError(RuntimeError):
     """Raised when a running planning/preview/encode task is cancelled."""
 
@@ -105,6 +110,7 @@ class MediaInfo:
     audio_codec: Optional[str]
     audio_stream_count: int = 0
     pix_fmt: Optional[str] = None
+    bit_depth: Optional[int] = None
     color_transfer: Optional[str] = None
 
 
@@ -119,7 +125,7 @@ class EncodeOptions:
     parallel_backends: tuple[BackendChoice, ...] = ()
     # None means choose the default compression ratio for the selected codec.
     ratio: Optional[float] = None
-    min_vmaf: float = 95.0
+    min_vmaf: float = 90.0
     # None means choose the smart output ratio for the selected codec.
     max_output_ratio: Optional[float] = None
     min_video_kbps: int = 250
@@ -257,11 +263,11 @@ class DecisionActionCode(str, Enum):
     SKIP = "skip"
 
 
-@dataclass(slots=True)
-class VmafCapabilities:
-    filter_available: bool
-    standard_model: bool
-    model_4k: bool
+@dataclass(frozen=True, slots=True)
+class VmafRuntimeSupport:
+    backend: VmafBackend
+    model: str
+    runnable: bool
     error_message: Optional[str] = None
 
 

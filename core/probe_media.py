@@ -7,6 +7,7 @@ from typing import Any
 
 from core.models import MediaInfo
 from core.subprocess_utils import noninteractive_run_kwargs
+from core.vmaf_runtime import infer_bit_depth_from_pix_fmt
 
 
 def _run_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -118,6 +119,9 @@ def probe_media_info(ffprobe_path: Path, input_path: Path) -> MediaInfo:
     fps = _guess_fps(video_stream)
     video_codec = str(video_stream.get("codec_name") or "unknown")
     audio_codec = str(first_audio.get("codec_name")) if first_audio else None
+    pix_fmt = str(video_stream.get("pix_fmt")) if video_stream.get("pix_fmt") else None
+    raw_bit_depth = _parse_int(video_stream.get("bits_per_raw_sample"))
+    bit_depth = raw_bit_depth if raw_bit_depth > 0 else infer_bit_depth_from_pix_fmt(pix_fmt)
 
     return MediaInfo(
         path=input_path,
@@ -131,6 +135,7 @@ def probe_media_info(ffprobe_path: Path, input_path: Path) -> MediaInfo:
         video_codec=video_codec,
         audio_codec=audio_codec,
         audio_stream_count=len(audio_streams),
-        pix_fmt=str(video_stream.get("pix_fmt")) if video_stream.get("pix_fmt") else None,
+        pix_fmt=pix_fmt,
+        bit_depth=bit_depth,
         color_transfer=str(video_stream.get("color_transfer")) if video_stream.get("color_transfer") else None,
     )

@@ -13,7 +13,7 @@ Design rules (see docs/ci-workflows.md):
 * Unknown paths fail closed: a path the router does not recognise requests
   full verification rather than degrading to a quality-only run.
 * Ordinary application/runtime changes run Quality plus the three native OS
-  unit-test environments but no longer trigger all six Nuitka packaging jobs.
+  unit-test environments but no longer trigger all five Nuitka packaging jobs.
 * Packaging/build-system changes trigger the full targeted or all-platform
   native packaging smoke.
 
@@ -81,13 +81,6 @@ PACKAGE_TARGETS: dict[str, dict[str, str]] = {
         "architecture": "arm64",
         "package_kind": "standalone",
     },
-    "macos-x86_64": {
-        "target": "macos-x86_64",
-        "runner": "macos-15-intel",
-        "architecture": "x64",
-        "target_arch": "x86_64",
-        "package_kind": "macos-app",
-    },
     "macos-arm64": {
         "target": "macos-arm64",
         "runner": "macos-15",
@@ -112,7 +105,7 @@ CAP_INSTALLER_CONTRACT = "installer_contract"
 #: Package a single Windows x86_64 smoke (the cheapest native package that
 #: exercises the installer path end to end).
 CAP_PACKAGE_WINDOWS_X86_64 = "package_windows_x86_64"
-#: Package all six native targets.
+#: Package all five native targets.
 CAP_PACKAGE_ALL = "package_all"
 
 _FULL = {

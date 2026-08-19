@@ -36,7 +36,8 @@ from core.models import (
     QualityCandidateResult,
     QualitySearchResult,
     QualitySearchStatus,
-    VmafCapabilities,
+    VmafBackend,
+    VmafRuntimeSupport,
 )
 from core.preset_store import encode_options_to_preset_data, preset_data_to_encode_options
 from core.parallel_queue_exec import execute_plan_parallel
@@ -104,10 +105,15 @@ class SmartConfigurationTestCase(unittest.TestCase):
         data.pop("max_output_ratio")
         restored = preset_data_to_encode_options(data)
         self.assertEqual(restored.compression_mode, CompressionMode.FIXED_BITRATE)
-        self.assertEqual(restored.min_vmaf, 95.0)
+        self.assertEqual(restored.min_vmaf, 90.0)
 
     def test_new_options_default_to_smart(self) -> None:
         self.assertEqual(EncodeOptions().compression_mode, CompressionMode.SMART)
+        self.assertEqual(EncodeOptions().min_vmaf, 90.0)
+
+    def test_explicit_saved_vmaf_target_is_preserved(self) -> None:
+        data = encode_options_to_preset_data(EncodeOptions(min_vmaf=95.0))
+        self.assertEqual(preset_data_to_encode_options(data).min_vmaf, 95.0)
 
     def test_cli_rejects_fixed_ratio_flag_in_smart_mode(self) -> None:
         stderr = io.StringIO()
@@ -236,8 +242,10 @@ class SmartSamplingAndBudgetTestCase(unittest.TestCase):
             ffmpeg.write_bytes(b"binary")
             item = _item(source, root / "out.mp4", EncodeOptions())
             with patch(
-                "core.smart_quality.detect_vmaf_capabilities",
-                return_value=VmafCapabilities(False, False, False, "missing libvmaf"),
+                "core.smart_quality.select_vmaf_runtime",
+                return_value=VmafRuntimeSupport(
+                    VmafBackend.CPU, "vmaf_v1.0.16_3d0h", False, "missing libvmaf"
+                ),
             ):
                 result = analyze_quality(ffmpeg, item, root, root / "log.txt")
             self.assertEqual(result.status, QualitySearchStatus.UNSUPPORTED)
@@ -252,8 +260,13 @@ class SmartSamplingAndBudgetTestCase(unittest.TestCase):
             ffmpeg.write_bytes(b"binary")
             item = _item(source, root / "out.mp4", EncodeOptions())
             with patch(
-                "core.smart_quality.detect_vmaf_capabilities",
-                return_value=VmafCapabilities(False, True, True, "libvmaf filter unavailable"),
+                "core.smart_quality.select_vmaf_runtime",
+                return_value=VmafRuntimeSupport(
+                    VmafBackend.CPU,
+                    "vmaf_v1.0.16_3d0h",
+                    False,
+                    "libvmaf filter unavailable",
+                ),
             ):
                 result = analyze_quality(ffmpeg, item, root, root / "log.txt")
             self.assertEqual(result.status, QualitySearchStatus.UNSUPPORTED)
@@ -269,8 +282,8 @@ class SmartSamplingAndBudgetTestCase(unittest.TestCase):
             item = _item(source, root / "out.mp4", EncodeOptions())
             item.media_info.color_transfer = "smpte2084"
             with patch(
-                "core.smart_quality.detect_vmaf_capabilities",
-                return_value=VmafCapabilities(True, True, True),
+                "core.smart_quality.select_vmaf_runtime",
+                return_value=VmafRuntimeSupport(VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True),
             ):
                 result = analyze_quality(ffmpeg, item, root, root / "log.txt")
             self.assertEqual(result.status, QualitySearchStatus.UNSUPPORTED)
@@ -918,10 +931,13 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
             cached = self._quality_result()
             cached.fingerprint = quality_configuration_fingerprint(ffmpeg, item)
             item.quality_search_result = cached
-            with patch("core.smart_quality.detect_vmaf_capabilities") as detect:
+            with patch(
+                "core.smart_quality.select_vmaf_runtime",
+                return_value=VmafRuntimeSupport(VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True),
+            ) as detect:
                 result = analyze_quality(ffmpeg, item, root, root / "log.txt")
             self.assertIs(result, cached)
-            detect.assert_not_called()
+            detect.assert_called_once()
 
     def test_cancelled_output_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -957,6 +973,7 @@ class SmartGuiTestCase(unittest.TestCase):
             panel.compression_mode_combo.setCurrentIndex(smart_index)
             self.assertFalse(panel.ratio_edit.isEnabled())
             self.assertTrue(panel.min_vmaf_spin.isEnabled())
+            self.assertEqual(panel.min_vmaf_spin.value(), 90.0)
             self.assertFalse(panel.sample_mode_combo.isEnabled())
 
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -983,9 +1000,9 @@ class SmartGuiTestCase(unittest.TestCase):
                 {
                     "codecs": {"hevc": [], "av1": []},
                     "vmaf": {
-                        "filter_available": False,
-                        "standard_model": False,
-                        "model_4k": False,
+                        "runnable": False,
+                        "model": "vmaf_v1.0.16_3d0h",
+                        "backend": "cpu",
                         "error_message": "missing libvmaf",
                     },
                 }

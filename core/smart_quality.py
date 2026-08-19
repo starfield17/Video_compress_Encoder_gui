@@ -19,7 +19,6 @@ from core.analysis_runtime import (
     AnalysisDecodePolicy,
     AnalysisExecutionPlan,
     AnalysisTier,
-    VmafBackend,
     build_analysis_execution_plan,
     cpu_vmaf_plan,
     detect_analysis_capabilities,
@@ -48,18 +47,28 @@ from core.models import (
     QualitySearchResult,
     QualitySearchStatus,
     SizeBlockedPolicy,
-    VmafCapabilities,
+    VmafBackend,
+    VmafRuntimeSupport,
 )
 from core.subprocess_utils import hidden_popen_kwargs
 from core.vmaf_runtime import (
     EXACT_VMAF_SUBSAMPLE,
     PTS_RESET_FILTER,
+    VMAF_ASPECT_POLICY,
+    VMAF_MEASUREMENT_BIT_DEPTH,
+    VMAF_MEASUREMENT_PIX_FMT,
+    VMAF_MODEL_GENERATION,
+    VMAF_RESOLUTION_MODE,
+    VMAF_SCALE_FLAGS,
+    VmafEncodeMetadata,
+    VmafModelSpec,
+    build_cpu_vmaf_filter_graph,
     build_cpu_vmaf_command,
     build_cuda_vmaf_command,
-    build_libvmaf_option,
-    detect_vmaf_capabilities,
+    candidate_encode_metadata,
     parse_vmaf_json,
-    vmaf_model_name,
+    select_vmaf_model,
+    select_vmaf_runtime,
 )
 
 
@@ -72,7 +81,7 @@ CONTAINER_BUDGET_FACTOR = 0.98
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}
 SMART_ERROR_TAIL_CHARS = 4_000
 SMART_SAMPLE_SCHEME_VERSION = 3
-SMART_ANALYSIS_ALGORITHM_VERSION = 3
+SMART_ANALYSIS_ALGORITHM_VERSION = 4
 SMART_WHOLE_VIDEO_MAX_SEC = 10.0
 SMART_SAMPLE_DURATION_SEC = 5.0
 SMART_SAMPLE_CENTERS = (0.20, 0.50, 0.80)
@@ -362,7 +371,12 @@ def measurement_configuration_payload(
 ) -> dict[str, object]:
     if item.encoder_info is None:
         raise ValueError("Smart analysis requires a bound encoder.")
+    if item.media_info is None:
+        raise ValueError("Smart analysis requires probed media.")
     options = item.options
+    media = item.media_info
+    model_spec = select_vmaf_model(media)
+    encode_metadata = candidate_encode_metadata(media, options.pix_fmt)
     return {
         "source": _path_identity(item.source_path),
         "ffmpeg": _path_identity(ffmpeg_path),
@@ -378,11 +392,25 @@ def measurement_configuration_payload(
         "whole_video_max_sec": options.analysis_settings.whole_video_max_sec,
         "sample_duration_sec": options.analysis_settings.sample_duration_sec,
         "sample_window_count": options.analysis_settings.sample_window_count,
-        "source_width": item.media_info.width if item.media_info is not None else None,
-        "source_height": item.media_info.height if item.media_info is not None else None,
-        "vmaf_resolution_mode": "source_native",
+        "source_width": media.width,
+        "source_height": media.height,
+        "source_fps": media.fps,
+        "source_pix_fmt": media.pix_fmt,
+        "source_bit_depth": media.bit_depth,
+        "candidate_encode_width": encode_metadata.width,
+        "candidate_encode_height": encode_metadata.height,
+        "candidate_encode_bit_depth": encode_metadata.bit_depth,
+        "vmaf_generation": VMAF_MODEL_GENERATION,
+        "vmaf_resolution_mode": VMAF_RESOLUTION_MODE,
         "vmaf_pooling": "lowest_sampled_window_mean",
-        "vmaf_model": vmaf_model_name(is_4k=_is_4k(item)),
+        "vmaf_model": model_spec.name,
+        "vmaf_hfr": model_spec.hfr,
+        "vmaf_display_width": model_spec.display_width,
+        "vmaf_display_height": model_spec.display_height,
+        "vmaf_measurement_pix_fmt": VMAF_MEASUREMENT_PIX_FMT,
+        "vmaf_measurement_bit_depth": VMAF_MEASUREMENT_BIT_DEPTH,
+        "vmaf_scale_algorithm": VMAF_SCALE_FLAGS,
+        "vmaf_aspect_policy": VMAF_ASPECT_POLICY,
         "vmaf_subsample": int(vmaf_subsample),
         "vmaf_backend": vmaf_backend.value,
         "analysis_algorithm_version": SMART_ANALYSIS_ALGORITHM_VERSION,
@@ -443,22 +471,12 @@ def quality_configuration_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _is_4k(item: EncodePlanItem) -> bool:
+def _unsupported_reason(item: EncodePlanItem, support: VmafRuntimeSupport | None = None) -> str | None:
     media = item.media_info
-    if media is None or media.width is None or media.height is None:
-        return False
-    short_side, long_side = sorted((media.width, media.height))
-    return short_side >= 2160 and long_side >= 3840
-
-
-def _unsupported_reason(item: EncodePlanItem, capabilities: VmafCapabilities) -> str | None:
-    media = item.media_info
-    if not capabilities.filter_available or not capabilities.standard_model:
-        return capabilities.error_message or "libvmaf standard model is unavailable."
-    if _is_4k(item) and not capabilities.model_4k:
-        return capabilities.error_message or "The VMAF 4K model is unavailable."
     if media and media.color_transfer and media.color_transfer.lower() in HDR_TRANSFERS:
         return f"HDR transfer {media.color_transfer!r} is not supported by smart mode."
+    if support is not None and not support.runnable:
+        return support.error_message or f"VMAF model {support.model} is unavailable on {support.backend.value}."
     return None
 
 
@@ -586,23 +604,21 @@ def _build_loopback_score_command(
     output_path: Path,
     plan: AnalysisExecutionPlan,
     *,
-    model: str,
+    model_spec: VmafModelSpec,
+    encode_metadata: VmafEncodeMetadata,
     log_name: str,
 ) -> list[str]:
+    if plan.vmaf_backend != VmafBackend.CPU:
+        raise ValueError("VMAF v1 loopback scoring currently supports only the CPU backend.")
     video_args = build_video_args(item, extra_args=plan.encoder_extra_args)
-    filter_name = "libvmaf_cuda" if plan.vmaf_backend == VmafBackend.CUDA else "libvmaf"
-    dist_prefix = "scale_cuda=format=yuv420p," if plan.vmaf_backend == VmafBackend.CUDA else ""
-    libvmaf = build_libvmaf_option(
-        model=model,
+    filter_graph = build_cpu_vmaf_filter_graph(
+        model_spec=model_spec,
+        encode_metadata=encode_metadata,
         log_path=log_name,
         n_threads=plan.vmaf_threads,
         n_subsample=plan.vmaf_subsample,
-        filter_name=filter_name,
-    )
-    filter_graph = (
-        f"[0:v]{PTS_RESET_FILTER}[ref];"
-        f"[dec:v]{dist_prefix}{PTS_RESET_FILTER}[dist];"
-        f"[dist][ref]{libvmaf}"
+        distorted_input="dec:v",
+        reference_input="0:v",
     )
     return [
         str(ffmpeg_path),
@@ -660,7 +676,8 @@ def _vmaf_command(
     *,
     candidate_path: Path,
     reference_path: Path,
-    model: str,
+    model_spec: VmafModelSpec,
+    encode_metadata: VmafEncodeMetadata,
     log_name: str,
 ) -> list[str]:
     if plan.vmaf_backend == VmafBackend.CUDA:
@@ -668,7 +685,8 @@ def _vmaf_command(
             ffmpeg_path,
             distorted_path=candidate_path,
             reference_path=reference_path,
-            model=model,
+            model_spec=model_spec,
+            encode_metadata=encode_metadata,
             log_name=log_name,
             n_threads=plan.vmaf_threads,
             n_subsample=plan.vmaf_subsample,
@@ -677,7 +695,8 @@ def _vmaf_command(
         ffmpeg_path,
         distorted_path=candidate_path,
         reference_path=reference_path,
-        model=model,
+        model_spec=model_spec,
+        encode_metadata=encode_metadata,
         log_name=log_name,
         n_threads=plan.vmaf_threads,
         n_subsample=plan.vmaf_subsample,
@@ -734,7 +753,10 @@ def _score_candidate_loopback(
     window_order: list[int] | None = None,
 ) -> QualityCandidateResult:
     candidate_item = _bind_candidate_item(item, bitrate_bps, plan)
-    model = vmaf_model_name(is_4k=_is_4k(item))
+    if item.media_info is None:
+        raise ValueError("Smart analysis requires probed media.")
+    model_spec = select_vmaf_model(item.media_info)
+    encode_metadata = candidate_encode_metadata(item.media_info, item.options.pix_fmt)
     order = window_order or list(range(len(windows)))
     scores: dict[int, float] = {}
     encoded_bytes: dict[int, int] = {}
@@ -751,7 +773,8 @@ def _score_candidate_loopback(
                 window,
                 candidate_path,
                 plan,
-                model=model,
+                model_spec=model_spec,
+                encode_metadata=encode_metadata,
                 log_name=json_path.name,
             ),
             log_file,
@@ -832,7 +855,10 @@ def _score_candidate(
     encoded_bytes: dict[int, int] = {}
     encoded_durations: dict[int, float] = {}
     candidate_item = _bind_candidate_item(item, bitrate_bps, plan)
-    model = vmaf_model_name(is_4k=_is_4k(item))
+    if item.media_info is None:
+        raise ValueError("Smart analysis requires probed media.")
+    model_spec = select_vmaf_model(item.media_info)
+    encode_metadata = candidate_encode_metadata(item.media_info, item.options.pix_fmt)
     order = window_order or list(range(len(references)))
     for window_index in order:
         reference = references[window_index]
@@ -884,7 +910,8 @@ def _score_candidate(
             plan,
             candidate_path=candidate_path,
             reference_path=reference,
-            model=model,
+            model_spec=model_spec,
+            encode_metadata=encode_metadata,
             log_name=json_name,
         )
         vmaf_started = time.perf_counter()
@@ -1170,13 +1197,7 @@ def _analysis_receipt(
         sample_windows=[(window.start_sec, window.duration_sec) for window in windows],
         search_fingerprint=search_fingerprint,
         measurement_configuration={
-            "vmaf_backend": payload["vmaf_backend"],
-            "vmaf_subsample": payload["vmaf_subsample"],
-            "vmaf_model": payload["vmaf_model"],
-            "vmaf_resolution_mode": payload["vmaf_resolution_mode"],
-            "vmaf_pooling": payload["vmaf_pooling"],
-            "source_width": payload["source_width"],
-            "source_height": payload["source_height"],
+            key: value for key, value in payload.items() if key not in {"source", "ffmpeg"}
         },
         candidates=candidates,
         created_at=datetime.now(timezone.utc).isoformat(),
@@ -1236,6 +1257,10 @@ def _write_analysis_header(
     windows: list[SampleWindow],
     plan: AnalysisExecutionPlan,
 ) -> None:
+    if item.media_info is None:
+        raise ValueError("Smart analysis requires probed media.")
+    model_spec = select_vmaf_model(item.media_info)
+    metadata = candidate_encode_metadata(item.media_info, item.options.pix_fmt)
     sample_label = (
         f"{len(windows)}x{windows[0].duration_sec:.0f}s" if windows else "0"
     )
@@ -1244,7 +1269,14 @@ def _write_analysis_header(
         f"source={item.source_path.name}\n"
         f"profile={item.options.analysis_profile.value}\n"
         f"tier={plan.tier.value}\n"
-        f"measurement=source_native/{vmaf_model_name(is_4k=_is_4k(item))}\n"
+        f"vmaf_generation={model_spec.generation}\n"
+        f"vmaf_model={model_spec.name}\n"
+        f"vmaf_hfr={'yes' if model_spec.hfr else 'no'}\n"
+        f"vmaf_display={model_spec.display_width}x{model_spec.display_height}\n"
+        f"vmaf_measurement={VMAF_MEASUREMENT_PIX_FMT}/{VMAF_MEASUREMENT_BIT_DEPTH}-bit\n"
+        f"candidate_encode={metadata.width}x{metadata.height}/{metadata.bit_depth}-bit\n"
+        f"source_geometry={item.media_info.width}x{item.media_info.height}\n"
+        f"source_bit_depth={item.media_info.bit_depth}\n"
         "pooling=lowest_sampled_window_mean\n"
         f"hardware={plan.analysis_backend}\n"
         f"decode={plan.source_decode_acceleration}\n"
@@ -1272,6 +1304,17 @@ def analyze_quality(
     if item.media_info is None or item.encoder_info is None:
         raise ValueError("Smart analysis requires probed media and a bound encoder.")
 
+    unsupported = _unsupported_reason(item)
+    if unsupported is not None:
+        return QualitySearchResult(
+            status=QualitySearchStatus.UNSUPPORTED,
+            encoder_name=item.encoder_info.encoder_name,
+            backend=item.encoder_info.backend,
+            reason=unsupported,
+        )
+    model_spec = select_vmaf_model(item.media_info)
+    runtime_support = select_vmaf_runtime(ffmpeg_path, model_spec)
+
     analysis_capabilities = detect_analysis_capabilities(ffmpeg_path)
     active_cpu_vmaf_jobs = analysis_concurrency_limit()
     profile = item.options.analysis_settings
@@ -1282,6 +1325,7 @@ def analyze_quality(
         production_two_pass=item.options.two_pass,
         capabilities=analysis_capabilities,
         decode_policy=AnalysisDecodePolicy.AUTO,
+        vmaf_backend=runtime_support.backend,
         active_cpu_vmaf_jobs=active_cpu_vmaf_jobs,
         coarse_vmaf_subsample=profile.coarse_vmaf_subsample,
         exact_vmaf_subsample=profile.exact_vmaf_subsample,
@@ -1298,6 +1342,15 @@ def analyze_quality(
         vmaf_backend=exact_plan.vmaf_backend,
         vmaf_subsample=exact_plan.vmaf_subsample,
     )
+    if not runtime_support.runnable:
+        return QualitySearchResult(
+            status=QualitySearchStatus.UNSUPPORTED,
+            encoder_name=item.encoder_info.encoder_name,
+            backend=item.encoder_info.backend,
+            measurement_fingerprint=measurement_fingerprint,
+            fingerprint=fingerprint,
+            reason=_unsupported_reason(item, runtime_support),
+        )
     cached = item.quality_search_result
     if cached is not None and cached.fingerprint == fingerprint:
         return cached
@@ -1375,6 +1428,7 @@ def analyze_quality(
             production_two_pass=item.options.two_pass,
             capabilities=analysis_capabilities,
             decode_policy=AnalysisDecodePolicy.AUTO,
+            vmaf_backend=runtime_support.backend,
             active_cpu_vmaf_jobs=active_cpu_vmaf_jobs,
             coarse_vmaf_subsample=profile.coarse_vmaf_subsample,
             exact_vmaf_subsample=profile.exact_vmaf_subsample,
@@ -1386,10 +1440,6 @@ def analyze_quality(
                 nonlocal exact_plan, coarse_plan
                 if references:
                     return plan
-                capabilities = detect_vmaf_capabilities(ffmpeg_path)
-                unsupported = _unsupported_reason(item, capabilities)
-                if unsupported:
-                    raise _UnsupportedSmartAnalysis(unsupported)
                 active_plan = plan
                 for index, window in enumerate(windows):
                     reference_path = temp_root / f"reference-{index}.mkv"

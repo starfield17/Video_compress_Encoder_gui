@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "ffmpeg_version": "8.1.2",
+  "ffmpeg_version": "9.0.1",
   "licenses": [
     {
       "name": "LICENSE.md",
-      "url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.1.2/LICENSE.md",
+      "url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n9.0.1/LICENSE.md",
       "sha256": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af"
     },
     {
       "name": "COPYING.GPLv3",
-      "url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.1.2/COPYING.GPLv3",
+      "url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n9.0.1/COPYING.GPLv3",
       "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
     }
   ],
@@ -17,14 +17,14 @@
     "windows-x86_64": {
       "platform": "windows",
       "architecture": "x86_64",
-      "provider": "BtbN/FFmpeg-Builds",
-      "source_version": "n8.1.2-21-gce3c09c101",
-      "build_recipe": "https://github.com/BtbN/FFmpeg-Builds/tree/8c736b2",
-      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/ce3c09c101",
+      "provider": "starfield17/ffmpeg-vmaf-v1-builds (BtbN mirror)",
+      "source_version": "n9.0.1-6-g9d4ca21220",
+      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/445894703a221277a80bd4622cfb98440ac9a9a8",
+      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/n9.0.1",
       "archives": [
         {
-          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-win64-gpl-8.1.zip",
-          "sha256": "682361e32c9631caec09e5d9f09077101c9ed90c14e275f62014fefa6d397990",
+          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r1/ffmpeg-9.0.1-vmaf-v1.0.16-r1-windows-x86_64.zip",
+          "sha256": "315c461f0b918562daf043e95cee14763d7a122b1e413bf9ecee1ffdcf3e3871",
           "format": "zip"
         }
       ]
@@ -32,14 +32,14 @@
     "windows-arm64": {
       "platform": "windows",
       "architecture": "arm64",
-      "provider": "BtbN/FFmpeg-Builds",
-      "source_version": "n8.1.2-21-gce3c09c101",
-      "build_recipe": "https://github.com/BtbN/FFmpeg-Builds/tree/8c736b2",
-      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/ce3c09c101",
+      "provider": "starfield17/ffmpeg-vmaf-v1-builds (BtbN mirror)",
+      "source_version": "n9.0.1-6-g9d4ca21220",
+      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/445894703a221277a80bd4622cfb98440ac9a9a8",
+      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/n9.0.1",
       "archives": [
         {
-          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-winarm64-gpl-8.1.zip",
-          "sha256": "e4a86d390c1ab524acf73be651915be34bb7f1151540ab22c9774184aab18fdf",
+          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r1/ffmpeg-9.0.1-vmaf-v1.0.16-r1-windows-arm64.zip",
+          "sha256": "4dbb15cea11cef448a3788faf0c499fe33e501baea6d831f1bb8b464149b21ce",
           "format": "zip"
         }
       ]
@@ -47,14 +47,14 @@
     "linux-x86_64": {
       "platform": "linux",
       "architecture": "x86_64",
-      "provider": "BtbN/FFmpeg-Builds",
-      "source_version": "n8.1.2-21-gce3c09c101",
-      "build_recipe": "https://github.com/BtbN/FFmpeg-Builds/tree/8c736b2",
-      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/ce3c09c101",
+      "provider": "starfield17/ffmpeg-vmaf-v1-builds (BtbN mirror)",
+      "source_version": "n9.0.1-6-g9d4ca21220",
+      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/445894703a221277a80bd4622cfb98440ac9a9a8",
+      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/n9.0.1",
       "archives": [
         {
-          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-linux64-gpl-8.1.tar.xz",
-          "sha256": "0ba73bbd93472c7622f6dec26d334c5e62e64d858d072490b2844320970456cd",
+          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r1/ffmpeg-9.0.1-vmaf-v1.0.16-r1-linux-x86_64.tar.xz",
+          "sha256": "beab647b58cd44e2c19820bd31b59ef85675e350ae3055f1b5447b8807ed072f",
           "format": "tar.xz"
         }
       ]
@@ -62,54 +62,29 @@
     "linux-arm64": {
       "platform": "linux",
       "architecture": "arm64",
-      "provider": "BtbN/FFmpeg-Builds",
-      "source_version": "n8.1.2-21-gce3c09c101",
-      "build_recipe": "https://github.com/BtbN/FFmpeg-Builds/tree/8c736b2",
-      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/ce3c09c101",
+      "provider": "starfield17/ffmpeg-vmaf-v1-builds (BtbN mirror)",
+      "source_version": "n9.0.1-6-g9d4ca21220",
+      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/445894703a221277a80bd4622cfb98440ac9a9a8",
+      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/n9.0.1",
       "archives": [
         {
-          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-linuxarm64-gpl-8.1.tar.xz",
-          "sha256": "d3f90a71a38238466de2e4dc98537862d244e3307383435f94cbc4b8491033f8",
+          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r1/ffmpeg-9.0.1-vmaf-v1.0.16-r1-linux-arm64.tar.xz",
+          "sha256": "b3bb107682de0331c288322e7a7460ebca847120748eaa0fe4cf5d6e0d40225d",
           "format": "tar.xz"
-        }
-      ]
-    },
-    "macos-x86_64": {
-      "platform": "macos",
-      "architecture": "x86_64",
-      "provider": "Martin Riedl FFmpeg Build Server",
-      "source_version": "8.1.2",
-      "build_recipe": "https://git.martin-riedl.de/ffmpeg/build-script/src/commit/bb1d6db29c",
-      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/n8.1.2",
-      "archives": [
-        {
-          "url": "https://ffmpeg.martin-riedl.de/download/macos/amd64/1783018342_8.1.2/ffmpeg.zip",
-          "sha256": "a52ef43883f44c219766d4b3bdde4e635b35465d0b704c01c3a0566b59775df9",
-          "format": "zip"
-        },
-        {
-          "url": "https://ffmpeg.martin-riedl.de/download/macos/amd64/1783018342_8.1.2/ffprobe.zip",
-          "sha256": "5408ca588c8c72b0dde3afe676d0a7acf25ef97e55ae6eba5c7bede1cda42695",
-          "format": "zip"
         }
       ]
     },
     "macos-arm64": {
       "platform": "macos",
       "architecture": "arm64",
-      "provider": "Martin Riedl FFmpeg Build Server",
-      "source_version": "8.1.2",
-      "build_recipe": "https://git.martin-riedl.de/ffmpeg/build-script/src/commit/bb1d6db29c",
-      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/n8.1.2",
+      "provider": "starfield17/ffmpeg-vmaf-v1-builds",
+      "source_version": "9.0.1-vmaf-v1.0.16-r1",
+      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/445894703a221277a80bd4622cfb98440ac9a9a8",
+      "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/n9.0.1",
       "archives": [
         {
-          "url": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1783011502_8.1.2/ffmpeg.zip",
-          "sha256": "ef1aa60006c7b77ce170c1608c08d8e4ba1c30c5746f2ac986ded932d0ac2c3c",
-          "format": "zip"
-        },
-        {
-          "url": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1783011502_8.1.2/ffprobe.zip",
-          "sha256": "c39787f4af7a3932502d2d48db6f6feaaa836b48a73ef78c32cc3285df61dfaf",
+          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r1/ffmpeg-9.0.1-vmaf-v1.0.16-r1-macos-arm64.zip",
+          "sha256": "d4f7ed7f299347133244df5cacdcfc4fe5d3e12ced16d7e44525bf338968bccb",
           "format": "zip"
         }
       ]

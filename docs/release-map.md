@@ -9,9 +9,9 @@ scripts.
 
 | Path | Responsibility |
 | --- | --- |
-| `.github/workflows/ci.yml` | Automatic minimum verification: plans from changed files and routes Quality, the three native OS tests, the pinned-ISCC Windows installer contract, and the six native packaging smokes. The `CI Gate` job is the single required status. |
+| `.github/workflows/ci.yml` | Automatic minimum verification: plans from changed files and routes Quality, the three native OS tests, the pinned-ISCC Windows installer contract, and the five native packaging smokes. The `CI Gate` job is the single required status. |
 | `.github/workflows/verify.yml` | Workflow-dispatch verification with `fast`, `targeted`, `installer`, and `full` profiles so agents can add verification beyond the automatic minimum. |
-| `.github/workflows/release.yml` | Gates numeric `v*` tags through Quality + three OS tests + installer contract, builds all six targets in `release` mode, verifies ten final packages, writes checksums, and creates or updates the GitHub Release. |
+| `.github/workflows/release.yml` | Gates numeric `v*` tags through Quality + three OS tests + installer contract, builds all five targets in `release` mode, verifies eight final packages, writes checksums, and creates or updates the GitHub Release. |
 | `.github/workflows/_quality.yml` | Quality gate: architecture, workflow contract, planner contract, Windows Setup contract, ruff, pyright, compileall, generated icon check. |
 | `.github/workflows/_test.yml` | One native OS unit-test environment. |
 | `.github/workflows/_windows-installer-contract.yml` | Fast pinned-ISCC contract: compile `installer.iss` for x86_64 and ARM64 with a dummy payload. |
@@ -28,12 +28,12 @@ scripts.
 
 ## Contracts
 
-- CI, Verify, Release, and the planner keep the same six target names and
+- CI, Verify, Release, and the planner keep the same five target names and
   native runners. The single source of truth is `scripts/ci_plan.py`; change
   targets there and in the contract tests together.
-- The release matrix produces ten packages: two Windows ZIPs, two Windows
-  Setup executables, two Linux tarballs, two macOS tarballs, and two macOS
-  DMGs.
+- The release matrix produces eight packages: two Windows ZIPs, two Windows
+  Setup executables, two Linux tarballs, one macOS tarball, and one macOS DMG.
+  Intel macOS is not a supported release target.
 - `packaging/ffmpeg/manifest.json` is the source of truth for FFmpeg URLs and
   checksums. Every release target must have one matching manifest entry.
 - `scripts/build_nuitka.py` is the source of truth for accepted numeric versions
@@ -76,5 +76,5 @@ the end-to-end check.
 
 Before tagging a release, run `Verify/full` (release rehearsal in `candidate`
 mode) and confirm the target commit's main CI run succeeded. After pushing the
-annotated tag, confirm all six build jobs, the publish job, the ten release
+annotated tag, confirm all five build jobs, the publish job, the eight release
 packages, and `SHA256SUMS.txt`.

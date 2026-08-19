@@ -39,7 +39,7 @@ from core.models import (
     MediaInfo,
     QualityCandidateResult,
     QualitySearchStatus,
-    VmafCapabilities,
+    VmafRuntimeSupport,
 )
 from core.smart_quality import (
     SMART_ANALYSIS_ALGORITHM_VERSION,
@@ -52,7 +52,12 @@ from core.smart_quality import (
     measurement_configuration_fingerprint,
     search_bitrate_candidates,
 )
-from core.vmaf_runtime import COARSE_VMAF_SUBSAMPLE, EXACT_VMAF_SUBSAMPLE
+from core.vmaf_runtime import (
+    COARSE_VMAF_SUBSAMPLE,
+    EXACT_VMAF_SUBSAMPLE,
+    VMAF_STANDARD_MODEL,
+    VmafEncodeMetadata,
+)
 
 
 def _capabilities(**overrides: object) -> AnalysisCapabilities:
@@ -114,9 +119,9 @@ class AnalysisCapabilityParsingTestCase(unittest.TestCase):
     def test_capability_report_does_not_require_optional_features(self) -> None:
         report = format_analysis_capability_report(_capabilities(libvmaf_cuda=False, loopback_decoder=False))
         self.assertIn("CPU VMAF", report)
-        self.assertIn("CUDA VMAF         no", report)
-        self.assertIn("Loopback decoder  no", report)
-        self.assertIn("VideoToolbox      yes", report)
+        self.assertIn("CUDA VMAF filter (not enabled for v1)", report)
+        self.assertIn("Loopback decoder", report)
+        self.assertIn("VideoToolbox", report)
 
 
 class AnalysisExecutionPlanTestCase(unittest.TestCase):
@@ -223,7 +228,7 @@ class AnalysisExecutionPlanTestCase(unittest.TestCase):
         self.assertEqual(plan.encoder_name, "libsvtav1")
         self.assertEqual(plan.source_decode_acceleration, SOURCE_DECODE_VIDEOTOOLBOX)
 
-    def test_cuda_vmaf_is_optional_and_falls_back_to_cpu(self) -> None:
+    def test_static_cuda_presence_does_not_enable_v1_cuda(self) -> None:
         cuda = build_analysis_execution_plan(
             tier=AnalysisTier.EXACT,
             encoder_info=_encoder("hevc_nvenc", BackendChoice.NVENC, preset="p6"),
@@ -237,7 +242,7 @@ class AnalysisExecutionPlanTestCase(unittest.TestCase):
                 videotoolbox_hwaccel=False,
             ),
         )
-        self.assertEqual(cuda.vmaf_backend, VmafBackend.CUDA)
+        self.assertEqual(cuda.vmaf_backend, VmafBackend.CPU)
         fallback = cpu_vmaf_plan(cuda, reason="cuda vmaf failed")
         self.assertEqual(fallback.vmaf_backend, VmafBackend.CPU)
         self.assertFalse(fallback.use_loopback)
@@ -302,7 +307,8 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             type("W", (), {"start_sec": 0.0, "duration_sec": 5.0})(),
             Path("cand.mkv"),
             plan,
-            model="vmaf_v0.6.1",
+            model_spec=VMAF_STANDARD_MODEL,
+            encode_metadata=VmafEncodeMetadata(1920, 1080, 8),
             log_name="vmaf.json",
         )
         self.assertIn("-dec:v", command)
@@ -388,7 +394,20 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             item = EncodePlanItem(
                 source_path=source,
                 output_path=root / "out.mp4",
-                media_info=None,
+                media_info=MediaInfo(
+                    path=source,
+                    duration=60.0,
+                    format_bitrate_bps=4_000_000,
+                    video_bitrate_bps=3_000_000,
+                    audio_bitrate_bps=128_000,
+                    width=1920,
+                    height=1080,
+                    fps=30.0,
+                    video_codec="h264",
+                    audio_codec="aac",
+                    pix_fmt="yuv420p",
+                    bit_depth=8,
+                ),
                 encoder_info=_encoder("libx265", BackendChoice.CPU, two_pass=True, preset="slow"),
                 options=EncodeOptions(encoder_preset="slow"),
             )
@@ -396,7 +415,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             cuda = measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CUDA)
             self.assertNotEqual(cpu, cuda)
             self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 3)
-            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 3)
+            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 4)
             self.assertEqual(ANALYSIS_RECEIPT_SCHEMA_VERSION, 3)
             from core.smart_quality import measurement_configuration_payload
 
@@ -404,11 +423,37 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             self.assertEqual(payload["sample_scheme_version"], 3)
             self.assertEqual(payload["vmaf_subsample"], 1)
             self.assertEqual(payload["vmaf_backend"], "cpu")
-            self.assertEqual(payload["analysis_algorithm_version"], 3)
-            self.assertEqual(payload["vmaf_resolution_mode"], "source_native")
+            self.assertEqual(payload["analysis_algorithm_version"], 4)
+            self.assertEqual(payload["vmaf_resolution_mode"], "display_model_canvas")
+            self.assertEqual(payload["vmaf_generation"], "v1")
+            self.assertEqual(payload["vmaf_model"], "vmaf_v1.0.16_3d0h")
+            self.assertEqual(payload["vmaf_measurement_pix_fmt"], "yuv420p10le")
+            self.assertEqual(payload["vmaf_measurement_bit_depth"], 10)
+            self.assertEqual(payload["vmaf_scale_algorithm"], "bicubic")
+            self.assertEqual(payload["vmaf_aspect_policy"], "fit_and_pad")
+            self.assertEqual(payload["candidate_encode_bit_depth"], 8)
             self.assertEqual(payload["vmaf_pooling"], "lowest_sampled_window_mean")
             self.assertNotIn("n_threads", payload)
             self.assertNotIn("vmaf_threads", payload)
+            assert item.media_info is not None
+            item.media_info.fps = 60.0
+            self.assertNotEqual(
+                measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CPU),
+                cpu,
+            )
+            item.media_info.fps = 30.0
+            item.options.pix_fmt = "p010le"
+            self.assertNotEqual(
+                measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CPU),
+                cpu,
+            )
+            item.options.pix_fmt = "yuv420p"
+            item.media_info.bit_depth = 10
+            self.assertNotEqual(
+                measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CPU),
+                cpu,
+            )
+            item.media_info.bit_depth = 8
             with patch("core.smart_quality.SMART_SAMPLE_SCHEME_VERSION", 99):
                 self.assertNotEqual(
                     measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CPU),
@@ -468,8 +513,10 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
 
             with (
                 patch(
-                    "core.smart_quality.detect_vmaf_capabilities",
-                    return_value=VmafCapabilities(True, True, True),
+                    "core.smart_quality.select_vmaf_runtime",
+                    return_value=VmafRuntimeSupport(
+                        VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
+                    ),
                 ),
                 patch("core.smart_quality.detect_analysis_capabilities", return_value=_capabilities()),
                 patch("core.smart_quality._run_logged"),
@@ -539,7 +586,12 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
 
             loopback_caps = _capabilities(loopback_decoder=True)
             with (
-                patch("core.smart_quality.detect_vmaf_capabilities", return_value=VmafCapabilities(True, True, True)),
+                patch(
+                    "core.smart_quality.select_vmaf_runtime",
+                    return_value=VmafRuntimeSupport(
+                        VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
+                    ),
+                ),
                 patch("core.smart_quality.detect_analysis_capabilities", return_value=loopback_caps),
                 patch("core.smart_quality.build_analysis_execution_plan") as planner,
                 patch("core.smart_quality._run_logged"),

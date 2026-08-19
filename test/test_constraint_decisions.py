@@ -36,7 +36,8 @@ from core.models import (
     QualitySearchStatus,
     QualityUnreachablePolicy,
     SizeBlockedPolicy,
-    VmafCapabilities,
+    VmafBackend,
+    VmafRuntimeSupport,
 )
 from core.preset_store import _default_app_config, smart_policies_from_config
 from core.smart_quality import (
@@ -447,8 +448,10 @@ class AnalysisReceiptTestCase(unittest.TestCase):
 
             with (
                 patch(
-                    "core.smart_quality.detect_vmaf_capabilities",
-                    return_value=VmafCapabilities(True, True, True),
+                    "core.smart_quality.select_vmaf_runtime",
+                    return_value=VmafRuntimeSupport(
+                        VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
+                    ),
                 ),
                 patch("core.smart_quality._run_logged"),
                 patch("core.smart_quality._score_candidate", side_effect=score) as first_score,
@@ -486,8 +489,10 @@ class AnalysisReceiptTestCase(unittest.TestCase):
             )
             with (
                 patch(
-                    "core.smart_quality.detect_vmaf_capabilities",
-                    return_value=VmafCapabilities(True, True, True),
+                    "core.smart_quality.select_vmaf_runtime",
+                    return_value=VmafRuntimeSupport(
+                        VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
+                    ),
                 ),
                 patch("core.smart_quality._run_logged"),
                 patch("core.smart_quality._score_candidate", side_effect=score) as second_score,

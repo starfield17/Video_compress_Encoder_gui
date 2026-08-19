@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from core.models import VmafCapabilities
+from core.models import MediaInfo, VmafBackend, VmafRuntimeSupport
 from core.subprocess_utils import noninteractive_run_kwargs
 
 
@@ -14,16 +16,113 @@ PTS_RESET_FILTER = "settb=AVTB,setpts=PTS-STARTPTS"
 COARSE_VMAF_SUBSAMPLE = 3
 EXACT_VMAF_SUBSAMPLE = 1
 MAX_VMAF_THREADS = 8
-STANDARD_VMAF_MODEL = "vmaf_v0.6.1"
-VMAF_4K_MODEL = "vmaf_4k_v0.6.1"
+
+VMAF_MODEL_GENERATION = "v1"
+VMAF_MODEL_VERSION = "1.0.16"
+VMAF_MEASUREMENT_PIX_FMT = "yuv420p10le"
+VMAF_MEASUREMENT_BIT_DEPTH = 10
+VMAF_SCALE_FLAGS = "bicubic"
+VMAF_ASPECT_POLICY = "fit_and_pad"
+VMAF_RESOLUTION_MODE = "display_model_canvas"
+VMAF_HFR_MIN_FPS = 50.0
+VMAF_MEASUREMENT_PIPELINE_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class VmafModelSpec:
+    name: str
+    generation: str
+    display_width: int
+    display_height: int
+    hfr: bool
+    score_min: float = 0.0
+    score_max: float = 100.0
+
+
+@dataclass(frozen=True, slots=True)
+class VmafEncodeMetadata:
+    width: int | None
+    height: int | None
+    bit_depth: int | None
+
+
+VMAF_STANDARD_MODEL = VmafModelSpec(
+    "vmaf_v1.0.16_3d0h", VMAF_MODEL_GENERATION, 1920, 1080, False
+)
+VMAF_STANDARD_HFR_MODEL = VmafModelSpec(
+    "vmaf_v1.0.16_hfr_3d0h", VMAF_MODEL_GENERATION, 1920, 1080, True
+)
+VMAF_4K_MODEL = VmafModelSpec(
+    "vmaf_v1.0.16_1d5h_2160", VMAF_MODEL_GENERATION, 3840, 2160, False
+)
+VMAF_4K_HFR_MODEL = VmafModelSpec(
+    "vmaf_v1.0.16_hfr_1d5h_2160", VMAF_MODEL_GENERATION, 3840, 2160, True
+)
+VMAF_PRODUCTION_MODELS = (
+    VMAF_STANDARD_MODEL,
+    VMAF_4K_MODEL,
+    VMAF_STANDARD_HFR_MODEL,
+    VMAF_4K_HFR_MODEL,
+)
+
+# Future GPU backends belong here only after their exact v1 smoke probe passes.
+VMAF_BACKEND_POLICY = (VmafBackend.CPU,)
 
 
 class InvalidVmafSubsample(ValueError):
     pass
 
 
-def vmaf_model_name(*, is_4k: bool) -> str:
-    return VMAF_4K_MODEL if is_4k else STANDARD_VMAF_MODEL
+def is_4k_geometry(width: int | None, height: int | None) -> bool:
+    if width is None or height is None:
+        return False
+    short_side, long_side = sorted((width, height))
+    return short_side >= 2160 and long_side >= 3840
+
+
+def select_vmaf_model(media_info: MediaInfo) -> VmafModelSpec:
+    is_4k = is_4k_geometry(media_info.width, media_info.height)
+    is_hfr = media_info.fps is not None and media_info.fps >= VMAF_HFR_MIN_FPS
+    if is_4k:
+        return VMAF_4K_HFR_MODEL if is_hfr else VMAF_4K_MODEL
+    return VMAF_STANDARD_HFR_MODEL if is_hfr else VMAF_STANDARD_MODEL
+
+
+_BIT_DEPTH_SUFFIX_RE = re.compile(r"(\d{1,2})(?:le|be)?$")
+
+
+def infer_bit_depth_from_pix_fmt(pix_fmt: str | None) -> int | None:
+    if not pix_fmt:
+        return None
+    normalized = pix_fmt.strip().lower()
+    if normalized in {
+        "yuv420p",
+        "yuv422p",
+        "yuv444p",
+        "yuvj420p",
+        "yuvj422p",
+        "yuvj444p",
+        "nv12",
+        "nv21",
+        "rgb24",
+        "bgr24",
+    }:
+        return 8
+    if normalized in {"p010", "p010le", "p010be", "p210", "p210le", "p210be"}:
+        return 10
+    match = _BIT_DEPTH_SUFFIX_RE.search(normalized)
+    if match:
+        value = int(match.group(1))
+        return value if value in {9, 10, 12, 14, 16} else None
+    return None
+
+
+def candidate_encode_metadata(media_info: MediaInfo, pix_fmt: str | None) -> VmafEncodeMetadata:
+    return VmafEncodeMetadata(
+        width=media_info.width,
+        height=media_info.height,
+        bit_depth=infer_bit_depth_from_pix_fmt(pix_fmt),
+    )
 
 
 def validate_vmaf_subsample(n_subsample: int) -> int:
@@ -46,39 +145,83 @@ def vmaf_thread_budget(active_cpu_vmaf_jobs: int = 1) -> int:
     return max(1, min(MAX_VMAF_THREADS, available // jobs))
 
 
+def build_vmaf_model_config(
+    model_spec: VmafModelSpec,
+    encode_metadata: VmafEncodeMetadata,
+) -> str:
+    parts = [f"version={model_spec.name}"]
+    if encode_metadata.width is not None:
+        parts.append(f"cambi.enc_width={int(encode_metadata.width)}")
+    if encode_metadata.height is not None:
+        parts.append(f"cambi.enc_height={int(encode_metadata.height)}")
+    if encode_metadata.bit_depth is not None:
+        parts.append(f"cambi.enc_bitdepth={int(encode_metadata.bit_depth)}")
+    return ":".join(parts)
+
+
+def quote_libvmaf_model_config(model_config: str) -> str:
+    """Quote a nested libvmaf model dictionary for an FFmpeg filter graph."""
+    escaped = model_config.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
 def build_libvmaf_option(
     *,
-    model: str,
-    log_path: str,
+    model_spec: VmafModelSpec,
+    encode_metadata: VmafEncodeMetadata,
+    log_path: str | None,
     n_threads: int,
     n_subsample: int,
     filter_name: str = "libvmaf",
 ) -> str:
     subsample = validate_vmaf_subsample(n_subsample)
     threads = max(1, int(n_threads))
+    model_config = quote_libvmaf_model_config(
+        build_vmaf_model_config(model_spec, encode_metadata)
+    )
+    options = [
+        f"model={model_config}",
+        f"n_threads={threads}",
+        f"n_subsample={subsample}",
+    ]
+    if log_path is not None:
+        options.extend(("log_fmt=json", f"log_path='{log_path}'"))
+    return f"{filter_name}=" + ":".join(options)
+
+
+def display_normalization_filter(model_spec: VmafModelSpec) -> str:
+    width = model_spec.display_width
+    height = model_spec.display_height
     return (
-        f"{filter_name}=model=version={model}"
-        f":n_threads={threads}"
-        f":n_subsample={subsample}"
-        f":log_fmt=json"
-        f":log_path='{log_path}'"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags={VMAF_SCALE_FLAGS},"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+        f"setsar=1,format={VMAF_MEASUREMENT_PIX_FMT},{PTS_RESET_FILTER}"
     )
 
 
 def build_cpu_vmaf_filter_graph(
     *,
-    model: str,
-    log_path: str,
+    model_spec: VmafModelSpec,
+    encode_metadata: VmafEncodeMetadata,
+    log_path: str | None,
     n_threads: int,
     n_subsample: int,
+    distorted_input: str = "0:v",
+    reference_input: str = "1:v",
 ) -> str:
+    normalize = display_normalization_filter(model_spec)
     libvmaf = build_libvmaf_option(
-        model=model,
+        model_spec=model_spec,
+        encode_metadata=encode_metadata,
         log_path=log_path,
         n_threads=n_threads,
         n_subsample=n_subsample,
     )
-    return f"[0:v]{PTS_RESET_FILTER}[dist];[1:v]{PTS_RESET_FILTER}[ref];[dist][ref]{libvmaf}"
+    return (
+        f"[{distorted_input}]{normalize}[dist];"
+        f"[{reference_input}]{normalize}[ref];"
+        f"[dist][ref]{libvmaf}"
+    )
 
 
 def build_cpu_vmaf_command(
@@ -86,7 +229,8 @@ def build_cpu_vmaf_command(
     *,
     distorted_path: Path,
     reference_path: Path,
-    model: str,
+    model_spec: VmafModelSpec,
+    encode_metadata: VmafEncodeMetadata,
     log_name: str,
     n_threads: int,
     n_subsample: int,
@@ -101,7 +245,8 @@ def build_cpu_vmaf_command(
         str(reference_path),
         "-filter_complex",
         build_cpu_vmaf_filter_graph(
-            model=model,
+            model_spec=model_spec,
+            encode_metadata=encode_metadata,
             log_path=log_name,
             n_threads=n_threads,
             n_subsample=n_subsample,
@@ -118,13 +263,20 @@ def build_cuda_vmaf_command(
     *,
     distorted_path: Path,
     reference_path: Path,
-    model: str,
+    model_spec: VmafModelSpec,
+    encode_metadata: VmafEncodeMetadata,
     log_name: str,
     n_threads: int,
     n_subsample: int,
 ) -> list[str]:
+    """Legacy/future CUDA infrastructure; v1 production policy does not call it."""
+    if model_spec.generation == VMAF_MODEL_GENERATION:
+        raise ValueError(
+            "VMAF v1 CUDA measurement is not implemented; use the CPU runtime probe."
+        )
     libvmaf = build_libvmaf_option(
-        model=model,
+        model_spec=model_spec,
+        encode_metadata=encode_metadata,
         log_path=log_name,
         n_threads=n_threads,
         n_subsample=n_subsample,
@@ -147,9 +299,43 @@ def build_cuda_vmaf_command(
         "-i",
         str(reference_path),
         "-filter_complex",
-        f"[0:v]scale_cuda=format=yuv420p,settb=AVTB,setpts=PTS-STARTPTS[dist];"
-        f"[1:v]scale_cuda=format=yuv420p,settb=AVTB,setpts=PTS-STARTPTS[ref];"
+        f"[0:v]scale_cuda=format=yuv420p,{PTS_RESET_FILTER}[dist];"
+        f"[1:v]scale_cuda=format=yuv420p,{PTS_RESET_FILTER}[ref];"
         f"[dist][ref]{libvmaf}",
+        "-an",
+        "-f",
+        "null",
+        "-",
+    ]
+
+
+def build_vmaf_probe_command(
+    ffmpeg_path: Path,
+    model_spec: VmafModelSpec,
+    backend: VmafBackend,
+) -> list[str]:
+    metadata = VmafEncodeMetadata(width=320, height=180, bit_depth=8)
+    if backend != VmafBackend.CPU:
+        raise ValueError(f"No VMAF v1 runtime probe is implemented for backend {backend.value!r}.")
+    return [
+        str(ffmpeg_path),
+        "-hide_banner",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=1:duration=1",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=1:duration=1",
+        "-filter_complex",
+        build_cpu_vmaf_filter_graph(
+            model_spec=model_spec,
+            encode_metadata=metadata,
+            log_path=None,
+            n_threads=2,
+            n_subsample=1,
+        ),
         "-an",
         "-f",
         "null",
@@ -177,52 +363,62 @@ def _run_capture(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-@lru_cache(maxsize=8)
-def _detect_vmaf_cached(ffmpeg_path: str, size: int | None, mtime_ns: int | None) -> VmafCapabilities:
-    del size, mtime_ns
+@lru_cache(maxsize=32)
+def _probe_vmaf_runtime_cached(
+    ffmpeg_path: str,
+    size: int | None,
+    mtime_ns: int | None,
+    model_spec: VmafModelSpec,
+    backend: VmafBackend,
+    pipeline_version: int,
+) -> VmafRuntimeSupport:
+    del size, mtime_ns, pipeline_version
+    try:
+        command = build_vmaf_probe_command(Path(ffmpeg_path), model_spec, backend)
+        proc = _run_capture(command)
+    except (OSError, ValueError) as exc:
+        return VmafRuntimeSupport(backend, model_spec.name, False, str(exc))
+    output = proc.stdout + "\n" + proc.stderr
+    runnable = proc.returncode == 0 and "VMAF score:" in output
+    error = None
+    if not runnable:
+        detail = output.strip()
+        error = detail or f"VMAF {model_spec.name} {backend.value} smoke probe failed."
+    return VmafRuntimeSupport(backend, model_spec.name, runnable, error)
 
-    def model_works(model: str) -> tuple[bool, str]:
-        cmd = [
-            ffmpeg_path,
-            "-hide_banner",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=64x64:rate=5:duration=0.4",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=64x64:rate=5:duration=0.4",
-            "-lavfi",
-            f"libvmaf=model=version={model}",
-            "-f",
-            "null",
-            "-",
-        ]
-        proc = _run_capture(cmd)
-        return proc.returncode == 0 and "VMAF score:" in proc.stderr, proc.stderr
 
-    standard, standard_error = model_works(STANDARD_VMAF_MODEL)
-    if not standard:
-        return VmafCapabilities(
-            filter_available=False,
-            standard_model=False,
-            model_4k=False,
-            error_message=standard_error.strip() or "libvmaf standard model could not run.",
-        )
-    model_4k, model_4k_error = model_works(VMAF_4K_MODEL)
-    return VmafCapabilities(
-        filter_available=True,
-        standard_model=True,
-        model_4k=model_4k,
-        error_message=None if model_4k else (model_4k_error.strip() or "VMAF 4K model could not run."),
+def probe_vmaf_runtime(
+    ffmpeg_path: Path,
+    model_spec: VmafModelSpec,
+    backend: VmafBackend,
+) -> VmafRuntimeSupport:
+    try:
+        resolved = ffmpeg_path.resolve()
+        stat = resolved.stat()
+        size, mtime_ns = stat.st_size, stat.st_mtime_ns
+    except OSError:
+        resolved = ffmpeg_path
+        size, mtime_ns = None, None
+    return _probe_vmaf_runtime_cached(
+        str(resolved), size, mtime_ns, model_spec, backend, VMAF_MEASUREMENT_PIPELINE_VERSION
     )
 
 
-def detect_vmaf_capabilities(ffmpeg_path: Path) -> VmafCapabilities:
-    try:
-        stat = ffmpeg_path.stat()
-        size, mtime_ns = stat.st_size, stat.st_mtime_ns
-    except OSError:
-        size, mtime_ns = None, None
-    return _detect_vmaf_cached(str(ffmpeg_path), size, mtime_ns)
+def select_vmaf_runtime(
+    ffmpeg_path: Path,
+    model_spec: VmafModelSpec,
+    backend_policy: tuple[VmafBackend, ...] = VMAF_BACKEND_POLICY,
+) -> VmafRuntimeSupport:
+    failures: list[str] = []
+    for backend in backend_policy:
+        support = probe_vmaf_runtime(ffmpeg_path, model_spec, backend)
+        if support.runnable:
+            return support
+        if support.error_message:
+            failures.append(f"{backend.value}: {support.error_message}")
+    return VmafRuntimeSupport(
+        backend=backend_policy[-1] if backend_policy else VmafBackend.CPU,
+        model=model_spec.name,
+        runnable=False,
+        error_message="; ".join(failures) or f"No backend can run VMAF model {model_spec.name}.",
+    )

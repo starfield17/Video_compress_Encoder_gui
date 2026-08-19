@@ -8,7 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from core.encoder_caps import list_available_encoders, list_available_hwaccels
-from core.models import BackendChoice, EncoderInfo
+from core.models import BackendChoice, EncoderInfo, VmafBackend
 from core.subprocess_utils import noninteractive_run_kwargs
 from core.vmaf_runtime import (
     COARSE_VMAF_SUBSAMPLE,
@@ -20,11 +20,6 @@ from core.vmaf_runtime import (
 class AnalysisTier(str, Enum):
     COARSE = "coarse"
     EXACT = "exact"
-
-
-class VmafBackend(str, Enum):
-    CPU = "cpu"
-    CUDA = "cuda"
 
 
 class AnalysisDecodePolicy(str, Enum):
@@ -201,7 +196,7 @@ def format_analysis_capability_report(capabilities: AnalysisCapabilities) -> str
         ("CPU VMAF", yn(capabilities.libvmaf)),
         ("VideoToolbox", yn(capabilities.videotoolbox_hwaccel)),
         ("scale_vt", yn(capabilities.scale_vt)),
-        ("CUDA VMAF", yn(capabilities.libvmaf_cuda)),
+        ("CUDA VMAF filter (not enabled for v1)", yn(capabilities.libvmaf_cuda)),
         ("Loopback decoder", yn(capabilities.loopback_decoder)),
     )
     width = max(len(label) for label, _ in rows)
@@ -307,12 +302,6 @@ def _select_source_decode(
     return SOURCE_DECODE_SOFTWARE
 
 
-def _select_vmaf_backend(capabilities: AnalysisCapabilities) -> VmafBackend:
-    if capabilities.libvmaf_cuda and capabilities.scale_cuda and capabilities.cuda_hwaccel:
-        return VmafBackend.CUDA
-    return VmafBackend.CPU
-
-
 def software_source_plan(plan: AnalysisExecutionPlan, *, reason: str) -> AnalysisExecutionPlan:
     return AnalysisExecutionPlan(
         tier=plan.tier,
@@ -374,6 +363,7 @@ def build_analysis_execution_plan(
     production_two_pass: bool,
     capabilities: AnalysisCapabilities,
     decode_policy: AnalysisDecodePolicy = AnalysisDecodePolicy.AUTO,
+    vmaf_backend: VmafBackend = VmafBackend.CPU,
     active_cpu_vmaf_jobs: int = 1,
     enable_loopback: bool = False,
     coarse_vmaf_subsample: int = COARSE_VMAF_SUBSAMPLE,
@@ -383,7 +373,6 @@ def build_analysis_execution_plan(
     if encoder_name == "av1_videotoolbox":
         raise ValueError("av1_videotoolbox is not a supported analysis encoder.")
 
-    vmaf_backend = _select_vmaf_backend(capabilities)
     source_decode = _select_source_decode(capabilities, decode_policy, vmaf_backend)
     if encoder_info.backend == BackendChoice.VIDEOTOOLBOX and encoder_name.startswith("av1_"):
         encoder_name = "libsvtav1"

@@ -29,7 +29,7 @@ Reusable workflows:
 `scripts/ci_plan.py` is the only routing policy. It is stdlib-only and
 deterministic. It maintains two canonical matrices: `TEST_TARGETS`
 (linux / windows / macos unit-test environments) and `PACKAGE_TARGETS`
-(the six native packaging targets). Workflow contract tests read those
+(the five native packaging targets). Workflow contract tests read those
 matrices, so a target change happens only in this file.
 
 Per changed path the planner selects a capability set, then unions them
@@ -40,7 +40,7 @@ Per changed path the planner selects a capability set, then unions them
 | `docs/**`, `README.md`, `LICENSE`, `AGENTS.md`, `.gitignore` | Quality only. |
 | `main.py`, `cli/**`, `core/**`, `gui/**`, `config/**`, `test/**` | Quality + 3 OS tests. No Nuitka packaging. |
 | `packaging/windows/**`, `scripts/build_setup.py` | Quality + installer contract + `windows-x86_64` package smoke. |
-| `scripts/build_nuitka.py`, `scripts/prepare_ffmpeg.py`, `packaging/ffmpeg/**`, `packaging/assets/**`, `requirements*.txt`, `pyproject.toml`, `FFmpeg/**`, `.github/workflows/**`, `scripts/ci_plan.py`, `test/test_ci_plan.py`, `test/test_release_workflows.py` | Full: Quality + 3 OS tests + installer contract + all six package smokes. |
+| `scripts/build_nuitka.py`, `scripts/prepare_ffmpeg.py`, `packaging/ffmpeg/**`, `packaging/assets/**`, `requirements*.txt`, `pyproject.toml`, `FFmpeg/**`, `.github/workflows/**`, `scripts/ci_plan.py`, `test/test_ci_plan.py`, `test/test_release_workflows.py` | Full: Quality + 3 OS tests + installer contract + all five package smokes. |
 | Anything unknown | Full (fail closed). |
 
 The planner outputs a compact JSON contract to `GITHUB_OUTPUT`
@@ -56,14 +56,14 @@ should require.
 
 ## Verify profiles
 
-`verify.yml` exposes four profiles plus nine native toggles:
+`verify.yml` exposes four profiles plus eight native toggles:
 
 | Profile | Runs |
 | --- | --- |
 | `fast` | Quality + Linux tests. |
 | `targeted` | Quality + selected tests/packages. Selecting any Windows package also enables the installer contract. Selecting nothing fails (never silently quality-only). |
 | `installer` | Quality + Windows installer contract. |
-| `full` | Quality + 3 OS tests + installer contract + all six packages in `candidate` mode (release rehearsal). |
+| `full` | Quality + 3 OS tests + installer contract + all five packages in `candidate` mode (release rehearsal). |
 
 Agents may dispatch Verify to add checks. They may never reduce the automatic
 minimum selected by the repository policy.
@@ -82,9 +82,9 @@ minimum selected by the repository policy.
 
 `release.yml` is deterministic and complete. It does not reuse CI artifacts:
 it checks out the tagged SHA and builds fresh. Quality, the three OS tests,
-and the installer contract must pass (`preflight`) before the six native
+and the installer contract must pass (`preflight`) before the five native
 `release` builds start. The package jobs no longer run the full unittest
-suite (tests belong to `_test.yml`). Publish validates the exact ten release
+suite (tests belong to `_test.yml`). Publish validates the exact eight release
 packages, writes `SHA256SUMS.txt`, and creates or updates the GitHub Release.
 
 The Windows upload glob covers both the target archive and

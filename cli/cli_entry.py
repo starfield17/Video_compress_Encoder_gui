@@ -224,7 +224,7 @@ def _add_encode_flags(parser: argparse.ArgumentParser) -> None:
         "--min-vmaf",
         dest="min_vmaf",
         type=float,
-        help="Native-resolution sampled-window mean VMAF target for smart mode",
+        help="Lowest sampled-window VMAF v1 target for Smart mode (default: 90)",
     )
     parser.add_argument(
         "--analysis-profile",

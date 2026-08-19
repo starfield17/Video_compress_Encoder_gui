@@ -105,7 +105,7 @@ class PlanTestCase(unittest.TestCase):
         self.assertTrue(plan["has_tests"])
         self.assertTrue(plan["run_installer_contract"])
         self.assertTrue(plan["has_packages"])
-        self.assertEqual(len(plan["package_matrix"]), 6)
+        self.assertEqual(len(plan["package_matrix"]), 5)
 
     def test_canonical_matrices_are_the_single_source_of_truth(self) -> None:
         self.assertEqual(
@@ -116,7 +116,7 @@ class PlanTestCase(unittest.TestCase):
                 "macos": ("macos-15", "arm64"),
             },
         )
-        self.assertEqual(len(PACKAGE_TARGETS), 6)
+        self.assertEqual(len(PACKAGE_TARGETS), 5)
         self.assertEqual(PACKAGE_TARGETS["windows-arm64"]["windows_compiler"], "clang")
         self.assertEqual(PACKAGE_TARGETS["windows-x86_64"]["windows_compiler"], "msvc")
         self.assertEqual(PACKAGE_TARGETS["windows-x86_64"]["installer_architecture"], "x86_64")
@@ -154,7 +154,7 @@ class PlanTestCase(unittest.TestCase):
         self.assertEqual(_package_targets(plan), ["windows-x86_64"])
         self.assertEqual(plan["package_mode"], "smoke")
 
-    def test_build_nuitka_change_selects_all_six_smoke_packages(self) -> None:
+    def test_build_nuitka_change_selects_all_five_smoke_packages(self) -> None:
         plan = _plan("scripts/build_nuitka.py")
         self.assertTrue(plan["run_installer_contract"])
         self.assertTrue(plan["has_packages"])

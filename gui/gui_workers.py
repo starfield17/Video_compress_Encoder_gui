@@ -10,11 +10,18 @@ from PySide6.QtCore import QThread, Signal
 from core.discover_ffmpeg import find_binary
 from core.encoder_capability_cache import ensure_encoder_capabilities
 from core.exec_encode import execute_plan, execute_preview, execute_smart_preview
-from core.models import CompressionMode, EncodeOptions, OperationCancelledError, PreviewOptions, VideoFileItem
+from core.models import (
+    CompressionMode,
+    EncodeOptions,
+    OperationCancelledError,
+    PreviewOptions,
+    VideoFileItem,
+    VmafBackend,
+)
 from core.plan_encode import build_encode_plan
 from core.preview_sample import build_preview_job
 from core.scan_videos import collect_video_files
-from core.smart_quality import detect_vmaf_capabilities
+from core.vmaf_runtime import VMAF_STANDARD_MODEL, probe_vmaf_runtime
 
 
 def _safe_console_print(message: str) -> None:
@@ -74,12 +81,12 @@ class EncoderCapabilityDetectWorker(QThread):
                 force_refresh=self.force_refresh,
                 progress_callback=self._emit_log,
             )
-            vmaf = detect_vmaf_capabilities(ffmpeg)
+            vmaf = probe_vmaf_runtime(ffmpeg, VMAF_STANDARD_MODEL, VmafBackend.CPU)
             capabilities = dict(capabilities)
             capabilities["vmaf"] = {
-                "filter_available": vmaf.filter_available,
-                "standard_model": vmaf.standard_model,
-                "model_4k": vmaf.model_4k,
+                "runnable": vmaf.runnable,
+                "model": vmaf.model,
+                "backend": vmaf.backend.value,
                 "error_message": vmaf.error_message,
             }
             self.completed.emit(capabilities)

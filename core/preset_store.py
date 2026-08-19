@@ -86,7 +86,7 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
     if "compression_mode" not in data:
         data["compression_mode"] = CompressionMode.FIXED_BITRATE.value
     if "min_vmaf" not in data:
-        data["min_vmaf"] = 95.0
+        data["min_vmaf"] = 90.0
     if "max_output_ratio" not in data:
         data["max_output_ratio"] = None
 

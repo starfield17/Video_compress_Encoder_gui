@@ -144,7 +144,7 @@ class EncodeOptionsPanel(QWidget):
         self.min_vmaf_spin = QDoubleSpinBox()
         self.min_vmaf_spin.setRange(1.0, 100.0)
         self.min_vmaf_spin.setDecimals(1)
-        self.min_vmaf_spin.setValue(95.0)
+        self.min_vmaf_spin.setValue(90.0)
 
         self.max_output_ratio_label = QLabel()
         self.max_output_ratio_spin = QDoubleSpinBox()
@@ -750,7 +750,7 @@ class EncodeOptionsPanel(QWidget):
         capabilities = self._runtime_capabilities()
         vmaf = capabilities.get("vmaf") if capabilities else None
         known = force_unavailable or isinstance(vmaf, dict)
-        available = bool(isinstance(vmaf, dict) and vmaf.get("standard_model"))
+        available = bool(isinstance(vmaf, dict) and vmaf.get("runnable"))
         index = self.compression_mode_combo.findData(CompressionMode.SMART.value)
         if index >= 0:
             item = self.compression_mode_combo.model().item(index)

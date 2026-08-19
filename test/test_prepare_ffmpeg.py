@@ -9,12 +9,15 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from core.analysis_runtime import AnalysisCapabilities, format_analysis_capability_report
+from core.vmaf_runtime import VMAF_PRODUCTION_MODELS
 from scripts.prepare_ffmpeg import (
     binary_architecture,
     load_manifest,
     prepare_target,
+    verify_capabilities,
 )
 
 
@@ -24,9 +27,11 @@ EXPECTED_TARGETS = {
     "windows-arm64",
     "linux-x86_64",
     "linux-arm64",
-    "macos-x86_64",
     "macos-arm64",
 }
+OWNED_RELEASE_URL_PREFIX = (
+    "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/"
+)
 
 
 def _sha256(path: Path) -> str:
@@ -55,13 +60,18 @@ class FFmpegManifestTestCase(unittest.TestCase):
 
     def test_manifest_pins_all_release_targets(self) -> None:
         manifest = load_manifest(ROOT / "packaging" / "ffmpeg" / "manifest.json")
-        self.assertEqual(manifest["ffmpeg_version"], "8.1.2")
+        self.assertEqual(manifest["ffmpeg_version"], "9.0.1")
         self.assertEqual(set(manifest["targets"]), EXPECTED_TARGETS)
+        self.assertNotIn("macos-x86_64", manifest["targets"])
         for target in manifest["targets"].values():
             self.assertTrue(target["archives"])
             for archive in target["archives"]:
                 self.assertRegex(archive["sha256"], r"^[0-9a-f]{64}$")
                 self.assertNotIn("/latest/", archive["url"])
+                self.assertTrue(
+                    archive["url"].startswith(OWNED_RELEASE_URL_PREFIX),
+                    archive["url"],
+                )
 
 
 class FFmpegPreparationTestCase(unittest.TestCase):
@@ -77,7 +87,7 @@ class FFmpegPreparationTestCase(unittest.TestCase):
         copying_path.write_text("copying", encoding="utf-8")
         return {
             "schema_version": 1,
-            "ffmpeg_version": "8.1.2",
+            "ffmpeg_version": "9.0.1",
             "licenses": [
                 {
                     "name": license_path.name,
@@ -177,9 +187,54 @@ class FFmpegPreparationTestCase(unittest.TestCase):
                 videotoolbox_prio_speed=False,
             )
         )
-        self.assertIn("CPU VMAF          yes", report)
-        self.assertIn("CUDA VMAF         no", report)
-        self.assertIn("Loopback decoder  no", report)
+        self.assertIn("CPU VMAF", report)
+        self.assertIn("CUDA VMAF filter (not enabled for v1)", report)
+        self.assertIn("Loopback decoder", report)
+
+    def test_capability_verification_smokes_all_v1_models_with_shared_builder(self) -> None:
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str]) -> str:
+            commands.append(command)
+            if "-version" in command:
+                return "--enable-gpl --enable-version3"
+            if "-filters" in command:
+                return "libvmaf"
+            if "-encoders" in command:
+                return "libx265 libsvtav1"
+            if "-filter_complex" in command:
+                return "VMAF score: 100.0"
+            return ""
+
+        capabilities = AnalysisCapabilities(
+            libvmaf=True,
+            libvmaf_cuda=False,
+            loopback_decoder=False,
+            hwaccels=frozenset(),
+            filters=frozenset({"libvmaf"}),
+            encoders=frozenset({"libx265", "libsvtav1"}),
+            scale_vt=False,
+            scale_cuda=False,
+            videotoolbox_hwaccel=False,
+            cuda_hwaccel=False,
+            videotoolbox_prio_speed=False,
+        )
+        with (
+            patch("scripts.prepare_ffmpeg._run_checked", side_effect=fake_run),
+            patch("scripts.prepare_ffmpeg.detect_analysis_capabilities", return_value=capabilities),
+        ):
+            verify_capabilities(Path("ffmpeg"), Path("ffprobe"))
+
+        probes = [command for command in commands if "-filter_complex" in command]
+        self.assertEqual(len(probes), len(VMAF_PRODUCTION_MODELS))
+        for command, model in zip(probes, VMAF_PRODUCTION_MODELS):
+            graph = command[command.index("-filter_complex") + 1]
+            self.assertIn(model.name, graph)
+            self.assertIn(f"scale={model.display_width}:{model.display_height}", graph)
+            self.assertIn("format=yuv420p10le", graph)
+            self.assertIn("cambi.enc_width=320", graph)
+            self.assertIn("cambi.enc_height=180", graph)
+            self.assertIn("cambi.enc_bitdepth=8", graph)
 
 
 if __name__ == "__main__":

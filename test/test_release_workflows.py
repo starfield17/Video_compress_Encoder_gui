@@ -17,9 +17,7 @@ RELEASE_EXPECTED_PACKAGES = [
     "video-compressor-{release}-windows-arm64-setup.exe",
     "video-compressor-{release}-linux-x86_64.tar.gz",
     "video-compressor-{release}-linux-arm64.tar.gz",
-    "video-compressor-{release}-macos-x86_64.tar.gz",
     "video-compressor-{release}-macos-arm64.tar.gz",
-    "video-compressor-{release}-macos-x86_64.dmg",
     "video-compressor-{release}-macos-arm64.dmg",
 ]
 
@@ -54,7 +52,6 @@ class PlannerContractTestCase(unittest.TestCase):
                 "windows-arm64",
                 "linux-x86_64",
                 "linux-arm64",
-                "macos-x86_64",
                 "macos-arm64",
             },
         )
@@ -72,7 +69,6 @@ class WorkflowLayoutTestCase(unittest.TestCase):
         files = {path.name for path in WORKFLOWS.iterdir()}
         self.assertTrue(expected_entries <= files)
         self.assertTrue(expected_reusables <= files)
-
 
 class CIWorkflowTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -96,8 +92,8 @@ class CIWorkflowTestCase(unittest.TestCase):
         self.assertIn("name: CI Gate", self.workflow)
         self.assertIn("if: always()", self.workflow)
 
-    def test_ci_does_not_embed_six_target_matrix(self) -> None:
-        # The six native targets live in the planner, not in ci.yml.
+    def test_ci_does_not_embed_five_target_matrix(self) -> None:
+        # The five native targets live in the planner, not in ci.yml.
         self.assertEqual(_matrix_rows(self.workflow), {})
 
     def test_ci_passes_planner_matrix_into_matrix(self) -> None:
@@ -120,7 +116,7 @@ class VerifyWorkflowTestCase(unittest.TestCase):
         for profile in ("fast", "targeted", "installer", "full"):
             self.assertIn(f"- {profile}", self.workflow)
 
-    def test_verify_has_ten_inputs(self) -> None:
+    def test_verify_has_eight_boolean_inputs(self) -> None:
         inputs = [
             "test_linux",
             "test_windows",
@@ -129,13 +125,12 @@ class VerifyWorkflowTestCase(unittest.TestCase):
             "package_windows_arm64",
             "package_linux_x86_64",
             "package_linux_arm64",
-            "package_macos_x86_64",
             "package_macos_arm64",
         ]
         for name in inputs:
             self.assertIn(name + ":", self.workflow)
-        # "profile" plus the nine native toggles.
-        self.assertEqual(self.workflow.count("type: boolean"), 9)
+        # "profile" plus the eight native toggles.
+        self.assertEqual(self.workflow.count("type: boolean"), 8)
 
     def test_verify_uses_reusable_workflows_and_gate(self) -> None:
         for name in (
@@ -209,9 +204,9 @@ class ReleaseWorkflowTestCase(unittest.TestCase):
         # The installer contract is a reusable workflow call, not an inline job.
         self.assertNotIn("windows-installer-contract:", self.workflow)
 
-    def test_release_publish_preserves_10_package_contract(self) -> None:
+    def test_release_publish_preserves_8_package_contract(self) -> None:
         self.assertIn("publish:", self.workflow)
-        self.assertIn("Expected 10 release packages", self.workflow)
+        self.assertIn("Expected 8 release packages", self.workflow)
         self.assertIn("packages/*.dmg", self.workflow)
         self.assertIn("packages/*-setup.exe", self.workflow)
         self.assertIn("sha256sum *.zip *.tar.gz *.dmg *-setup.exe", self.workflow)
@@ -224,9 +219,9 @@ class ReleaseWorkflowTestCase(unittest.TestCase):
         self.assertIn("video-compressor-${{ github.ref_name }}-${{ inputs.target }}-setup.exe", package)
         self.assertIn("video-compressor-${{ github.ref_name }}-${{ inputs.target }}.*", package)
 
-    def test_release_expected_packages_are_ten(self) -> None:
-        self.assertEqual(len(RELEASE_EXPECTED_PACKAGES), 10)
-        self.assertEqual(len({name.format(release="x") for name in RELEASE_EXPECTED_PACKAGES}), 10)
+    def test_release_expected_packages_are_eight(self) -> None:
+        self.assertEqual(len(RELEASE_EXPECTED_PACKAGES), 8)
+        self.assertEqual(len({name.format(release="x") for name in RELEASE_EXPECTED_PACKAGES}), 8)
 
 
 class QualityWorkflowTestCase(unittest.TestCase):

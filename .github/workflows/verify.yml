@@ -47,11 +47,6 @@ on:
         required: false
         type: boolean
         default: false
-      package_macos_x86_64:
-        description: "macOS x86_64 package smoke (targeted profile)."
-        required: false
-        type: boolean
-        default: false
       package_macos_arm64:
         description: "macOS ARM64 package smoke (targeted profile)."
         required: false
@@ -97,14 +92,13 @@ jobs:
           pkg_windows_arm64="${{ inputs.package_windows_arm64 }}"
           pkg_linux_x86_64="${{ inputs.package_linux_x86_64 }}"
           pkg_linux_arm64="${{ inputs.package_linux_arm64 }}"
-          pkg_macos_x86_64="${{ inputs.package_macos_x86_64 }}"
           pkg_macos_arm64="${{ inputs.package_macos_arm64 }}"
 
           python3 - "$profile" \
             "$test_linux" "$test_windows" "$test_macos" \
             "$pkg_windows_x86_64" "$pkg_windows_arm64" \
             "$pkg_linux_x86_64" "$pkg_linux_arm64" \
-            "$pkg_macos_x86_64" "$pkg_macos_arm64" <<'EOF'
+            "$pkg_macos_arm64" <<'EOF'
           import json
           import os
           import sys
@@ -120,7 +114,6 @@ jobs:
               pkg_windows_arm64,
               pkg_linux_x86_64,
               pkg_linux_arm64,
-              pkg_macos_x86_64,
               pkg_macos_arm64,
           ) = flags
 
@@ -174,7 +167,7 @@ jobs:
           if not (test_linux or test_windows or test_macos or
                   pkg_windows_x86_64 or pkg_windows_arm64 or
                   pkg_linux_x86_64 or pkg_linux_arm64 or
-                  pkg_macos_x86_64 or pkg_macos_arm64):
+                  pkg_macos_arm64):
               print("::error::targeted profile selected no targets; refusing to become quality-only")
               sys.exit(1)
 
@@ -198,7 +191,6 @@ jobs:
                   ("windows-arm64", pkg_windows_arm64),
                   ("linux-x86_64", pkg_linux_x86_64),
                   ("linux-arm64", pkg_linux_arm64),
-                  ("macos-x86_64", pkg_macos_x86_64),
                   ("macos-arm64", pkg_macos_arm64),
               )
               if selected

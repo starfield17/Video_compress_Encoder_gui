@@ -43,7 +43,7 @@ runtime encoders in this order: `nvenc`, `qsv`, `amf`, `videotoolbox`, then
 ### Smart compression
 
 New jobs and the built-in HEVC/AV1 presets use smart compression. The default
-policy requires VMAF 95 and limits the final file to 70% of the source for
+policy requires VMAF v1 90 and limits the final file to 70% of the source for
 HEVC or 50% for AV1. Smart preview runs the same automatic sample search
 without encoding the full video:
 
@@ -51,7 +51,7 @@ without encoding the full video:
 python main.py --cli preview input.mp4 \
   --compression-mode smart \
   --codec hevc \
-  --min-vmaf 95 \
+  --min-vmaf 90 \
   --max-output-ratio 0.70
 ```
 
@@ -61,10 +61,17 @@ and otherwise uses three 5-second windows; Fast uses shorter samples and fewer
 candidates, while Precise uses longer samples and a tighter search. A one-window
 custom profile samples the middle of the video.
 
-VMAF is measured at the source's native resolution. The reported value is the
-lowest mean VMAF among the sampled windows, not the lowest individual-frame
-score, so thresholds are most meaningful when comparing sources at the same
-resolution. The built-in threshold remains 95 for compatibility.
+Smart pins Netflix VMAF v1.0.16 and selects its normal/HFR 1080p or 4K model
+from the source geometry and frame rate (HFR starts at 50 fps). At the scoring
+boundary, reference and distorted samples are bicubic fit-and-padded to the
+model's display canvas and normalized to 10-bit `yuv420p10le`; this does not
+change the production output pixel format. CAMBI receives the candidate's
+pre-normalization encode geometry and bit depth when known.
+
+The reported value is the lowest mean VMAF among the sampled windows, not a
+whole-video average or the lowest individual-frame score. The default target
+is 90. VMAF extraction is CPU-only in this release, while source decoding and
+candidate encoding may still use supported hardware acceleration independently.
 
 If quality and final-size constraints cannot both be met, the configured Smart
 policy is applied. The default size-blocked policy relaxes the size limit, and
@@ -233,7 +240,7 @@ python scripts/build_icons.py
 python scripts/build_icons.py --check
 ```
 
-Release builds prepare a pinned native FFmpeg 8.1.2 pair under the ignored
+Release builds prepare a pinned native FFmpeg 9.0.1 pair under the ignored
 project `workdir/` and require it during packaging:
 
 ```bash
@@ -248,10 +255,14 @@ python scripts/build_nuitka.py \
   --require-ffmpeg
 ```
 
-The FFmpeg manifest pins URLs and SHA-256 values for Windows, Linux, and
-macOS on x86-64 and ARM64. Prepared bundles include FFmpeg, FFprobe, GPLv3
-license text, and exact source/build provenance. Downloads, extraction,
-signing material, and project-owned temporary files stay under `workdir/`.
+The FFmpeg manifest pins URLs and SHA-256 values for Windows and Linux on
+x86-64 and ARM64, plus macOS on ARM64. Prepared bundles include FFmpeg,
+FFprobe, GPLv3 license text, and exact source/build provenance. Downloads,
+extraction, signing material, and project-owned temporary files stay under
+`workdir/`.
+The five archives are published by the repository-owned
+[FFmpeg VMAF v1 builds](https://github.com/starfield17/ffmpeg-vmaf-v1-builds)
+pipeline only after native architecture and exact VMAF v1 runtime checks pass.
 
 On Windows, the default build uses Nuitka-managed MinGW64:
 
@@ -348,7 +359,7 @@ the Windows executable and Setup.exe are published unsigned.
 
 ### Native release matrix
 
-A tag such as `v1.2.3` produces six native builds:
+A tag such as `v1.2.3` produces five native builds:
 
 | Target | Runner/package |
 | --- | --- |
@@ -356,10 +367,10 @@ A tag such as `v1.2.3` produces six native builds:
 | Windows ARM64 | Native Windows ARM64 standalone package |
 | Linux x86-64 | Native Ubuntu x86-64 standalone package |
 | Linux ARM64 | Native Ubuntu ARM64 standalone package |
-| macOS Intel | Native x86-64 `.app` bundle |
 | macOS Apple Silicon | Native arm64 `.app` bundle |
 
-Each tagged release publishes exactly ten platform packages:
+Intel macOS is not supported. Each tagged release publishes exactly eight
+platform packages:
 
 ```text
 video-compressor-v1.2.3-windows-x86_64.zip
@@ -368,19 +379,16 @@ video-compressor-v1.2.3-windows-arm64.zip
 video-compressor-v1.2.3-windows-arm64-setup.exe
 video-compressor-v1.2.3-linux-x86_64.tar.gz
 video-compressor-v1.2.3-linux-arm64.tar.gz
-video-compressor-v1.2.3-macos-x86_64.tar.gz
 video-compressor-v1.2.3-macos-arm64.tar.gz
-video-compressor-v1.2.3-macos-x86_64.dmg
 video-compressor-v1.2.3-macos-arm64.dmg
 ```
 
-The macOS tarballs and DMGs contain native `.app` bundles. Intel and Apple
-Silicon builds are separate native packages, not universal binaries merged
-with `lipo`. Releases are ad-hoc signed; they are not Developer ID signed or
+The macOS tarball and DMG contain a native Apple Silicon `.app` bundle, not a
+universal binary. Releases are ad-hoc signed; they are not Developer ID signed or
 notarized, so Gatekeeper may require using **Open** or right-clicking the app
 and choosing **Open**. Linux ARM64 requires a sufficiently recent glibc
 distribution. Windows ARM64 is a native ARM package rather than an x86
-executable relying on emulation. Every tagged package includes FFmpeg 8.1.2
+executable relying on emulation. Every tagged package includes FFmpeg 9.0.1
 and FFprobe for its exact operating system and CPU architecture.
 
 ## License

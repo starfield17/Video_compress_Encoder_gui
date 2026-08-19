@@ -20,6 +20,8 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from core.analysis_runtime import detect_analysis_capabilities, format_analysis_capability_report  # noqa: E402
+from core.models import VmafBackend  # noqa: E402
+from core.vmaf_runtime import VMAF_PRODUCTION_MODELS, build_vmaf_probe_command  # noqa: E402
 
 
 USER_AGENT = "Video-compressor-release-ci/1.0"
@@ -214,27 +216,19 @@ def verify_capabilities(ffmpeg_path: Path, ffprobe_path: Path) -> None:
             raise RuntimeError(f"Bundled FFmpeg does not provide encoder {encoder}.")
 
     _run_checked([str(ffprobe_path), "-hide_banner", "-version"])
-    _run_checked(
-        [
-            str(ffmpeg_path),
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=64x64:duration=0.2:rate=5",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=64x64:duration=0.2:rate=5",
-            "-lavfi",
-            "[0:v][1:v]libvmaf",
-            "-f",
-            "null",
-            "-",
-        ]
-    )
+    for model_spec in VMAF_PRODUCTION_MODELS:
+        try:
+            output = _run_checked(
+                build_vmaf_probe_command(ffmpeg_path, model_spec, VmafBackend.CPU)
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"VMAF v1 CPU smoke failed for model {model_spec.name}: {exc}"
+            ) from exc
+        if "VMAF score:" not in output:
+            raise RuntimeError(
+                f"VMAF v1 CPU smoke for model {model_spec.name} did not produce a score."
+            )
     for encoder in ("libx265", "libsvtav1"):
         _run_checked(
             [
