@@ -56,6 +56,7 @@ from core.vmaf_runtime import (
     PTS_RESET_FILTER,
     VMAF_ASPECT_POLICY,
     VMAF_MEASUREMENT_BIT_DEPTH,
+    VMAF_MEASUREMENT_PIPELINE_VERSION,
     VMAF_MEASUREMENT_PIX_FMT,
     VMAF_MODEL_GENERATION,
     VMAF_RESOLUTION_MODE,
@@ -81,7 +82,7 @@ CONTAINER_BUDGET_FACTOR = 0.98
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}
 SMART_ERROR_TAIL_CHARS = 4_000
 SMART_SAMPLE_SCHEME_VERSION = 3
-SMART_ANALYSIS_ALGORITHM_VERSION = 4
+SMART_ANALYSIS_ALGORITHM_VERSION = 5
 SMART_WHOLE_VIDEO_MAX_SEC = 10.0
 SMART_SAMPLE_DURATION_SEC = 5.0
 SMART_SAMPLE_CENTERS = (0.20, 0.50, 0.80)
@@ -409,6 +410,7 @@ def measurement_configuration_payload(
         "vmaf_display_height": model_spec.display_height,
         "vmaf_measurement_pix_fmt": VMAF_MEASUREMENT_PIX_FMT,
         "vmaf_measurement_bit_depth": VMAF_MEASUREMENT_BIT_DEPTH,
+        "vmaf_measurement_pipeline_version": VMAF_MEASUREMENT_PIPELINE_VERSION,
         "vmaf_scale_algorithm": VMAF_SCALE_FLAGS,
         "vmaf_aspect_policy": VMAF_ASPECT_POLICY,
         "vmaf_subsample": int(vmaf_subsample),
@@ -623,6 +625,8 @@ def _build_loopback_score_command(
     return [
         str(ffmpeg_path),
         "-hide_banner",
+        "-loglevel",
+        "error",
         "-y",
         *source_decode_args(plan.source_decode_acceleration),
         "-ss",
@@ -796,7 +800,7 @@ def _score_candidate_loopback(
             ) from exc
         if window.duration_sec <= 0:
             raise RuntimeError(f"Smart candidate encode produced an invalid sample duration: {window.duration_sec}")
-        score = parse_vmaf_json(json_path)
+        score = parse_vmaf_json(json_path, model_spec)
         scores[window_index] = score
         encoded_bytes[window_index] = encoded_size
         encoded_durations[window_index] = float(window.duration_sec)
@@ -924,7 +928,7 @@ def _score_candidate(
             phase="VMAF scoring",
         )
         vmaf_elapsed = time.perf_counter() - vmaf_started
-        score = parse_vmaf_json(json_path)
+        score = parse_vmaf_json(json_path, model_spec)
         scores[window_index] = score
         encoded_bytes[window_index] = encoded_size
         encoded_durations[window_index] = float(duration)

@@ -21,7 +21,7 @@ from core.models import (
 from core.plan_encode import build_encode_plan
 from core.preview_sample import build_preview_job
 from core.scan_videos import collect_video_files
-from core.vmaf_runtime import VMAF_STANDARD_MODEL, probe_vmaf_runtime
+from core.vmaf_runtime import VMAF_PRODUCTION_MODELS, probe_vmaf_runtime
 
 
 def _safe_console_print(message: str) -> None:
@@ -81,13 +81,27 @@ class EncoderCapabilityDetectWorker(QThread):
                 force_refresh=self.force_refresh,
                 progress_callback=self._emit_log,
             )
-            vmaf = probe_vmaf_runtime(ffmpeg, VMAF_STANDARD_MODEL, VmafBackend.CPU)
+            vmaf_models = [
+                probe_vmaf_runtime(ffmpeg, model, VmafBackend.CPU)
+                for model in VMAF_PRODUCTION_MODELS
+            ]
+            vmaf_errors = [
+                f"{support.model}: {support.error_message}"
+                for support in vmaf_models
+                if not support.runnable and support.error_message
+            ]
             capabilities = dict(capabilities)
             capabilities["vmaf"] = {
-                "runnable": vmaf.runnable,
-                "model": vmaf.model,
-                "backend": vmaf.backend.value,
-                "error_message": vmaf.error_message,
+                "runnable": all(support.runnable for support in vmaf_models),
+                "models": {
+                    support.model: {
+                        "runnable": support.runnable,
+                        "error_message": support.error_message,
+                    }
+                    for support in vmaf_models
+                },
+                "backend": VmafBackend.CPU.value,
+                "error_message": "; ".join(vmaf_errors) or None,
             }
             self.completed.emit(capabilities)
         except Exception as exc:

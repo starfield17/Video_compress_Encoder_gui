@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from scripts.prepare_ffmpeg import (
     binary_architecture,
     load_manifest,
     prepare_target,
+    verify_anamorphic_normalization,
     verify_capabilities,
 )
 
@@ -60,13 +62,21 @@ class FFmpegManifestTestCase(unittest.TestCase):
 
     def test_manifest_pins_all_release_targets(self) -> None:
         manifest = load_manifest(ROOT / "packaging" / "ffmpeg" / "manifest.json")
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["verification_contract_version"], 2)
         self.assertEqual(manifest["ffmpeg_version"], "9.0.1")
         self.assertEqual(set(manifest["targets"]), EXPECTED_TARGETS)
         self.assertNotIn("macos-x86_64", manifest["targets"])
         for target in manifest["targets"].values():
+            self.assertIn(target["source_kind"], {"build", "mirror"})
+            self.assertRegex(target["ffmpeg_commit"], r"^[0-9a-f]{40}$")
+            self.assertRegex(target["libvmaf_commit"], r"^[0-9a-f]{40}$")
+            self.assertIn(target["ffmpeg_commit"], target["ffmpeg_source"])
+            self.assertIn(target["libvmaf_commit"], target["libvmaf_source"])
             self.assertTrue(target["archives"])
             for archive in target["archives"]:
                 self.assertRegex(archive["sha256"], r"^[0-9a-f]{64}$")
+                self.assertNotEqual(archive["sha256"], "0" * 64)
                 self.assertNotIn("/latest/", archive["url"])
                 self.assertTrue(
                     archive["url"].startswith(OWNED_RELEASE_URL_PREFIX),
@@ -85,29 +95,49 @@ class FFmpegPreparationTestCase(unittest.TestCase):
         license_path.write_text("license", encoding="utf-8")
         copying_path = root / "COPYING.GPLv3"
         copying_path.write_text("copying", encoding="utf-8")
+        vmaf_license_path = root / "VMAF-LICENSE.txt"
+        vmaf_license_path.write_text("vmaf license", encoding="utf-8")
+        ffmpeg_commit = "a" * 40
+        libvmaf_commit = "b" * 40
         return {
-            "schema_version": 1,
+            "schema_version": 2,
+            "verification_contract_version": 2,
             "ffmpeg_version": "9.0.1",
             "licenses": [
                 {
+                    "component": "FFmpeg",
                     "name": license_path.name,
                     "url": license_path.as_uri(),
                     "sha256": _sha256(license_path),
                 },
                 {
+                    "component": "FFmpeg",
                     "name": copying_path.name,
                     "url": copying_path.as_uri(),
                     "sha256": _sha256(copying_path),
+                },
+                {
+                    "component": "Netflix VMAF",
+                    "name": vmaf_license_path.name,
+                    "url": vmaf_license_path.as_uri(),
+                    "sha256": _sha256(vmaf_license_path),
                 },
             ],
             "targets": {
                 "windows-x86_64": {
                     "platform": "windows",
                     "architecture": "x86_64",
+                    "source_kind": "mirror",
                     "provider": "fixture",
                     "source_version": "fixture",
                     "build_recipe": "https://example.invalid/build",
-                    "ffmpeg_source": "https://example.invalid/source",
+                    "ffmpeg_commit": ffmpeg_commit,
+                    "ffmpeg_source": f"https://example.invalid/ffmpeg/{ffmpeg_commit}",
+                    "libvmaf_version": "3.2.0",
+                    "libvmaf_commit": libvmaf_commit,
+                    "libvmaf_source": f"https://example.invalid/vmaf/{libvmaf_commit}",
+                    "upstream_build_recipe": "https://example.invalid/upstream-build",
+                    "upstream_release": "https://example.invalid/upstream-release",
                     "archives": [
                         {
                             "url": archive.as_uri(),
@@ -119,7 +149,7 @@ class FFmpegPreparationTestCase(unittest.TestCase):
             },
         }
 
-    def test_prepares_pair_licenses_and_source_metadata_inside_workdir(self) -> None:
+    def test_prepares_binaries_licenses_and_source_metadata_inside_workdir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "workdir").mkdir()
@@ -140,7 +170,9 @@ class FFmpegPreparationTestCase(unittest.TestCase):
             self.assertEqual(binary_architecture(ffprobe), "x86_64")
             self.assertTrue((output / "LICENSES" / "LICENSE.md").is_file())
             self.assertTrue((output / "LICENSES" / "COPYING.GPLv3").is_file())
+            self.assertTrue((output / "LICENSES" / "VMAF-LICENSE.txt").is_file())
             source = json.loads((output / "SOURCE.json").read_text(encoding="utf-8"))
+            self.assertEqual(source["schema_version"], 2)
             self.assertEqual(source["target"], "windows-x86_64")
             self.assertFalse((root / "unsafe").exists())
 
@@ -161,8 +193,22 @@ class FFmpegPreparationTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "workdir").mkdir()
-            manifest = self._fixture_manifest(root, archive_digest="0" * 64)
+            manifest = self._fixture_manifest(root, archive_digest="0" * 63 + "1")
             with self.assertRaisesRegex(RuntimeError, "SHA-256 mismatch"):
+                prepare_target(
+                    "windows-x86_64",
+                    root / "workdir" / "output",
+                    manifest=manifest,
+                    root=root,
+                    run_capability_checks=False,
+                )
+
+    def test_placeholder_archive_digest_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "workdir").mkdir()
+            manifest = self._fixture_manifest(root, archive_digest="0" * 64)
+            with self.assertRaisesRegex(ValueError, "Invalid archive"):
                 prepare_target(
                     "windows-x86_64",
                     root / "workdir" / "output",
@@ -204,6 +250,12 @@ class FFmpegPreparationTestCase(unittest.TestCase):
                 return "libx265 libsvtav1"
             if "-filter_complex" in command:
                 return "VMAF score: 100.0"
+            if "-vf" in command:
+                return (
+                    "Video: wrapped_avframe, yuv420p10le, "
+                    "1920x1080 [SAR 1:1 DAR 16:9]\n"
+                    "lavfi.signalstats.YMIN=940\n"
+                )
             return ""
 
         capabilities = AnalysisCapabilities(
@@ -235,6 +287,23 @@ class FFmpegPreparationTestCase(unittest.TestCase):
             self.assertIn("cambi.enc_width=320", graph)
             self.assertIn("cambi.enc_height=180", graph)
             self.assertIn("cambi.enc_bitdepth=8", graph)
+            expected_fps = 60 if model.hfr else 30
+            expected_frames = "12" if model.hfr else "6"
+            self.assertEqual(
+                command.count(f"testsrc2=size=320x180:rate={expected_fps}:duration=1"),
+                2,
+            )
+            self.assertEqual(command[command.index("-frames:v") + 1], expected_frames)
+
+        anamorphic = [command for command in commands if "-vf" in command]
+        self.assertEqual(len(anamorphic), 1)
+        self.assertIn("setsar=64/45", anamorphic[0][anamorphic[0].index("-vf") + 1])
+
+    def test_real_anamorphic_normalization_when_ffmpeg_is_provided(self) -> None:
+        value = os.environ.get("VMAF_INTEGRATION_FFMPEG")
+        if not value:
+            self.skipTest("VMAF_INTEGRATION_FFMPEG is not configured")
+        self.assertGreaterEqual(verify_anamorphic_normalization(Path(value)), 800)
 
 
 if __name__ == "__main__":

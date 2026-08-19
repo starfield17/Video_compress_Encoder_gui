@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ from core.vmaf_runtime import (
     VMAF_4K_MODEL,
     VMAF_STANDARD_HFR_MODEL,
     VMAF_STANDARD_MODEL,
+    VMAF_MEASUREMENT_PIPELINE_VERSION,
     InvalidVmafSubsample,
     VmafEncodeMetadata,
     _probe_vmaf_runtime_cached,
@@ -23,7 +25,10 @@ from core.vmaf_runtime import (
     build_cuda_vmaf_command,
     build_libvmaf_option,
     build_vmaf_model_config,
+    build_vmaf_probe_command,
     infer_bit_depth_from_pix_fmt,
+    parse_vmaf_json,
+    parse_vmaf_score,
     probe_vmaf_runtime,
     quote_libvmaf_model_config,
     select_vmaf_model,
@@ -140,11 +145,16 @@ class VmafRuntimeTestCase(unittest.TestCase):
         )
         graph = command[command.index("-filter_complex") + 1]
         self.assertEqual(PTS_RESET_FILTER, "settb=AVTB,setpts=PTS-STARTPTS")
+        self.assertEqual(VMAF_MEASUREMENT_PIPELINE_VERSION, 2)
+        self.assertEqual(command[command.index("-loglevel") + 1], "error")
+        self.assertEqual(graph.count("trunc(iw*sar/2)*2"), 2)
         self.assertEqual(graph.count("scale=1920:1080"), 2)
         self.assertEqual(graph.count("force_original_aspect_ratio=decrease"), 2)
-        self.assertEqual(graph.count("flags=bicubic"), 2)
+        self.assertEqual(graph.count("force_divisible_by=2"), 2)
+        self.assertEqual(graph.count("flags=bicubic"), 4)
         self.assertEqual(graph.count("pad=1920:1080"), 2)
-        self.assertEqual(graph.count("setsar=1"), 2)
+        self.assertEqual(graph.count("trunc((ow-iw)/4)*2"), 2)
+        self.assertEqual(graph.count("setsar=1"), 4)
         self.assertEqual(graph.count("format=yuv420p10le"), 2)
         self.assertIn("vmaf_v1.0.16_3d0h", graph)
         self.assertIn("cambi.enc_width=1280", graph)
@@ -155,6 +165,32 @@ class VmafRuntimeTestCase(unittest.TestCase):
         self.assertIn("log_path='vmaf.json'", graph)
         self.assertIn("libvmaf=", graph)
         self.assertNotIn("libvmaf_cuda", graph)
+
+    def test_probe_uses_model_frame_rate_and_multiple_frames(self) -> None:
+        standard = build_vmaf_probe_command(
+            Path("ffmpeg"), VMAF_STANDARD_MODEL, VmafBackend.CPU
+        )
+        hfr = build_vmaf_probe_command(
+            Path("ffmpeg"), VMAF_STANDARD_HFR_MODEL, VmafBackend.CPU
+        )
+        self.assertEqual(standard.count("testsrc2=size=320x180:rate=30:duration=1"), 2)
+        self.assertEqual(standard[standard.index("-frames:v") + 1], "6")
+        self.assertEqual(hfr.count("testsrc2=size=320x180:rate=60:duration=1"), 2)
+        self.assertEqual(hfr[hfr.index("-frames:v") + 1], "12")
+
+    def test_score_parsers_reject_nonfinite_and_model_range_violations(self) -> None:
+        self.assertEqual(parse_vmaf_score("VMAF score: 99.5", VMAF_STANDARD_MODEL), 99.5)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "vmaf.json"
+            for value in (float("nan"), float("inf"), -0.1, 100.1):
+                path.write_text(
+                    json.dumps({"pooled_metrics": {"vmaf": {"mean": value}}}),
+                    encoding="utf-8",
+                )
+                with self.subTest(value=value), self.assertRaisesRegex(
+                    RuntimeError, "invalid score"
+                ):
+                    parse_vmaf_json(path, VMAF_STANDARD_MODEL)
 
     def test_even_subsample_cannot_be_rendered(self) -> None:
         with self.assertRaises(InvalidVmafSubsample):
@@ -215,6 +251,16 @@ class VmafRuntimeTestCase(unittest.TestCase):
             with patch("core.vmaf_runtime._run_capture", return_value=success):
                 support = probe_vmaf_runtime(ffmpeg, VMAF_STANDARD_MODEL, VmafBackend.CPU)
         self.assertTrue(support.runnable)
+
+    def test_runtime_probe_rejects_nonfinite_score(self) -> None:
+        result = subprocess.CompletedProcess([], 0, "", "VMAF score: nan\n")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ffmpeg = Path(temp_dir) / "ffmpeg"
+            ffmpeg.write_bytes(b"binary")
+            with patch("core.vmaf_runtime._run_capture", return_value=result):
+                support = probe_vmaf_runtime(ffmpeg, VMAF_STANDARD_MODEL, VmafBackend.CPU)
+        self.assertFalse(support.runnable)
+        self.assertIn("invalid score", support.error_message or "")
 
 
 if __name__ == "__main__":

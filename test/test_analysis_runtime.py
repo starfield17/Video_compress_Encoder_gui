@@ -311,6 +311,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             encode_metadata=VmafEncodeMetadata(1920, 1080, 8),
             log_name="vmaf.json",
         )
+        self.assertEqual(command[command.index("-loglevel") + 1], "error")
         self.assertIn("-dec:v", command)
         self.assertIn("hevc", command)
         self.assertIn("[dec:v]", command[command.index("-filter_complex") + 1])
@@ -415,7 +416,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             cuda = measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CUDA)
             self.assertNotEqual(cpu, cuda)
             self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 3)
-            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 4)
+            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 5)
             self.assertEqual(ANALYSIS_RECEIPT_SCHEMA_VERSION, 3)
             from core.smart_quality import measurement_configuration_payload
 
@@ -423,14 +424,17 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             self.assertEqual(payload["sample_scheme_version"], 3)
             self.assertEqual(payload["vmaf_subsample"], 1)
             self.assertEqual(payload["vmaf_backend"], "cpu")
-            self.assertEqual(payload["analysis_algorithm_version"], 4)
+            self.assertEqual(payload["analysis_algorithm_version"], 5)
             self.assertEqual(payload["vmaf_resolution_mode"], "display_model_canvas")
             self.assertEqual(payload["vmaf_generation"], "v1")
             self.assertEqual(payload["vmaf_model"], "vmaf_v1.0.16_3d0h")
             self.assertEqual(payload["vmaf_measurement_pix_fmt"], "yuv420p10le")
             self.assertEqual(payload["vmaf_measurement_bit_depth"], 10)
+            self.assertEqual(payload["vmaf_measurement_pipeline_version"], 2)
             self.assertEqual(payload["vmaf_scale_algorithm"], "bicubic")
-            self.assertEqual(payload["vmaf_aspect_policy"], "fit_and_pad")
+            self.assertEqual(
+                payload["vmaf_aspect_policy"], "square_pixels_fit_and_even_pad"
+            )
             self.assertEqual(payload["candidate_encode_bit_depth"], 8)
             self.assertEqual(payload["vmaf_pooling"], "lowest_sampled_window_mean")
             self.assertNotIn("n_threads", payload)

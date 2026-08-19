@@ -34,8 +34,9 @@ scripts.
 - The release matrix produces eight packages: two Windows ZIPs, two Windows
   Setup executables, two Linux tarballs, one macOS tarball, and one macOS DMG.
   Intel macOS is not a supported release target.
-- `packaging/ffmpeg/manifest.json` is the source of truth for FFmpeg URLs and
-  checksums. Every release target must have one matching manifest entry.
+- `packaging/ffmpeg/manifest.json` schema v2 is the source of truth for FFmpeg
+  URLs, checksums, licenses, exact FFmpeg/libvmaf commits, and build/mirror
+  provenance. Every release target must have one matching manifest entry.
 - `scripts/build_nuitka.py` is the source of truth for accepted numeric versions
   and generated package layout. Release tags use `vMAJOR.MINOR.PATCH` or the
   supported four-part numeric form.

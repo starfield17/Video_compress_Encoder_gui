@@ -257,12 +257,15 @@ python scripts/build_nuitka.py \
 
 The FFmpeg manifest pins URLs and SHA-256 values for Windows and Linux on
 x86-64 and ARM64, plus macOS on ARM64. Prepared bundles include FFmpeg,
-FFprobe, GPLv3 license text, and exact source/build provenance. Downloads,
-extraction, signing material, and project-owned temporary files stay under
-`workdir/`.
+FFprobe, both FFmpeg license files, the Netflix VMAF license, and exact
+source/build provenance. Downloads, extraction, signing material, and
+project-owned temporary files stay under `workdir/`.
 The five archives are published by the repository-owned
 [FFmpeg VMAF v1 builds](https://github.com/starfield17/ffmpeg-vmaf-v1-builds)
-pipeline only after native architecture and exact VMAF v1 runtime checks pass.
+pipeline only after native architecture, multi-frame normal/HFR VMAF probes,
+and SAR-aware normalization checks pass. The macOS ARM64 binary is built from
+source there; Windows and Linux are checksum-pinned BtbN trusted mirrors that
+retain their exact upstream recipe and release provenance.
 
 On Windows, the default build uses Nuitka-managed MinGW64:
 
@@ -394,5 +397,5 @@ and FFprobe for its exact operating system and CPU architecture.
 ## License
 
 Video Compressor is released under the [MIT License](LICENSE). Bundled FFmpeg
-artifacts keep their own license and source/build provenance alongside the
-binary distribution.
+and Netflix VMAF artifacts keep their own license and source/build provenance
+alongside the binary distribution.

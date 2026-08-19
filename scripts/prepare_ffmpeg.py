@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import platform
+import re
 import shutil
 import struct
 import subprocess
@@ -21,10 +22,18 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from core.analysis_runtime import detect_analysis_capabilities, format_analysis_capability_report  # noqa: E402
 from core.models import VmafBackend  # noqa: E402
-from core.vmaf_runtime import VMAF_PRODUCTION_MODELS, build_vmaf_probe_command  # noqa: E402
+from core.vmaf_runtime import (  # noqa: E402
+    VMAF_PRODUCTION_MODELS,
+    VMAF_STANDARD_MODEL,
+    build_vmaf_probe_command,
+    display_normalization_filter,
+    parse_vmaf_score,
+)
 
 
 USER_AGENT = "Video-compressor-release-ci/1.0"
+LICENSE_NAMES = {"LICENSE.md", "COPYING.GPLv3", "VMAF-LICENSE.txt"}
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 MACHINE_TYPES = {
     "x86_64": {
         "pe": 0x8664,
@@ -47,11 +56,62 @@ def manifest_path() -> Path:
     return project_root() / "packaging" / "ffmpeg" / "manifest.json"
 
 
+def _require_commit(value: object, label: str) -> str:
+    commit = str(value)
+    if _COMMIT_RE.fullmatch(commit) is None:
+        raise ValueError(f"Invalid commit for {label}: {commit}")
+    return commit
+
+
+def validate_manifest(data: dict[str, object]) -> None:
+    if data.get("schema_version") != 2 or data.get("verification_contract_version") != 2:
+        raise ValueError("Unsupported FFmpeg manifest schema.")
+    licenses = data.get("licenses")
+    if not isinstance(licenses, list) or {
+        str(entry.get("name")) for entry in licenses if isinstance(entry, dict)
+    } != LICENSE_NAMES:
+        raise ValueError("FFmpeg manifest must include FFmpeg and Netflix VMAF licenses.")
+    for entry in licenses:
+        if not isinstance(entry, dict):
+            raise ValueError("Invalid FFmpeg manifest license entry.")
+        digest = str(entry.get("sha256"))
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError(f"Invalid license SHA-256 for {entry.get('name')}.")
+    targets = data.get("targets")
+    if not isinstance(targets, dict) or not targets:
+        raise ValueError("FFmpeg manifest must define targets.")
+    for target_name, target in targets.items():
+        if not isinstance(target, dict):
+            raise ValueError(f"Invalid FFmpeg manifest target: {target_name}")
+        source_kind = target.get("source_kind")
+        if source_kind not in {"build", "mirror"}:
+            raise ValueError(f"Invalid source kind for {target_name}.")
+        for field in ("provider", "source_version", "build_recipe", "libvmaf_version"):
+            if not target.get(field):
+                raise ValueError(f"FFmpeg target {target_name} must declare {field}.")
+        ffmpeg_commit = _require_commit(target.get("ffmpeg_commit"), f"{target_name} FFmpeg")
+        libvmaf_commit = _require_commit(target.get("libvmaf_commit"), f"{target_name} libvmaf")
+        if ffmpeg_commit not in str(target.get("ffmpeg_source")):
+            raise ValueError(f"FFmpeg source for {target_name} must identify its commit.")
+        if libvmaf_commit not in str(target.get("libvmaf_source")):
+            raise ValueError(f"libvmaf source for {target_name} must identify its commit.")
+        if source_kind == "mirror" and not all(
+            target.get(field) for field in ("upstream_build_recipe", "upstream_release")
+        ):
+            raise ValueError(f"Mirror target {target_name} lacks upstream provenance.")
+        archives = target.get("archives")
+        if not isinstance(archives, list) or not archives:
+            raise ValueError(f"FFmpeg target {target_name} must declare archives.")
+        for archive in archives:
+            digest = str(archive.get("sha256")) if isinstance(archive, dict) else ""
+            if re.fullmatch(r"[0-9a-f]{64}", digest) is None or digest == "0" * 64:
+                raise ValueError(f"Invalid archive for FFmpeg target {target_name}.")
+
+
 def load_manifest(path: Path | None = None) -> dict[str, object]:
     resolved = (path or manifest_path()).resolve()
     data = json.loads(resolved.read_text(encoding="utf-8"))
-    if data.get("schema_version") != 1 or not isinstance(data.get("targets"), dict):
-        raise ValueError(f"Unsupported FFmpeg manifest: {resolved}")
+    validate_manifest(data)
     return data
 
 
@@ -200,6 +260,38 @@ def _run_checked(command: list[str]) -> str:
     return output
 
 
+def verify_anamorphic_normalization(ffmpeg_path: Path) -> int:
+    output = _run_checked(
+        [
+            str(ffmpeg_path),
+            "-hide_banner",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=white:size=720x576:rate=1:duration=1",
+            "-vf",
+            "setsar=64/45,"
+            + display_normalization_filter(VMAF_STANDARD_MODEL)
+            + ",signalstats,metadata=mode=print:key=lavfi.signalstats.YMIN:file=-",
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ]
+    )
+    matches = re.findall(r"lavfi\.signalstats\.YMIN=(\d+)", output)
+    if not matches:
+        raise RuntimeError("Anamorphic normalization did not report luma evidence.")
+    luma_min = int(matches[-1])
+    if luma_min < 800 or "1920x1080 [SAR 1:1 DAR 16:9]" not in output:
+        raise RuntimeError(
+            "Anamorphic normalization introduced padding or incorrect display geometry: "
+            f"YMIN={luma_min}."
+        )
+    return luma_min
+
+
 def verify_capabilities(ffmpeg_path: Path, ffprobe_path: Path) -> None:
     version = _run_checked([str(ffmpeg_path), "-hide_banner", "-version"])
     for option in ("--enable-gpl", "--enable-version3"):
@@ -225,10 +317,8 @@ def verify_capabilities(ffmpeg_path: Path, ffprobe_path: Path) -> None:
             raise RuntimeError(
                 f"VMAF v1 CPU smoke failed for model {model_spec.name}: {exc}"
             ) from exc
-        if "VMAF score:" not in output:
-            raise RuntimeError(
-                f"VMAF v1 CPU smoke for model {model_spec.name} did not produce a score."
-            )
+        parse_vmaf_score(output, model_spec)
+    verify_anamorphic_normalization(ffmpeg_path)
     for encoder in ("libx265", "libsvtav1"):
         _run_checked(
             [
@@ -284,6 +374,7 @@ def prepare_target(
     root = (root or project_root()).resolve()
     output_dir = _require_workdir_path(output_dir, root)
     data = manifest or load_manifest()
+    validate_manifest(data)
     targets = data["targets"]
     if not isinstance(targets, dict) or target_name not in targets:
         supported = ", ".join(sorted(targets)) if isinstance(targets, dict) else "none"
@@ -322,13 +413,11 @@ def prepare_target(
         shutil.copy2(cached, licenses_dir / str(license_entry["name"]))
 
     source_info = {
+        "schema_version": 2,
         "target": target_name,
         "ffmpeg_version": data["ffmpeg_version"],
-        "provider": target["provider"],
-        "source_version": target["source_version"],
-        "build_recipe": target["build_recipe"],
-        "ffmpeg_source": target["ffmpeg_source"],
-        "archives": target["archives"],
+        "verification_contract_version": data["verification_contract_version"],
+        **target,
     }
     (output_dir / "SOURCE.json").write_text(
         json.dumps(source_info, indent=2, sort_keys=True) + "\n",
@@ -341,7 +430,8 @@ def prepare_target(
         f"Binary provider: {target['provider']}\n"
         f"Corresponding source: {target['ffmpeg_source']}\n"
         f"Build recipe: {target['build_recipe']}\n"
-        "See LICENSES/LICENSE.md and LICENSES/COPYING.GPLv3.\n",
+        "See LICENSES/LICENSE.md, LICENSES/COPYING.GPLv3, and "
+        "LICENSES/VMAF-LICENSE.txt.\n",
         encoding="utf-8",
     )
 

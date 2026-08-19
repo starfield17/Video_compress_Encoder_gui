@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -420,6 +420,12 @@ class AnalysisReceiptTestCase(unittest.TestCase):
             inconsistent = json.loads(path.read_text(encoding="utf-8"))
             inconsistent["candidates"][1]["min_vmaf"] = 99.0
             path.write_text(json.dumps(inconsistent), encoding="utf-8")
+            self.assertIsNone(load_analysis_receipt(root, fingerprint))
+
+            out_of_range = json.loads(json.dumps(asdict(receipt)))
+            out_of_range["candidates"][1]["min_vmaf"] = 101.0
+            out_of_range["candidates"][1]["segment_vmaf"] = [101.0]
+            path.write_text(json.dumps(out_of_range), encoding="utf-8")
             self.assertIsNone(load_analysis_receipt(root, fingerprint))
 
             path.write_text("{not-json", encoding="utf-8")

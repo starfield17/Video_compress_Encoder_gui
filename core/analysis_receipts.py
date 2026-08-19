@@ -47,6 +47,10 @@ def _candidate_from_data(data: object) -> QualityCandidateResult:
         raise ValueError("Analysis receipt contains an invalid bitrate.")
     if not math.isfinite(min_vmaf) or any(not math.isfinite(value) for value in segment_vmaf):
         raise ValueError("Analysis receipt contains a non-finite VMAF value.")
+    if not 0.0 <= min_vmaf <= 100.0 or any(
+        not 0.0 <= value <= 100.0 for value in segment_vmaf
+    ):
+        raise ValueError("Analysis receipt contains an out-of-range VMAF value.")
     if any(value < 0 for value in encoded_bytes):
         raise ValueError("Analysis receipt contains an invalid encoded size.")
     if any(not math.isfinite(value) or value <= 0 for value in encoded_durations_sec):

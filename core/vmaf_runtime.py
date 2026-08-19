@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -22,10 +23,14 @@ VMAF_MODEL_VERSION = "1.0.16"
 VMAF_MEASUREMENT_PIX_FMT = "yuv420p10le"
 VMAF_MEASUREMENT_BIT_DEPTH = 10
 VMAF_SCALE_FLAGS = "bicubic"
-VMAF_ASPECT_POLICY = "fit_and_pad"
+VMAF_ASPECT_POLICY = "square_pixels_fit_and_even_pad"
 VMAF_RESOLUTION_MODE = "display_model_canvas"
 VMAF_HFR_MIN_FPS = 50.0
-VMAF_MEASUREMENT_PIPELINE_VERSION = 1
+VMAF_MEASUREMENT_PIPELINE_VERSION = 2
+VMAF_PROBE_STANDARD_FPS = 30
+VMAF_PROBE_STANDARD_FRAMES = 6
+VMAF_PROBE_HFR_FPS = 60
+VMAF_PROBE_HFR_FRAMES = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +94,10 @@ def select_vmaf_model(media_info: MediaInfo) -> VmafModelSpec:
 
 
 _BIT_DEPTH_SUFFIX_RE = re.compile(r"(\d{1,2})(?:le|be)?$")
+_VMAF_SCORE_RE = re.compile(
+    r"VMAF score:\s*([+-]?(?:nan|inf(?:inity)?|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?))",
+    re.IGNORECASE,
+)
 
 
 def infer_bit_depth_from_pix_fmt(pix_fmt: str | None) -> int | None:
@@ -193,8 +202,12 @@ def display_normalization_filter(model_spec: VmafModelSpec) -> str:
     width = model_spec.display_width
     height = model_spec.display_height
     return (
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags={VMAF_SCALE_FLAGS},"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+        "scale=w='max(2,trunc(iw*sar/2)*2)':"
+        f"h='max(2,trunc(ih/2)*2)':flags={VMAF_SCALE_FLAGS},setsar=1,"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease:"
+        f"force_divisible_by=2:flags={VMAF_SCALE_FLAGS},"
+        f"pad={width}:{height}:x='trunc((ow-iw)/4)*2':"
+        "y='trunc((oh-ih)/4)*2',"
         f"setsar=1,format={VMAF_MEASUREMENT_PIX_FMT},{PTS_RESET_FILTER}"
     )
 
@@ -238,6 +251,8 @@ def build_cpu_vmaf_command(
     return [
         str(ffmpeg_path),
         "-hide_banner",
+        "-loglevel",
+        "error",
         "-y",
         "-i",
         str(distorted_path),
@@ -317,17 +332,19 @@ def build_vmaf_probe_command(
     metadata = VmafEncodeMetadata(width=320, height=180, bit_depth=8)
     if backend != VmafBackend.CPU:
         raise ValueError(f"No VMAF v1 runtime probe is implemented for backend {backend.value!r}.")
+    fps = VMAF_PROBE_HFR_FPS if model_spec.hfr else VMAF_PROBE_STANDARD_FPS
+    frames = VMAF_PROBE_HFR_FRAMES if model_spec.hfr else VMAF_PROBE_STANDARD_FRAMES
     return [
         str(ffmpeg_path),
         "-hide_banner",
         "-f",
         "lavfi",
         "-i",
-        "testsrc2=size=320x180:rate=1:duration=1",
+        f"testsrc2=size=320x180:rate={fps}:duration=1",
         "-f",
         "lavfi",
         "-i",
-        "testsrc2=size=320x180:rate=1:duration=1",
+        f"testsrc2=size=320x180:rate={fps}:duration=1",
         "-filter_complex",
         build_cpu_vmaf_filter_graph(
             model_spec=model_spec,
@@ -336,6 +353,8 @@ def build_vmaf_probe_command(
             n_threads=2,
             n_subsample=1,
         ),
+        "-frames:v",
+        str(frames),
         "-an",
         "-f",
         "null",
@@ -343,12 +362,29 @@ def build_vmaf_probe_command(
     ]
 
 
-def parse_vmaf_json(path: Path) -> float:
+def validate_vmaf_score(score: float, model_spec: VmafModelSpec) -> float:
+    if not math.isfinite(score) or not model_spec.score_min <= score <= model_spec.score_max:
+        raise RuntimeError(
+            f"VMAF model {model_spec.name} produced invalid score {score!r}; "
+            f"expected {model_spec.score_min:g}..{model_spec.score_max:g}."
+        )
+    return score
+
+
+def parse_vmaf_score(output: str, model_spec: VmafModelSpec) -> float:
+    matches = _VMAF_SCORE_RE.findall(output)
+    if not matches:
+        raise RuntimeError(f"VMAF model {model_spec.name} did not produce a score.")
+    return validate_vmaf_score(float(matches[-1]), model_spec)
+
+
+def parse_vmaf_json(path: Path, model_spec: VmafModelSpec) -> float:
     data = json.loads(path.read_text(encoding="utf-8"))
     try:
-        return float(data["pooled_metrics"]["vmaf"]["mean"])
+        score = float(data["pooled_metrics"]["vmaf"]["mean"])
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError(f"VMAF JSON did not contain a pooled mean: {path}") from exc
+    return validate_vmaf_score(score, model_spec)
 
 
 def _run_capture(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -379,11 +415,18 @@ def _probe_vmaf_runtime_cached(
     except (OSError, ValueError) as exc:
         return VmafRuntimeSupport(backend, model_spec.name, False, str(exc))
     output = proc.stdout + "\n" + proc.stderr
-    runnable = proc.returncode == 0 and "VMAF score:" in output
     error = None
-    if not runnable:
+    if proc.returncode != 0:
+        runnable = False
         detail = output.strip()
         error = detail or f"VMAF {model_spec.name} {backend.value} smoke probe failed."
+    else:
+        try:
+            parse_vmaf_score(output, model_spec)
+            runnable = True
+        except RuntimeError as exc:
+            runnable = False
+            error = str(exc)
     return VmafRuntimeSupport(backend, model_spec.name, runnable, error)
 
 

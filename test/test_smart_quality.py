@@ -590,7 +590,11 @@ class SmartCommandAndMeasurementTestCase(unittest.TestCase):
                 )
 
             self.assertEqual(len(score_calls), 1)
-            filter_graph = str(score_calls[0]["command"][score_calls[0]["command"].index("-filter_complex") + 1])
+            score_command = score_calls[0]["command"]
+            self.assertIsInstance(score_command, list)
+            assert isinstance(score_command, list)
+            self.assertEqual(score_command[score_command.index("-loglevel") + 1], "error")
+            filter_graph = str(score_command[score_command.index("-filter_complex") + 1])
             self.assertIn("settb=AVTB,setpts=PTS-STARTPTS", filter_graph)
             self.assertIn("n_threads=", filter_graph)
             self.assertIn("n_subsample=1", filter_graph)
