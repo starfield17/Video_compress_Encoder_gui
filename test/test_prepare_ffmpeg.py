@@ -63,7 +63,7 @@ class FFmpegManifestTestCase(unittest.TestCase):
     def test_manifest_pins_all_release_targets(self) -> None:
         manifest = load_manifest(ROOT / "packaging" / "ffmpeg" / "manifest.json")
         self.assertEqual(manifest["schema_version"], 2)
-        self.assertEqual(manifest["verification_contract_version"], 2)
+        self.assertEqual(manifest["verification_contract_version"], 3)
         self.assertEqual(manifest["ffmpeg_version"], "9.0.1")
         self.assertEqual(set(manifest["targets"]), EXPECTED_TARGETS)
         self.assertNotIn("macos-x86_64", manifest["targets"])
@@ -101,7 +101,7 @@ class FFmpegPreparationTestCase(unittest.TestCase):
         libvmaf_commit = "b" * 40
         return {
             "schema_version": 2,
-            "verification_contract_version": 2,
+            "verification_contract_version": 3,
             "ffmpeg_version": "9.0.1",
             "licenses": [
                 {
@@ -245,10 +245,21 @@ class FFmpegPreparationTestCase(unittest.TestCase):
             if "-version" in command:
                 return "--enable-gpl --enable-version3"
             if "-filters" in command:
-                return "libvmaf"
+                return " T.. libvmaf V->V\n T.. siti V->V\n T.. scdet V->V\n"
             if "-encoders" in command:
                 return "libx265 libsvtav1"
             if "-filter_complex" in command:
+                graph = command[command.index("-filter_complex") + 1]
+                if "siti" in graph:
+                    return (
+                        "frame:0 pts:0 pts_time:0\n"
+                        "lavfi.siti.si=10\nlavfi.siti.ti=0\nlavfi.scd.score=0\n"
+                        "frame:1 pts:1 pts_time:0.083\n"
+                        "lavfi.siti.si=12\nlavfi.siti.ti=2\nlavfi.scd.score=0\n"
+                        "frame:2 pts:2 pts_time:0.5\n"
+                        "lavfi.siti.si=20\nlavfi.siti.ti=8\nlavfi.scd.score=20\n"
+                        "lavfi.scd.time=0.5\n"
+                    )
                 return "VMAF score: 100.0"
             if "-vf" in command:
                 return (
@@ -263,7 +274,7 @@ class FFmpegPreparationTestCase(unittest.TestCase):
             libvmaf_cuda=False,
             loopback_decoder=False,
             hwaccels=frozenset(),
-            filters=frozenset({"libvmaf"}),
+            filters=frozenset({"libvmaf", "siti", "scdet"}),
             encoders=frozenset({"libx265", "libsvtav1"}),
             scale_vt=False,
             scale_cuda=False,
@@ -277,7 +288,12 @@ class FFmpegPreparationTestCase(unittest.TestCase):
         ):
             verify_capabilities(Path("ffmpeg"), Path("ffprobe"))
 
-        probes = [command for command in commands if "-filter_complex" in command]
+        probes = [
+            command
+            for command in commands
+            if "-filter_complex" in command
+            and "libvmaf" in command[command.index("-filter_complex") + 1]
+        ]
         self.assertEqual(len(probes), len(VMAF_PRODUCTION_MODELS))
         for command, model in zip(probes, VMAF_PRODUCTION_MODELS):
             graph = command[command.index("-filter_complex") + 1]

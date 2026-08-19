@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -52,6 +53,9 @@ from core.smart_quality import (
     measurement_configuration_fingerprint,
     search_bitrate_candidates,
 )
+from core.sample_planner import PlannedWindow, SamplePlan, SamplePlanningError
+from core.smart_sampling import SamplingResult
+from core.content_complexity import ComplexityProbeError
 from core.vmaf_runtime import (
     COARSE_VMAF_SUBSAMPLE,
     EXACT_VMAF_SUBSAMPLE,
@@ -78,6 +82,33 @@ def _capabilities(**overrides: object) -> AnalysisCapabilities:
     return AnalysisCapabilities(**payload)  # type: ignore[arg-type]
 
 
+def _three_window_sampling() -> SamplingResult:
+    windows = tuple(
+        PlannedWindow(
+            id=f"search:test-{index}",
+            start_sec=float(index * 20),
+            duration_sec=5.0,
+            reasons=("test",),
+        )
+        for index in range(3)
+    )
+    return SamplingResult(SamplePlan((), windows, (), False), ())
+
+
+def _sampling_with_holdout() -> SamplingResult:
+    base = _three_window_sampling().plan
+    holdout = PlannedWindow(
+        id="holdout:test",
+        start_sec=55.0,
+        duration_sec=5.0,
+        reasons=("test_holdout",),
+    )
+    return SamplingResult(
+        SamplePlan(base.scout_windows, base.search_windows, (holdout,), False),
+        (),
+    )
+
+
 def _encoder(name: str, backend: BackendChoice, *, two_pass: bool = False, preset: str | None = None) -> EncoderInfo:
     return EncoderInfo(
         codec=CodecChoice.AV1 if "av1" in name or name == "libsvtav1" else CodecChoice.HEVC,
@@ -85,6 +116,42 @@ def _encoder(name: str, backend: BackendChoice, *, two_pass: bool = False, prese
         encoder_name=name,
         supports_two_pass=two_pass,
         default_preset=preset,
+    )
+
+
+def _analysis_item(root: Path, *, max_refinement_rounds: int = 2) -> EncodePlanItem:
+    source = root / "source.mov"
+    with source.open("wb") as fh:
+        fh.truncate(100_000_000)
+    options = EncodeOptions(
+        encoder_preset="slow",
+        max_output_ratio=0.8,
+        analysis_settings=replace(
+            EncodeOptions().analysis_settings,
+            preferred_vmaf_margin=0.0,
+            max_refinement_rounds=max_refinement_rounds,
+        ),
+    )
+    return EncodePlanItem(
+        source_path=source,
+        output_path=root / "out.mp4",
+        media_info=MediaInfo(
+            path=source,
+            duration=60.0,
+            format_bitrate_bps=4_000_000,
+            video_bitrate_bps=3_000_000,
+            audio_bitrate_bps=128_000,
+            width=1920,
+            height=1080,
+            fps=30.0,
+            video_codec="h264",
+            audio_codec="aac",
+            audio_stream_count=1,
+            pix_fmt="yuv420p",
+            color_transfer="bt709",
+        ),
+        encoder_info=_encoder("libx265", BackendChoice.CPU, two_pass=True, preset="slow"),
+        options=options,
     )
 
 
@@ -415,16 +482,16 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             cpu = measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CPU)
             cuda = measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CUDA)
             self.assertNotEqual(cpu, cuda)
-            self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 3)
-            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 5)
-            self.assertEqual(ANALYSIS_RECEIPT_SCHEMA_VERSION, 3)
+            self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 4)
+            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 6)
+            self.assertEqual(ANALYSIS_RECEIPT_SCHEMA_VERSION, 4)
             from core.smart_quality import measurement_configuration_payload
 
             payload = measurement_configuration_payload(ffmpeg, item, vmaf_backend=VmafBackend.CPU)
-            self.assertEqual(payload["sample_scheme_version"], 3)
+            self.assertEqual(payload["sample_scheme_version"], 4)
             self.assertEqual(payload["vmaf_subsample"], 1)
             self.assertEqual(payload["vmaf_backend"], "cpu")
-            self.assertEqual(payload["analysis_algorithm_version"], 5)
+            self.assertEqual(payload["analysis_algorithm_version"], 6)
             self.assertEqual(payload["vmaf_resolution_mode"], "display_model_canvas")
             self.assertEqual(payload["vmaf_generation"], "v1")
             self.assertEqual(payload["vmaf_model"], "vmaf_v1.0.16_3d0h")
@@ -523,6 +590,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                     ),
                 ),
                 patch("core.smart_quality.detect_analysis_capabilities", return_value=_capabilities()),
+                patch("core.smart_quality.discover_sample_plan", return_value=_three_window_sampling()),
                 patch("core.smart_quality._run_logged"),
                 patch("core.smart_quality._score_candidate", side_effect=score),
             ):
@@ -543,6 +611,133 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                 if candidate.video_bitrate_bps == result.selected_video_bitrate_bps
             )
             self.assertGreaterEqual(selected.min_vmaf, item.options.min_vmaf)
+
+    def test_scout_failure_is_terminal_without_fixed_window_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _analysis_item(root)
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"binary")
+            failures = (
+                ComplexityProbeError("missing lavfi.siti.si"),
+                SamplePlanningError("independent holdouts unavailable"),
+            )
+            for failure in failures:
+                with self.subTest(failure=type(failure).__name__):
+                    with (
+                        patch(
+                            "core.smart_quality.select_vmaf_runtime",
+                            return_value=VmafRuntimeSupport(
+                                VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
+                            ),
+                        ),
+                        patch(
+                            "core.smart_quality.detect_analysis_capabilities",
+                            return_value=_capabilities(),
+                        ),
+                        patch(
+                            "core.smart_quality.discover_sample_plan",
+                            side_effect=failure,
+                        ),
+                        patch("core.smart_quality._score_candidate") as score,
+                    ):
+                        result = analyze_quality(
+                            ffmpeg, item, root, root / "log.txt"
+                        )
+                    self.assertEqual(result.status, QualitySearchStatus.FAILED)
+                    self.assertIn("content scout failed", result.reason or "")
+                    score.assert_not_called()
+
+    def test_failed_holdout_is_promoted_and_refined_upward(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _analysis_item(root)
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"binary")
+            search_calls = 0
+
+            def search(**kwargs):
+                nonlocal search_calls
+                search_calls += 1
+                bitrate = 2_000_000 if search_calls >= 3 else 1_000_000
+                result = kwargs["evaluate"](bitrate)
+                return [result], bitrate, bitrate
+
+            def score(_ffmpeg, _item, references, bitrate, *_args, **_kwargs):
+                holdout_probe = len(references) == 1
+                vmaf = 89.0 if holdout_probe and bitrate < 2_000_000 else 95.0
+                return QualityCandidateResult(
+                    video_bitrate_bps=bitrate,
+                    min_vmaf=vmaf,
+                    segment_vmaf=[vmaf] * len(references),
+                    observed_video_bitrate_bps=bitrate,
+                )
+
+            progress: list[dict[str, object]] = []
+            with (
+                patch(
+                    "core.smart_quality.select_vmaf_runtime",
+                    return_value=VmafRuntimeSupport(
+                        VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
+                    ),
+                ),
+                patch("core.smart_quality.detect_analysis_capabilities", return_value=_capabilities()),
+                patch("core.smart_quality.discover_sample_plan", return_value=_sampling_with_holdout()),
+                patch("core.smart_quality._run_logged"),
+                patch("core.smart_quality._score_candidate", side_effect=score),
+                patch("core.smart_quality.search_bitrate_candidates", side_effect=search),
+            ):
+                result = analyze_quality(
+                    ffmpeg,
+                    item,
+                    root,
+                    root / "log.txt",
+                    progress_callback=progress.append,
+                )
+            self.assertEqual(result.status, QualitySearchStatus.FOUND)
+            self.assertEqual(result.selected_video_bitrate_bps, 2_000_000)
+            self.assertTrue(any(event.get("state") == "refining" for event in progress))
+            receipt = load_analysis_receipt(root, result.measurement_fingerprint)
+            self.assertIsNotNone(receipt)
+            assert receipt is not None
+            self.assertEqual(len(receipt.search_windows), 4)
+            self.assertEqual(
+                [window["id"] for window in receipt.holdout_windows],
+                ["holdout:test"],
+            )
+            self.assertEqual(receipt.refinement_rounds[0]["promoted_window_ids"], ["holdout:test"])
+
+    def test_holdout_failure_at_refinement_limit_is_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _analysis_item(root, max_refinement_rounds=0)
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"binary")
+
+            def score(_ffmpeg, _item, references, bitrate, *_args, **_kwargs):
+                vmaf = 89.0 if len(references) == 1 else 95.0
+                return QualityCandidateResult(
+                    video_bitrate_bps=bitrate,
+                    min_vmaf=vmaf,
+                    segment_vmaf=[vmaf] * len(references),
+                    observed_video_bitrate_bps=bitrate,
+                )
+
+            with (
+                patch(
+                    "core.smart_quality.select_vmaf_runtime",
+                    return_value=VmafRuntimeSupport(
+                        VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
+                    ),
+                ),
+                patch("core.smart_quality.detect_analysis_capabilities", return_value=_capabilities()),
+                patch("core.smart_quality.discover_sample_plan", return_value=_sampling_with_holdout()),
+                patch("core.smart_quality._run_logged"),
+                patch("core.smart_quality._score_candidate", side_effect=score),
+            ):
+                result = analyze_quality(ffmpeg, item, root, root / "log.txt")
+            self.assertEqual(result.status, QualitySearchStatus.FAILED)
+            self.assertIn("refinement limit", result.reason or "")
 
     def test_loopback_failure_falls_back_to_legacy_scoring(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -597,6 +792,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                     ),
                 ),
                 patch("core.smart_quality.detect_analysis_capabilities", return_value=loopback_caps),
+                patch("core.smart_quality.discover_sample_plan", return_value=_three_window_sampling()),
                 patch("core.smart_quality.build_analysis_execution_plan") as planner,
                 patch("core.smart_quality._run_logged"),
                 patch("core.smart_quality._score_candidate_loopback", side_effect=fake_loopback),

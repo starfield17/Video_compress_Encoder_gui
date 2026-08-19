@@ -48,6 +48,8 @@ from core.smart_quality import (
     quality_configuration_fingerprint,
     reselect_from_candidates,
 )
+from core.sample_planner import PlannedWindow, SamplePlan
+from core.smart_sampling import SamplingResult
 from core.i18n import get_translator
 from gui.queue_model import QueueTableModel
 from gui.queue_manager import QueueManager
@@ -90,6 +92,19 @@ def _item(root: Path) -> EncodePlanItem:
         ),
         options=options,
     )
+
+
+def _three_window_sampling() -> SamplingResult:
+    windows = tuple(
+        PlannedWindow(
+            id=f"search:test-{index}",
+            start_sec=float(index * 20),
+            duration_sec=5.0,
+            reasons=("test",),
+        )
+        for index in range(3)
+    )
+    return SamplingResult(SamplePlan((), windows, (), False), ())
 
 
 def _candidates() -> list[QualityCandidateResult]:
@@ -416,8 +431,48 @@ class AnalysisReceiptTestCase(unittest.TestCase):
                 source_identity={"path": "source.mp4", "size": 10, "mtime_ns": 20},
                 ffmpeg_identity={"path": "ffmpeg", "size": 30, "mtime_ns": 40},
                 encoder_identity={"encoder": "libx265", "backend": "cpu"},
-                sample_scheme_version=1,
+                sample_scheme_version=4,
                 sample_windows=[(10.0, 5.0)],
+                scout_windows=[
+                    {
+                        "id": "scout-001",
+                        "start_sec": 10.0,
+                        "duration_sec": 2.0,
+                        "si_p90": 0.7,
+                        "ti_p90": 0.8,
+                        "si_rank": 0.5,
+                        "ti_rank": 0.5,
+                        "difficulty": 0.75,
+                        "scene_cut_times": [],
+                        "scene_cut_count": 0,
+                        "max_scene_score": 0.0,
+                    }
+                ],
+                search_windows=[
+                    {
+                        "id": "search:scout-001",
+                        "start_sec": 10.0,
+                        "duration_sec": 5.0,
+                        "reasons": ["global_hardest"],
+                        "scout_id": "scout-001",
+                        "crosses_scene_cut": False,
+                    }
+                ],
+                holdout_windows=[
+                    {
+                        "id": "holdout:scout-002",
+                        "start_sec": 20.0,
+                        "duration_sec": 5.0,
+                        "reasons": ["holdout_difficulty_and_diversity"],
+                        "scout_id": "scout-002",
+                        "crosses_scene_cut": False,
+                    }
+                ],
+                refinement_rounds=[
+                    {"round": 1, "promoted_windows": ["20.0:5.0"], "resolved": True}
+                ],
+                search_min_vmaf=94.0,
+                holdout_min_vmaf=95.0,
                 search_fingerprint="b" * 64,
                 measurement_configuration={
                     "vmaf_backend": "cpu",
@@ -444,6 +499,16 @@ class AnalysisReceiptTestCase(unittest.TestCase):
             self.assertIsNotNone(loaded)
             assert loaded is not None
             self.assertEqual(loaded.candidates[1].min_vmaf, 96.0)
+            self.assertEqual(loaded.sample_scheme_version, 4)
+            self.assertEqual(len(loaded.scout_windows), 1)
+            self.assertEqual(loaded.search_windows[0]["reasons"], ["global_hardest"])
+            self.assertEqual(
+                loaded.holdout_windows[0]["reasons"],
+                ["holdout_difficulty_and_diversity"],
+            )
+            self.assertEqual(loaded.refinement_rounds[0]["round"], 1)
+            self.assertEqual(loaded.search_min_vmaf, 94.0)
+            self.assertEqual(loaded.holdout_min_vmaf, 95.0)
 
             inconsistent = json.loads(path.read_text(encoding="utf-8"))
             inconsistent["candidates"][1]["min_vmaf"] = 99.0
@@ -487,6 +552,7 @@ class AnalysisReceiptTestCase(unittest.TestCase):
                         VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
                     ),
                 ),
+                patch("core.smart_quality.discover_sample_plan", return_value=_three_window_sampling()),
                 patch("core.smart_quality._run_logged"),
                 patch("core.smart_quality._score_candidate", side_effect=score) as first_score,
             ):

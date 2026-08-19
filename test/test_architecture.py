@@ -197,6 +197,29 @@ class ArchitectureTestCase(unittest.TestCase):
             "importers must be updated:\n" + "\n".join(sorted(violations)),
         )
 
+    def test_smart_sampling_dependency_direction(self) -> None:
+        graph = _dependency_graph()
+        expected = {
+            "core.content_complexity": set(),
+            "core.sample_planner": {"core.models"},
+            "core.smart_sampling": {
+                "core.content_complexity",
+                "core.models",
+                "core.sample_planner",
+            },
+        }
+        for module, allowed_core_dependencies in expected.items():
+            actual = {
+                dependency
+                for dependency in graph[module]
+                if dependency.startswith("core.")
+            }
+            self.assertEqual(
+                actual,
+                allowed_core_dependencies,
+                f"{module} crossed the Smart sampling module boundary",
+            )
+
     def test_queue_view_depends_on_model(self) -> None:
         view_path = _app_modules().get("gui.queue_view")
         self.assertIsNotNone(view_path)

@@ -13,7 +13,7 @@ from typing import Any
 from core.models import AnalysisReceipt, QualityCandidateResult
 
 
-ANALYSIS_RECEIPT_SCHEMA_VERSION = 3
+ANALYSIS_RECEIPT_SCHEMA_VERSION = 4
 _FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 _RECEIPT_LOCK = threading.RLock()
 
@@ -81,6 +81,65 @@ def _identity(data: object, field_name: str) -> dict[str, object]:
     return {str(key): value for key, value in data.items()}
 
 
+def _object_list(data: object, field_name: str) -> list[dict[str, object]]:
+    if not isinstance(data, list):
+        raise ValueError(f"Analysis receipt {field_name} must be a list.")
+    result: list[dict[str, object]] = []
+    for value in data:
+        if not isinstance(value, dict):
+            raise ValueError(f"Analysis receipt {field_name} entries must be objects.")
+        normalized = {str(key): item for key, item in value.items()}
+        _validate_json_value(normalized, field_name)
+        result.append(normalized)
+    return result
+
+
+def _validate_json_value(value: object, field_name: str) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"Analysis receipt {field_name} contains a non-finite value.")
+    if isinstance(value, list):
+        for item in value:
+            _validate_json_value(item, field_name)
+    elif isinstance(value, dict):
+        for item in value.values():
+            _validate_json_value(item, field_name)
+
+
+def _planned_windows(data: object, field_name: str) -> list[dict[str, object]]:
+    windows = _object_list(data, field_name)
+    for window in windows:
+        try:
+            start = float(str(window["start_sec"]))
+            duration = float(str(window["duration_sec"]))
+            identifier = str(window["id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Analysis receipt {field_name} entry is invalid.") from exc
+        if not identifier or not math.isfinite(start) or start < 0 or not math.isfinite(duration) or duration <= 0:
+            raise ValueError(f"Analysis receipt {field_name} entry is invalid.")
+    return windows
+
+
+def _scout_windows(data: object) -> list[dict[str, object]]:
+    windows = _planned_windows(data, "scout_windows")
+    for window in windows:
+        try:
+            metrics = (float(str(window["si_p90"])), float(str(window["ti_p90"])))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Analysis receipt scout window metrics are invalid.") from exc
+        if any(not math.isfinite(value) for value in metrics):
+            raise ValueError("Analysis receipt scout window metrics are invalid.")
+    return windows
+
+
+def _optional_score(data: object, field_name: str) -> float | None:
+    if data is None:
+        return None
+    value = float(str(data))
+    if not math.isfinite(value) or not 0.0 <= value <= 100.0:
+        raise ValueError(f"Analysis receipt {field_name} is invalid.")
+    return value
+
+
 def _receipt_from_data(data: object) -> AnalysisReceipt:
     if not isinstance(data, dict):
         raise ValueError("Analysis receipt must be an object.")
@@ -116,7 +175,7 @@ def _receipt_from_data(data: object) -> AnalysisReceipt:
         ):
             raise ValueError("Analysis receipt candidate VMAF summary is inconsistent.")
     search_fingerprint = str(data.get("search_fingerprint", ""))
-    if _FINGERPRINT_RE.fullmatch(search_fingerprint) is None:
+    if search_fingerprint and _FINGERPRINT_RE.fullmatch(search_fingerprint) is None:
         raise ValueError("Analysis receipt contains an invalid search fingerprint.")
     measurement_configuration = _identity(
         data.get("measurement_configuration"), "measurement_configuration"
@@ -129,6 +188,12 @@ def _receipt_from_data(data: object) -> AnalysisReceipt:
         encoder_identity=_identity(data.get("encoder_identity"), "encoder_identity"),
         sample_scheme_version=int(data.get("sample_scheme_version", 0)),
         sample_windows=windows,
+        scout_windows=_scout_windows(data.get("scout_windows", [])),
+        search_windows=_planned_windows(data.get("search_windows", []), "search_windows"),
+        holdout_windows=_planned_windows(data.get("holdout_windows", []), "holdout_windows"),
+        refinement_rounds=_object_list(data.get("refinement_rounds", []), "refinement_rounds"),
+        search_min_vmaf=_optional_score(data.get("search_min_vmaf"), "search_min_vmaf"),
+        holdout_min_vmaf=_optional_score(data.get("holdout_min_vmaf"), "holdout_min_vmaf"),
         search_fingerprint=search_fingerprint,
         measurement_configuration=measurement_configuration,
         candidates=candidates,

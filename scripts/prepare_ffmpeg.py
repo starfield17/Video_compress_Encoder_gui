@@ -20,7 +20,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from core.analysis_runtime import detect_analysis_capabilities, format_analysis_capability_report  # noqa: E402
+from core.analysis_runtime import (  # noqa: E402
+    detect_analysis_capabilities,
+    format_analysis_capability_report,
+    parse_filter_names,
+)
+from core.content_complexity import parse_scout_metadata  # noqa: E402
 from core.models import VmafBackend  # noqa: E402
 from core.vmaf_runtime import (  # noqa: E402
     VMAF_PRODUCTION_MODELS,
@@ -33,6 +38,7 @@ from core.vmaf_runtime import (  # noqa: E402
 
 USER_AGENT = "Video-compressor-release-ci/1.0"
 LICENSE_NAMES = {"LICENSE.md", "COPYING.GPLv3", "VMAF-LICENSE.txt"}
+REQUIRED_FILTERS = {"libvmaf", "siti", "scdet"}
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 MACHINE_TYPES = {
     "x86_64": {
@@ -64,7 +70,7 @@ def _require_commit(value: object, label: str) -> str:
 
 
 def validate_manifest(data: dict[str, object]) -> None:
-    if data.get("schema_version") != 2 or data.get("verification_contract_version") != 2:
+    if data.get("schema_version") != 2 or data.get("verification_contract_version") != 3:
         raise ValueError("Unsupported FFmpeg manifest schema.")
     licenses = data.get("licenses")
     if not isinstance(licenses, list) or {
@@ -292,15 +298,46 @@ def verify_anamorphic_normalization(ffmpeg_path: Path) -> int:
     return luma_min
 
 
+def verify_scout_runtime(ffmpeg_path: Path) -> None:
+    output = _run_checked(
+        [
+            str(ffmpeg_path),
+            "-hide_banner",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x64:rate=12:duration=0.5",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=white:size=64x64:rate=12:duration=0.5",
+            "-filter_complex",
+            "[0:v][1:v]concat=n=2:v=1:a=0,siti,scdet=threshold=10,"
+            "metadata=mode=print:file=-",
+            "-frames:v",
+            "12",
+            "-f",
+            "null",
+            "-",
+        ]
+    )
+    metrics = parse_scout_metadata(output)
+    if metrics.frame_count < 2 or not metrics.scene_cut_times:
+        raise RuntimeError("Bundled FFmpeg Scout smoke did not report usable metadata.")
+
+
 def verify_capabilities(ffmpeg_path: Path, ffprobe_path: Path) -> None:
     version = _run_checked([str(ffmpeg_path), "-hide_banner", "-version"])
     for option in ("--enable-gpl", "--enable-version3"):
         if option not in version:
             raise RuntimeError(f"Bundled FFmpeg is missing required configure option {option}.")
 
-    filters = _run_checked([str(ffmpeg_path), "-hide_banner", "-filters"])
-    if "libvmaf" not in filters:
-        raise RuntimeError("Bundled FFmpeg does not provide the libvmaf filter.")
+    filters = parse_filter_names(_run_checked([str(ffmpeg_path), "-hide_banner", "-filters"]))
+    missing_filters = sorted(REQUIRED_FILTERS - filters)
+    if missing_filters:
+        raise RuntimeError(
+            "Bundled FFmpeg does not provide required filters: " + ", ".join(missing_filters)
+        )
 
     encoders = _run_checked([str(ffmpeg_path), "-hide_banner", "-encoders"])
     for encoder in ("libx265", "libsvtav1"):
@@ -308,6 +345,7 @@ def verify_capabilities(ffmpeg_path: Path, ffprobe_path: Path) -> None:
             raise RuntimeError(f"Bundled FFmpeg does not provide encoder {encoder}.")
 
     _run_checked([str(ffprobe_path), "-hide_banner", "-version"])
+    verify_scout_runtime(ffmpeg_path)
     for model_spec in VMAF_PRODUCTION_MODELS:
         try:
             output = _run_checked(

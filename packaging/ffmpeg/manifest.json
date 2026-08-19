@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "verification_contract_version": 2,
+  "verification_contract_version": 3,
   "ffmpeg_version": "9.0.1",
   "licenses": [
     {
@@ -29,7 +29,7 @@
       "source_kind": "mirror",
       "provider": "starfield17/ffmpeg-vmaf-v1-builds (BtbN trusted mirror)",
       "source_version": "n9.0.1-6-g9d4ca21220",
-      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/935cd756de88bccf0bb86b8a97569a3dcb7cfa93",
+      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/18884f433a57d81130cb92c7817297df9f98ceed",
       "ffmpeg_commit": "9d4ca21220bfd3f06fc8bfc90ddf0f6d0a484611",
       "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/9d4ca21220bfd3f06fc8bfc90ddf0f6d0a484611",
       "libvmaf_version": "3.2.0",
@@ -39,8 +39,8 @@
       "upstream_release": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-08-18-15-03",
       "archives": [
         {
-          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r2/ffmpeg-9.0.1-vmaf-v1.0.16-r2-windows-x86_64.zip",
-          "sha256": "91f7b3988e5411badd1baf55ea69653b8fd9d295e336c5ac1214f9e564ddb000",
+          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r3/ffmpeg-9.0.1-vmaf-v1.0.16-r3-windows-x86_64.zip",
+          "sha256": "335d0e2bbb8eae5358af9fff96f636cc103699cda6fc1b5d1d3e05518364403a",
           "format": "zip"
         }
       ]
@@ -51,7 +51,7 @@
       "source_kind": "mirror",
       "provider": "starfield17/ffmpeg-vmaf-v1-builds (BtbN trusted mirror)",
       "source_version": "n9.0.1-6-g9d4ca21220",
-      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/935cd756de88bccf0bb86b8a97569a3dcb7cfa93",
+      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/18884f433a57d81130cb92c7817297df9f98ceed",
       "ffmpeg_commit": "9d4ca21220bfd3f06fc8bfc90ddf0f6d0a484611",
       "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/9d4ca21220bfd3f06fc8bfc90ddf0f6d0a484611",
       "libvmaf_version": "3.2.0",
@@ -61,8 +61,8 @@
       "upstream_release": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-08-18-15-03",
       "archives": [
         {
-          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r2/ffmpeg-9.0.1-vmaf-v1.0.16-r2-windows-arm64.zip",
-          "sha256": "9cb2a138a9ec8251df3db51ad5e7ef0ba69d69845dae1ce1b499b6639a4a3b65",
+          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r3/ffmpeg-9.0.1-vmaf-v1.0.16-r3-windows-arm64.zip",
+          "sha256": "3cd5e6c87de500c8c272430901663eeb4eb46d8a4304c4bc984b2f25e46d7da8",
           "format": "zip"
         }
       ]
@@ -73,7 +73,7 @@
       "source_kind": "mirror",
       "provider": "starfield17/ffmpeg-vmaf-v1-builds (BtbN trusted mirror)",
       "source_version": "n9.0.1-6-g9d4ca21220",
-      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/935cd756de88bccf0bb86b8a97569a3dcb7cfa93",
+      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/18884f433a57d81130cb92c7817297df9f98ceed",
       "ffmpeg_commit": "9d4ca21220bfd3f06fc8bfc90ddf0f6d0a484611",
       "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/9d4ca21220bfd3f06fc8bfc90ddf0f6d0a484611",
       "libvmaf_version": "3.2.0",
@@ -83,8 +83,8 @@
       "upstream_release": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-08-18-15-03",
       "archives": [
         {
-          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r2/ffmpeg-9.0.1-vmaf-v1.0.16-r2-linux-x86_64.tar.xz",
-          "sha256": "fa096b4c2a69f92d213d236814e170b9c3bb2e1c01ed79169ee3684dc72a4ee0",
+          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r3/ffmpeg-9.0.1-vmaf-v1.0.16-r3-linux-x86_64.tar.xz",
+          "sha256": "c1f8cfdbc81dbbfaec0e2176d6d2f31431ee0af4c24163de3bdf56a7336f57af",
           "format": "tar.xz"
         }
       ]
@@ -95,7 +95,7 @@
       "source_kind": "mirror",
       "provider": "starfield17/ffmpeg-vmaf-v1-builds (BtbN trusted mirror)",
       "source_version": "n9.0.1-6-g9d4ca21220",
-      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/935cd756de88bccf0bb86b8a97569a3dcb7cfa93",
+      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/18884f433a57d81130cb92c7817297df9f98ceed",
       "ffmpeg_commit": "9d4ca21220bfd3f06fc8bfc90ddf0f6d0a484611",
       "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/9d4ca21220bfd3f06fc8bfc90ddf0f6d0a484611",
       "libvmaf_version": "3.2.0",
@@ -105,8 +105,8 @@
       "upstream_release": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-08-18-15-03",
       "archives": [
         {
-          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r2/ffmpeg-9.0.1-vmaf-v1.0.16-r2-linux-arm64.tar.xz",
-          "sha256": "96ca0d01f059118248910a4b4079afb681644c8a7d0fba6b2dcc53f094814b28",
+          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r3/ffmpeg-9.0.1-vmaf-v1.0.16-r3-linux-arm64.tar.xz",
+          "sha256": "b1b00e5e8d8a276bd2992d1bf7a057da8a676489d5030f6fa3431875cb6d94aa",
           "format": "tar.xz"
         }
       ]
@@ -117,7 +117,7 @@
       "source_kind": "build",
       "provider": "starfield17/ffmpeg-vmaf-v1-builds",
       "source_version": "ffmpeg-n9.0.1+libvmaf-v3.2.0",
-      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/935cd756de88bccf0bb86b8a97569a3dcb7cfa93",
+      "build_recipe": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/tree/18884f433a57d81130cb92c7817297df9f98ceed",
       "ffmpeg_commit": "bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa",
       "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa",
       "libvmaf_version": "3.2.0",
@@ -126,8 +126,8 @@
       "upstream_build_recipe": "https://git.martin-riedl.de/ffmpeg/build-script/src/commit/f63b8aab8f5ce1a067da86ba69e34a36a7e217e5",
       "archives": [
         {
-          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r2/ffmpeg-9.0.1-vmaf-v1.0.16-r2-macos-arm64.zip",
-          "sha256": "315cad842b82634166506696249d4af86cb3c8098c766948364330cec855c606",
+          "url": "https://github.com/starfield17/ffmpeg-vmaf-v1-builds/releases/download/ffmpeg-9.0.1-vmaf-v1.0.16-r3/ffmpeg-9.0.1-vmaf-v1.0.16-r3-macos-arm64.zip",
+          "sha256": "b0062915836c845dd9a1b14bf8671dffaff270a9a9f1b69cf0663b8a2eb36433",
           "format": "zip"
         }
       ]

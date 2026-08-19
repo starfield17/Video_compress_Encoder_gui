@@ -52,6 +52,7 @@ from core.smart_quality import (
     choose_smart_sample_windows,
     measurement_configuration_fingerprint,
     quality_configuration_fingerprint,
+    reselect_from_candidates,
     resolve_max_output_ratio,
     search_bitrate_candidates,
 )
@@ -201,10 +202,11 @@ class SmartSamplingAndBudgetTestCase(unittest.TestCase):
         ten = choose_smart_sample_windows(10.0)
         self.assertEqual([(window.start_sec, window.duration_sec) for window in ten], [(0.0, 10.0)])
 
-    def test_videos_longer_than_ten_seconds_use_three_five_second_windows(self) -> None:
-        for duration in (15.0, 30.0, 7200.0):
+    def test_balance_window_budget_scales_with_video_duration(self) -> None:
+        self.assertEqual(len(choose_smart_sample_windows(15.0)), 1)
+        for duration, expected in ((30.0, 4), (7200.0, 6)):
             windows = choose_smart_sample_windows(duration)
-            self.assertEqual(len(windows), 3)
+            self.assertEqual(len(windows), expected)
             for window in windows:
                 self.assertAlmostEqual(window.duration_sec, 5.0)
                 self.assertGreaterEqual(window.start_sec, 0.0)
@@ -212,9 +214,9 @@ class SmartSamplingAndBudgetTestCase(unittest.TestCase):
             for left, right in zip(windows, windows[1:]):
                 self.assertLessEqual(left.start_sec + left.duration_sec, right.start_sec + 1e-9)
 
-    def test_just_over_thirty_seconds_has_three_non_overlapping_windows(self) -> None:
+    def test_just_over_thirty_seconds_has_non_overlapping_windows(self) -> None:
         windows = choose_smart_sample_windows(31.0)
-        self.assertEqual(len(windows), 3)
+        self.assertEqual(len(windows), 4)
         for left, right in zip(windows, windows[1:]):
             self.assertLessEqual(left.start_sec + left.duration_sec, right.start_sec)
 
@@ -291,6 +293,37 @@ class SmartSamplingAndBudgetTestCase(unittest.TestCase):
 
 
 class SmartSearchTestCase(unittest.TestCase):
+    def test_preferred_margin_is_soft_and_never_redefines_user_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.mov"
+            with source.open("wb") as fh:
+                fh.truncate(100_000_000)
+            item = _item(
+                source,
+                root / "out.mp4",
+                EncodeOptions(min_vmaf=90.0, max_output_ratio=1.0),
+            )
+            candidates = [
+                QualityCandidateResult(
+                    video_bitrate_bps=1_600_000,
+                    min_vmaf=90.2,
+                    observed_video_bitrate_bps=1_600_000,
+                ),
+                QualityCandidateResult(
+                    video_bitrate_bps=1_700_000,
+                    min_vmaf=90.7,
+                    observed_video_bitrate_bps=1_700_000,
+                ),
+            ]
+            preferred = reselect_from_candidates(candidates, item)
+            self.assertEqual(preferred.selected_video_bitrate_bps, 1_700_000)
+
+            item.options = replace(item.options, max_output_ratio=0.133)
+            fallback = reselect_from_candidates(candidates, item)
+            self.assertEqual(fallback.status, QualitySearchStatus.FOUND)
+            self.assertEqual(fallback.selected_video_bitrate_bps, 1_600_000)
+
     def test_search_selects_lowest_tested_passing_candidate(self) -> None:
         tested: list[int] = []
 

@@ -41,15 +41,25 @@ class AnalysisProfileName(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class AnalysisProfileSettings:
-    whole_video_max_sec: float = 10.0
+    whole_video_max_sec: float = 20.0
+    scout_duration_sec: float = 2.0
+    scout_multiplier: int = 4
+    scout_max_windows: int = 32
     sample_duration_sec: float = 5.0
-    sample_window_count: int = 3
+    sample_count_under_10m: int = 4
+    sample_count_10_to_60m: int = 5
+    sample_count_60_to_180m: int = 6
+    sample_count_over_180m: int = 6
+    holdout_window_count: int = 2
+    holdout_window_count_over_180m: int = 2
     coarse_max_candidates: int = 4
     exact_max_candidates: int = 3
     coarse_vmaf_subsample: int = 3
     exact_vmaf_subsample: int = 1
     min_search_tolerance_bps: int = 50_000
     search_tolerance_ratio: float = 0.03
+    max_refinement_rounds: int = 2
+    preferred_vmaf_margin: float = 0.4
 
 
 class BackendChoice(str, Enum):
@@ -329,6 +339,12 @@ class AnalysisReceipt:
     encoder_identity: dict[str, object]
     sample_scheme_version: int
     sample_windows: list[tuple[float, float]]
+    scout_windows: list[dict[str, object]] = field(default_factory=list)
+    search_windows: list[dict[str, object]] = field(default_factory=list)
+    holdout_windows: list[dict[str, object]] = field(default_factory=list)
+    refinement_rounds: list[dict[str, object]] = field(default_factory=list)
+    search_min_vmaf: Optional[float] = None
+    holdout_min_vmaf: Optional[float] = None
     search_fingerprint: str = ""
     measurement_configuration: dict[str, object] = field(default_factory=dict)
     candidates: list[QualityCandidateResult] = field(default_factory=list)

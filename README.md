@@ -55,11 +55,22 @@ python main.py --cli preview input.mp4 \
   --max-output-ratio 0.70
 ```
 
-Smart mode requires an FFmpeg build whose `libvmaf` filter and required model
-can actually run. The Balance profile analyzes the full video up to 10 seconds
-and otherwise uses three 5-second windows; Fast uses shorter samples and fewer
-candidates, while Precise uses longer samples and a tighter search. A one-window
-custom profile samples the middle of the video.
+Smart mode requires an FFmpeg build whose `libvmaf`, `siti`, and `scdet`
+filters can actually run. Short videos are analyzed whole. Longer videos first
+run a low-resolution SI/TI and scene-boundary Scout across the timeline, then
+select a non-overlapping mix of difficult and time-stratified windows. Fast,
+Balance, and Precise increase Scout coverage, independent search windows,
+holdout verification, and search precision; their algorithm settings are
+versioned factory defaults rather than editable per-field profiles. Just above
+the whole-video threshold, the planner preserves the profile's independent
+holdout budget and reduces search-window count only when the timeline cannot
+fit both sets without overlap.
+
+The selected bitrate is verified on Scout windows that did not participate in
+the search. Failed holdouts are promoted into the search constraints together,
+then exact search continues upward from the current bitrate. A profile's VMAF
+margin is only a preference when size permits: meeting the user's configured
+VMAF target remains valid.
 
 Smart pins Netflix VMAF v1.0.16 and selects its normal/HFR 1080p or 4K model
 from the source geometry and frame rate (HFR starts at 50 fps). At the scoring
@@ -266,9 +277,10 @@ project-owned temporary files stay under `workdir/`.
 The five archives are published by the repository-owned
 [FFmpeg VMAF v1 builds](https://github.com/starfield17/ffmpeg-vmaf-v1-builds)
 pipeline only after native architecture, multi-frame normal/HFR VMAF probes,
-and SAR-aware normalization checks pass. The macOS ARM64 binary is built from
-source there; Windows and Linux are checksum-pinned BtbN trusted mirrors that
-retain their exact upstream recipe and release provenance.
+SAR-aware normalization, exact `libvmaf`/`siti`/`scdet` discovery, and a
+synthetic Scout metadata smoke pass. The macOS ARM64 binary is built from source
+there; Windows and Linux are checksum-pinned BtbN trusted mirrors that retain
+their exact upstream recipe and release provenance.
 
 On Windows, the default build uses Nuitka-managed MinGW64:
 

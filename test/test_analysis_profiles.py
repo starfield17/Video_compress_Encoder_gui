@@ -27,20 +27,81 @@ from core.models import (
     SizeBlockedPolicy,
 )
 from core.preset_store import _default_app_config
-from core.smart_quality import choose_smart_sample_windows
 from gui.gui_mainwindow import MainWindow
 from gui.settings_dialog import SettingsDialog
 
 
 class AnalysisProfileCoreTestCase(unittest.TestCase):
-    def test_factory_profiles_are_distinct(self) -> None:
-        fast = FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.FAST]
-        balance = FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.BALANCE]
-        precise = FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.PRECISE]
-        self.assertLess(fast.sample_duration_sec, balance.sample_duration_sec)
-        self.assertLess(balance.sample_duration_sec, precise.sample_duration_sec)
-        self.assertLess(fast.coarse_max_candidates, precise.coarse_max_candidates)
-        self.assertGreater(fast.search_tolerance_ratio, precise.search_tolerance_ratio)
+    def test_factory_profiles_match_confidence_mode_defaults(self) -> None:
+        expected = {
+            AnalysisProfileName.FAST: dict(
+                whole_video_max_sec=12.0,
+                scout_duration_sec=1.5,
+                scout_multiplier=3,
+                scout_max_windows=12,
+                sample_duration_sec=4.0,
+                sample_count_under_10m=3,
+                sample_count_10_to_60m=3,
+                sample_count_60_to_180m=4,
+                sample_count_over_180m=4,
+                holdout_window_count=1,
+                holdout_window_count_over_180m=1,
+                coarse_max_candidates=3,
+                exact_max_candidates=2,
+                coarse_vmaf_subsample=5,
+                exact_vmaf_subsample=1,
+                min_search_tolerance_bps=100_000,
+                search_tolerance_ratio=0.06,
+                max_refinement_rounds=1,
+                preferred_vmaf_margin=0.2,
+            ),
+            AnalysisProfileName.BALANCE: dict(
+                whole_video_max_sec=20.0,
+                scout_duration_sec=2.0,
+                scout_multiplier=4,
+                scout_max_windows=32,
+                sample_duration_sec=5.0,
+                sample_count_under_10m=4,
+                sample_count_10_to_60m=5,
+                sample_count_60_to_180m=6,
+                sample_count_over_180m=6,
+                holdout_window_count=2,
+                holdout_window_count_over_180m=2,
+                coarse_max_candidates=4,
+                exact_max_candidates=3,
+                coarse_vmaf_subsample=3,
+                exact_vmaf_subsample=1,
+                min_search_tolerance_bps=50_000,
+                search_tolerance_ratio=0.03,
+                max_refinement_rounds=2,
+                preferred_vmaf_margin=0.4,
+            ),
+            AnalysisProfileName.PRECISE: dict(
+                whole_video_max_sec=30.0,
+                scout_duration_sec=2.5,
+                scout_multiplier=6,
+                scout_max_windows=64,
+                sample_duration_sec=6.0,
+                sample_count_under_10m=6,
+                sample_count_10_to_60m=7,
+                sample_count_60_to_180m=8,
+                sample_count_over_180m=10,
+                holdout_window_count=3,
+                holdout_window_count_over_180m=4,
+                coarse_max_candidates=5,
+                exact_max_candidates=4,
+                coarse_vmaf_subsample=3,
+                exact_vmaf_subsample=1,
+                min_search_tolerance_bps=25_000,
+                search_tolerance_ratio=0.015,
+                max_refinement_rounds=2,
+                preferred_vmaf_margin=0.5,
+            ),
+        }
+        for name, values in expected.items():
+            settings = FACTORY_ANALYSIS_PROFILES[name]
+            for field, value in values.items():
+                self.assertEqual(getattr(settings, field), value, f"{name.value}.{field}")
 
     def test_unknown_name_falls_back_to_balance(self) -> None:
         self.assertEqual(parse_analysis_profile_name(AnalysisProfileName.FAST), AnalysisProfileName.FAST)
@@ -49,14 +110,12 @@ class AnalysisProfileCoreTestCase(unittest.TestCase):
         self.assertEqual(name, AnalysisProfileName.BALANCE)
         self.assertEqual(settings, FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.BALANCE])
 
-    def test_stored_overrides_merge_onto_factory(self) -> None:
+    def test_stored_overrides_are_ignored_for_factory_modes(self) -> None:
         settings = resolve_analysis_settings(
             AnalysisProfileName.FAST,
             {"fast": {"sample_duration_sec": 4.5, "coarse_max_candidates": 5}},
         )
-        self.assertEqual(settings.sample_duration_sec, 4.5)
-        self.assertEqual(settings.coarse_max_candidates, 5)
-        self.assertEqual(settings.whole_video_max_sec, 8.0)
+        self.assertEqual(settings, FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.FAST])
 
     def test_even_subsample_is_coerced_to_odd(self) -> None:
         settings = validate_analysis_settings(
@@ -80,28 +139,7 @@ class AnalysisProfileCoreTestCase(unittest.TestCase):
             stored_profiles={"precise": {"exact_max_candidates": 7}},
         )
         self.assertEqual(options.analysis_profile, AnalysisProfileName.PRECISE)
-        self.assertEqual(options.analysis_settings.exact_max_candidates, 7)
-        self.assertEqual(options.analysis_settings.sample_duration_sec, 8.0)
-
-    def test_fast_sample_windows_use_shorter_clips(self) -> None:
-        windows = choose_smart_sample_windows(
-            60.0,
-            FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.FAST],
-        )
-        self.assertEqual(len(windows), 3)
-        for window in windows:
-            self.assertAlmostEqual(window.duration_sec, 3.0)
-
-    def test_single_sample_window_is_centered(self) -> None:
-        settings = AnalysisProfileSettings(
-            whole_video_max_sec=5.0,
-            sample_duration_sec=10.0,
-            sample_window_count=1,
-        )
-        windows = choose_smart_sample_windows(60.0, settings)
-        self.assertEqual(len(windows), 1)
-        self.assertAlmostEqual(windows[0].start_sec, 25.0)
-        self.assertAlmostEqual(windows[0].duration_sec, 10.0)
+        self.assertEqual(options.analysis_settings, FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.PRECISE])
 
     def test_default_app_config_includes_analysis_profile(self) -> None:
         data = _default_app_config()
@@ -119,7 +157,7 @@ class AnalysisProfileCliTestCase(unittest.TestCase):
         ):
             options = _options_from_args(args, Path("."))
         self.assertEqual(options.analysis_profile, AnalysisProfileName.FAST)
-        self.assertEqual(options.analysis_settings.sample_duration_sec, 3.0)
+        self.assertEqual(options.analysis_settings.sample_duration_sec, 4.0)
         self.assertEqual(options.analysis_settings.coarse_max_candidates, 3)
 
 
@@ -140,7 +178,7 @@ class AnalysisProfileGuiTestCase(unittest.TestCase):
             self.assertEqual(window.options_panel.analysis_profile_combo.itemText(balance_index), "Balance")
 
             window.app_config["size_blocked_policy"] = SizeBlockedPolicy.ASK.value
-            window.app_config["analysis_profiles"] = {"fast": {"sample_duration_sec": 4.0}}
+            window.app_config["analysis_profiles"] = {"fast": {"sample_duration_sec": 99.0}}
             fast_index = window.options_panel.analysis_profile_combo.findData(AnalysisProfileName.FAST.value)
             with patch.object(window, "_save_app_config_preserving_capabilities") as save_config:
                 window.options_panel.analysis_profile_combo.setCurrentIndex(balance_index)
@@ -176,7 +214,7 @@ class AnalysisProfileGuiTestCase(unittest.TestCase):
         finally:
             window.close()
 
-    def test_settings_dialog_edits_each_profile(self) -> None:
+    def test_settings_dialog_uses_profile_combo_and_discards_custom_values(self) -> None:
         tr = get_translator("en", self.repo_root / "config")
         dialog = SettingsDialog(
             tr,
@@ -188,21 +226,10 @@ class AnalysisProfileGuiTestCase(unittest.TestCase):
         )
         try:
             self.assertEqual(dialog.analysis_profile_combo.currentData(), "precise")
-            precise_page = dialog._profile_pages[AnalysisProfileName.PRECISE]
-            self.assertAlmostEqual(precise_page.sample_duration_spin.value(), 9.0)
-            precise_page.sample_duration_spin.setValue(7.5)
-            precise_page.coarse_candidates_spin.setValue(8)
+            self.assertFalse(hasattr(dialog, "_profile_pages"))
             values = dialog.values()
             self.assertEqual(values["analysis_profile"], "precise")
-            profiles = values["analysis_profiles"]
-            assert isinstance(profiles, dict)
-            self.assertEqual(profiles["precise"]["sample_duration_sec"], 7.5)
-            self.assertEqual(profiles["precise"]["coarse_max_candidates"], 8)
-            self.assertEqual(profiles["balance"]["sample_duration_sec"], 5.0)
-            precise_page._reset_to_factory()
-            reset = dialog.values()["analysis_profiles"]
-            assert isinstance(reset, dict)
-            self.assertEqual(reset["precise"]["sample_duration_sec"], 8.0)
+            self.assertEqual(values["analysis_profiles"], {})
         finally:
             dialog.close()
 

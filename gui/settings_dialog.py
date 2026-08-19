@@ -5,7 +5,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -15,157 +14,19 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
-    QSpinBox,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from core.analysis_profiles import (
-    FACTORY_ANALYSIS_PROFILES,
-    all_analysis_profile_payloads,
-    analysis_settings_payload,
-    parse_analysis_profile_name,
-    resolve_analysis_settings,
-    validate_analysis_settings,
-)
+from core.analysis_profiles import parse_analysis_profile_name
 from core.i18n import LanguageInfo, Translator
 from core.models import (
     AnalysisProfileName,
-    AnalysisProfileSettings,
     QualityUnreachablePolicy,
     SizeBlockedPolicy,
     SkippedOutputPolicy,
 )
 from core.preset_store import smart_policies_from_config
-
-VMAF_SUBSAMPLE_CHOICES = (1, 3, 5, 7)
-
-
-class _AnalysisProfilePage(QWidget):
-    def __init__(self, name: AnalysisProfileName, parent=None) -> None:
-        super().__init__(parent)
-        self.profile_name = name
-        layout = QGridLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setHorizontalSpacing(10)
-        layout.setVerticalSpacing(8)
-
-        self.whole_video_label = QLabel()
-        self.whole_video_spin = QDoubleSpinBox()
-        self.whole_video_spin.setRange(1.0, 60.0)
-        self.whole_video_spin.setDecimals(1)
-        self.whole_video_spin.setSingleStep(1.0)
-
-        self.sample_duration_label = QLabel()
-        self.sample_duration_spin = QDoubleSpinBox()
-        self.sample_duration_spin.setRange(1.0, 30.0)
-        self.sample_duration_spin.setDecimals(1)
-        self.sample_duration_spin.setSingleStep(0.5)
-
-        self.window_count_label = QLabel()
-        self.window_count_spin = QSpinBox()
-        self.window_count_spin.setRange(1, 5)
-
-        self.coarse_candidates_label = QLabel()
-        self.coarse_candidates_spin = QSpinBox()
-        self.coarse_candidates_spin.setRange(1, 8)
-
-        self.exact_candidates_label = QLabel()
-        self.exact_candidates_spin = QSpinBox()
-        self.exact_candidates_spin.setRange(2, 8)
-
-        self.coarse_subsample_label = QLabel()
-        self.coarse_subsample_combo = QComboBox()
-        self.exact_subsample_label = QLabel()
-        self.exact_subsample_combo = QComboBox()
-        for value in VMAF_SUBSAMPLE_CHOICES:
-            self.coarse_subsample_combo.addItem(str(value), value)
-            self.exact_subsample_combo.addItem(str(value), value)
-
-        self.min_tolerance_label = QLabel()
-        self.min_tolerance_spin = QSpinBox()
-        self.min_tolerance_spin.setRange(1, 500)
-        self.min_tolerance_spin.setSingleStep(5)
-
-        self.search_ratio_label = QLabel()
-        self.search_ratio_spin = QDoubleSpinBox()
-        self.search_ratio_spin.setRange(0.5, 25.0)
-        self.search_ratio_spin.setDecimals(1)
-        self.search_ratio_spin.setSingleStep(0.5)
-        self.search_ratio_spin.setSuffix(" %")
-
-        self.reset_button = QPushButton()
-        self.reset_button.clicked.connect(self._reset_to_factory)
-
-        layout.addWidget(self.whole_video_label, 0, 0)
-        layout.addWidget(self.whole_video_spin, 0, 1)
-        layout.addWidget(self.sample_duration_label, 0, 2)
-        layout.addWidget(self.sample_duration_spin, 0, 3)
-        layout.addWidget(self.window_count_label, 1, 0)
-        layout.addWidget(self.window_count_spin, 1, 1)
-        layout.addWidget(self.coarse_candidates_label, 1, 2)
-        layout.addWidget(self.coarse_candidates_spin, 1, 3)
-        layout.addWidget(self.exact_candidates_label, 2, 0)
-        layout.addWidget(self.exact_candidates_spin, 2, 1)
-        layout.addWidget(self.coarse_subsample_label, 2, 2)
-        layout.addWidget(self.coarse_subsample_combo, 2, 3)
-        layout.addWidget(self.exact_subsample_label, 3, 0)
-        layout.addWidget(self.exact_subsample_combo, 3, 1)
-        layout.addWidget(self.min_tolerance_label, 3, 2)
-        layout.addWidget(self.min_tolerance_spin, 3, 3)
-        layout.addWidget(self.search_ratio_label, 4, 0)
-        layout.addWidget(self.search_ratio_spin, 4, 1)
-        layout.addWidget(self.reset_button, 5, 0, 1, 4)
-        layout.setColumnStretch(1, 1)
-        layout.setColumnStretch(3, 1)
-
-    def set_settings(self, settings: AnalysisProfileSettings) -> None:
-        resolved = validate_analysis_settings(settings)
-        self.whole_video_spin.setValue(resolved.whole_video_max_sec)
-        self.sample_duration_spin.setValue(resolved.sample_duration_sec)
-        self.window_count_spin.setValue(resolved.sample_window_count)
-        self.coarse_candidates_spin.setValue(resolved.coarse_max_candidates)
-        self.exact_candidates_spin.setValue(resolved.exact_max_candidates)
-        coarse_index = self.coarse_subsample_combo.findData(resolved.coarse_vmaf_subsample)
-        if coarse_index >= 0:
-            self.coarse_subsample_combo.setCurrentIndex(coarse_index)
-        exact_index = self.exact_subsample_combo.findData(resolved.exact_vmaf_subsample)
-        if exact_index >= 0:
-            self.exact_subsample_combo.setCurrentIndex(exact_index)
-        self.min_tolerance_spin.setValue(max(1, round(resolved.min_search_tolerance_bps / 1000)))
-        self.search_ratio_spin.setValue(resolved.search_tolerance_ratio * 100.0)
-
-    def settings(self) -> AnalysisProfileSettings:
-        return validate_analysis_settings(
-            AnalysisProfileSettings(
-                whole_video_max_sec=float(self.whole_video_spin.value()),
-                sample_duration_sec=float(self.sample_duration_spin.value()),
-                sample_window_count=int(self.window_count_spin.value()),
-                coarse_max_candidates=int(self.coarse_candidates_spin.value()),
-                exact_max_candidates=int(self.exact_candidates_spin.value()),
-                coarse_vmaf_subsample=int(self.coarse_subsample_combo.currentData() or 3),
-                exact_vmaf_subsample=int(self.exact_subsample_combo.currentData() or 1),
-                min_search_tolerance_bps=int(self.min_tolerance_spin.value()) * 1000,
-                search_tolerance_ratio=float(self.search_ratio_spin.value()) / 100.0,
-            )
-        )
-
-    def apply_translations(self, tr: Translator) -> None:
-        self.whole_video_label.setText(tr.t("gui.label.whole_video_max_sec"))
-        self.sample_duration_label.setText(tr.t("gui.label.sample_duration_sec"))
-        self.window_count_label.setText(tr.t("gui.label.sample_window_count"))
-        self.coarse_candidates_label.setText(tr.t("gui.label.coarse_max_candidates"))
-        self.exact_candidates_label.setText(tr.t("gui.label.exact_max_candidates"))
-        self.coarse_subsample_label.setText(tr.t("gui.label.coarse_vmaf_subsample"))
-        self.exact_subsample_label.setText(tr.t("gui.label.exact_vmaf_subsample"))
-        self.min_tolerance_label.setText(tr.t("gui.label.min_search_tolerance_kbps"))
-        self.search_ratio_label.setText(tr.t("gui.label.search_tolerance_ratio"))
-        self.reset_button.setText(tr.t("gui.button.reset_analysis_profile"))
-
-    def _reset_to_factory(self) -> None:
-        self.set_settings(FACTORY_ANALYSIS_PROFILES[self.profile_name])
-
 
 class SettingsDialog(QDialog):
     def __init__(
@@ -182,7 +43,6 @@ class SettingsDialog(QDialog):
             LanguageInfo("en", "English"),
             LanguageInfo("zh_cn", "简体中文"),
         ]
-        self._profile_pages: dict[AnalysisProfileName, _AnalysisProfilePage] = {}
         self._build_ui()
         self._load_settings(settings)
         self.apply_translations(tr)
@@ -272,12 +132,6 @@ class SettingsDialog(QDialog):
         active_row.addWidget(self.analysis_profile_combo, 1)
         analysis_layout.addLayout(active_row)
 
-        self.analysis_tabs = QTabWidget()
-        for name in AnalysisProfileName:
-            page = _AnalysisProfilePage(name)
-            self._profile_pages[name] = page
-            self.analysis_tabs.addTab(page, "")
-        analysis_layout.addWidget(self.analysis_tabs)
         layout.addWidget(self.analysis_group)
 
         self.redetect_button = QPushButton()
@@ -299,7 +153,6 @@ class SettingsDialog(QDialog):
         self.redetect_button.clicked.connect(self._request_redetect)
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
-        self.analysis_profile_combo.currentIndexChanged.connect(self._sync_active_profile_tab)
 
     def _load_settings(self, settings: dict[str, object]) -> None:
         language = str(settings.get("language", "en"))
@@ -333,14 +186,10 @@ class SettingsDialog(QDialog):
         if skipped_index >= 0:
             self.skipped_output_policy_combo.setCurrentIndex(skipped_index)
 
-        stored_profiles = settings.get("analysis_profiles")
         profile_name = parse_analysis_profile_name(settings.get("analysis_profile"))
         profile_index = self.analysis_profile_combo.findData(profile_name.value)
         if profile_index >= 0:
             self.analysis_profile_combo.setCurrentIndex(profile_index)
-        for name, page in self._profile_pages.items():
-            page.set_settings(resolve_analysis_settings(name, stored_profiles))
-        self._sync_active_profile_tab()
 
     def apply_translations(self, tr: Translator) -> None:
         self.tr = tr
@@ -401,11 +250,6 @@ class SettingsDialog(QDialog):
             self.analysis_profile_combo.findData(AnalysisProfileName.PRECISE.value),
             self.tr.t("gui.value.analysis_precise"),
         )
-        self.analysis_tabs.setTabText(0, self.tr.t("gui.value.analysis_fast"))
-        self.analysis_tabs.setTabText(1, self.tr.t("gui.value.analysis_balance"))
-        self.analysis_tabs.setTabText(2, self.tr.t("gui.value.analysis_precise"))
-        for page in self._profile_pages.values():
-            page.apply_translations(self.tr)
         self.workdir_button.setText(self.tr.t("gui.button.browse_dir"))
         self.ffmpeg_button.setText(self.tr.t("gui.button.browse_exe"))
         self.ffprobe_button.setText(self.tr.t("gui.button.browse_exe"))
@@ -417,9 +261,6 @@ class SettingsDialog(QDialog):
         self.analysis_profile_combo.setToolTip(self.tr.t("gui.tooltip.analysis_profile"))
 
     def values(self) -> dict[str, object]:
-        stored = all_analysis_profile_payloads()
-        for name, page in self._profile_pages.items():
-            stored[name.value] = analysis_settings_payload(page.settings())
         return {
             "language": self.language_combo.currentData(),
             "workdir_path": self.workdir_edit.text().strip(),
@@ -435,13 +276,8 @@ class SettingsDialog(QDialog):
             or SkippedOutputPolicy.COPY.value,
             "analysis_profile": self.analysis_profile_combo.currentData()
             or AnalysisProfileName.BALANCE.value,
-            "analysis_profiles": stored,
+            "analysis_profiles": {},
         }
-
-    def _sync_active_profile_tab(self) -> None:
-        name = parse_analysis_profile_name(self.analysis_profile_combo.currentData())
-        index = list(AnalysisProfileName).index(name)
-        self.analysis_tabs.setCurrentIndex(index)
 
     def _browse_workdir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, self.tr.t("gui.dialog.select_workdir"))

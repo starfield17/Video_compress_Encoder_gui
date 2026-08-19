@@ -545,7 +545,17 @@ class QueueTableModel(QAbstractTableModel):
             )
         if state == "waiting_analysis":
             record.status = QueueItemStatus.WAITING_ANALYSIS
-        elif state in {"analyzing", "candidate_finished"}:
+        elif state in {
+            "analyzing",
+            "candidate_finished",
+            "scouting",
+            "scout_finished",
+            "sample_plan_ready",
+            "boundary_alignment",
+            "searching",
+            "holdout_verification",
+            "refining",
+        }:
             record.status = QueueItemStatus.ANALYZING
         elif state == "analysis_finished":
             record.status = QueueItemStatus.QUEUED
