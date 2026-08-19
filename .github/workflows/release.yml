@@ -103,7 +103,6 @@ jobs:
     name: Build (${{ matrix.target }})
     needs: [preflight, matrix_plan]
     if: needs.preflight.result == 'success' && needs.matrix_plan.result == 'success'
-    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:

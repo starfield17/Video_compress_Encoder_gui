@@ -176,6 +176,14 @@ class ReleaseWorkflowTestCase(unittest.TestCase):
         self.assertIn("secrets: inherit", self.workflow)
         self.assertIn("ref: ${{ github.ref }}", self.workflow)
 
+    def test_release_build_is_a_valid_reusable_workflow_call(self) -> None:
+        build = self.workflow[
+            self.workflow.index("  build:\n") : self.workflow.index("  publish:\n")
+        ]
+        self.assertIn("uses: ./.github/workflows/_package.yml", build)
+        self.assertNotIn("\n    runs-on:", build)
+        self.assertIn("runner: ${{ matrix.runner }}", build)
+
     def test_release_matrices_use_canonical_planner_outputs(self) -> None:
         self.assertIn("matrix_plan:", self.workflow)
         self.assertIn(
