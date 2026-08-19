@@ -12,8 +12,10 @@ from core.models import (
     EncodeResult,
     EncoderInfo,
     QualityUnreachablePolicy,
+    SkippedOutputPolicy,
 )
 from core.skipped_outputs import (
+    group_skipped_output_pairs,
     is_eligible_skipped_item,
     publish_skipped_source,
     publish_skipped_sources,
@@ -93,6 +95,35 @@ class SkippedOutputPublishTestCase(unittest.TestCase):
                 skipped=True,
             )
             self.assertTrue(is_eligible_skipped_item(item, result))
+
+    def test_skipped_outputs_are_grouped_by_each_item_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for name in ("copy", "ask", "ignore", "planning"):
+                (root / name).mkdir()
+            copy_item = _item(root / "copy")
+            ask_item = _item(root / "ask")
+            ignore_item = _item(root / "ignore")
+            ask_item.options.skipped_output_policy = SkippedOutputPolicy.ASK
+            ignore_item.options.skipped_output_policy = SkippedOutputPolicy.IGNORE
+            result = EncodeResult(
+                source_path=copy_item.source_path,
+                output_path=copy_item.output_path,
+                success=False,
+                skipped=True,
+            )
+            grouped = group_skipped_output_pairs(
+                [
+                    (copy_item, result),
+                    (ask_item, result),
+                    (ignore_item, result),
+                    (_item(root / "planning", skip_reason="probe failed"), result),
+                ]
+            )
+
+            self.assertEqual(len(grouped[SkippedOutputPolicy.COPY]), 1)
+            self.assertEqual(len(grouped[SkippedOutputPolicy.ASK]), 1)
+            self.assertEqual(len(grouped[SkippedOutputPolicy.IGNORE]), 1)
 
 
 if __name__ == "__main__":

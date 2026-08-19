@@ -88,6 +88,9 @@ misses the limit is preserved beside the target as `*.size-miss-<id>.*` for an
 explicit accept, corrected-bitrate retry, or delete decision.
 A corrected-bitrate retry invalidates the old Smart selection and re-runs the
 search under the lower video-bitrate ceiling before encoding again.
+The size-blocked policy applies to this measured prediction stage; an actual
+full encode that exceeds the limit always remains an explicit decision so it
+cannot silently replace the requested output.
 
 Smart candidate measurements are cached as versioned JSON receipts under
 `workdir/analysis/receipts/`. Changing only VMAF, size, audio, or bitrate policy

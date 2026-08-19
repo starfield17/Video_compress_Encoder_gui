@@ -35,6 +35,8 @@ from core.models import (
     BackendChoice,
     CodecChoice,
     EncodeOptions,
+    EncodePlanItem,
+    EncodeResult,
     SkippedOutputPolicy,
     SmartPreviewResult,
     VideoFileItem,
@@ -47,7 +49,7 @@ from core.preset_store import (
     save_preset,
     update_app_config,
 )
-from core.skipped_outputs import is_eligible_skipped_item, publish_skipped_source
+from core.skipped_outputs import group_skipped_output_pairs, is_eligible_skipped_item, publish_skipped_source
 from gui.activity_log_window import ActivityLogWindow
 from gui.constraint_decision_dialog import (
     SizeMissDecision,
@@ -936,23 +938,23 @@ class MainWindow(QMainWindow):
             self._append_log(self.tr.t("gui.log.encode_done"))
             self._maybe_publish_skipped_sources()
 
-    def _eligible_skipped_records(self) -> list[QueueItemRecord]:
-        eligible: list[QueueItemRecord] = []
+    def _eligible_skipped_pairs(self) -> list[tuple[EncodePlanItem, EncodeResult]]:
+        eligible: list[tuple[EncodePlanItem, EncodeResult]] = []
         for record in self.queue_model.records():
             if record.result is None:
                 continue
             if is_eligible_skipped_item(record.plan_item, record.result):
-                eligible.append(record)
+                eligible.append((record.plan_item, record.result))
         return eligible
 
-    def _publish_skipped_records(self, records: list[QueueItemRecord]) -> None:
-        for record in records:
-            published = publish_skipped_source(record.plan_item)
+    def _publish_skipped_pairs(self, pairs: list[tuple[EncodePlanItem, EncodeResult]]) -> None:
+        for item, _result in pairs:
+            published = publish_skipped_source(item)
             if published.copied:
                 self._append_log(
                     self.tr.t(
                         "gui.log.skipped_source_copied",
-                        source=published.source_path.name,
+                        source=item.source_path.name,
                         output=str(published.output_path),
                     )
                 )
@@ -960,21 +962,22 @@ class MainWindow(QMainWindow):
                 self._append_log(
                     self.tr.t(
                         "gui.log.skipped_source_not_copied",
-                        source=record.source_path.name,
+                        source=item.source_path.name,
                         reason=published.reason or "",
                     )
                 )
 
     def _maybe_publish_skipped_sources(self) -> None:
-        records = self._eligible_skipped_records()
-        if not records:
+        grouped = group_skipped_output_pairs(self._eligible_skipped_pairs())
+        if not any(grouped.values()):
             return
-        policy = records[0].plan_item.options.skipped_output_policy
-        if policy == SkippedOutputPolicy.IGNORE:
-            return
-        if policy == SkippedOutputPolicy.ASK:
+        copy_pairs = grouped[SkippedOutputPolicy.COPY]
+        ask_pairs = grouped[SkippedOutputPolicy.ASK]
+        if copy_pairs:
+            self._publish_skipped_pairs(copy_pairs)
+        if ask_pairs:
             listing = "\n".join(
-                f"{record.source_path.name} → {record.output_path.name}" for record in records
+                f"{item.source_path.name} → {item.output_path.name}" for item, _result in ask_pairs
             )
             answer = QMessageBox.question(
                 self,
@@ -985,7 +988,7 @@ class MainWindow(QMainWindow):
             )
             if answer != QMessageBox.Yes:
                 return
-        self._publish_skipped_records(records)
+            self._publish_skipped_pairs(ask_pairs)
 
     def _on_queue_error(self, message: str) -> None:
         self._append_log(f"{self.tr.t('gui.message.error')}: {message}")
@@ -1319,6 +1322,7 @@ class MainWindow(QMainWindow):
                 if record.result is not None:
                     for warning in record.result.external_subtitle_warnings:
                         self._append_log(warning)
+                self.queue_manager.reconcile_after_decision()
             return
 
         options = self.queue_model.decision_options_for_row(row)
@@ -1335,6 +1339,7 @@ class MainWindow(QMainWindow):
                     action=decision.action_code.value,
                 )
             )
+            self.queue_manager.reconcile_after_decision()
 
     def _show_header_context_menu(self, view, pos: QPoint) -> None:
         menu = QMenu(self)

@@ -17,8 +17,15 @@ from PySide6.QtWidgets import QComboBox, QGroupBox, QHeaderView, QLabel, QLineEd
 
 from core.app_paths import app_root, config_dir
 from core.i18n import get_translator
-from core.models import EncodeOptions
-from core.plan_encode import build_encode_plan
+from core.models import (
+    BackendChoice,
+    CodecChoice,
+    EncodeOptions,
+    EncodePlan,
+    EncodePlanItem,
+    EncoderInfo,
+    MediaInfo,
+)
 from core.preset_store import app_config_path
 from gui.gui_mainwindow import MainWindow
 from gui.queue_manager import QueueManager
@@ -31,27 +38,66 @@ class SmokeTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.repo_root = app_root()
-        oceans_video = cls.repo_root / "workdir" / "oceans.mp4"
-        cls.sample_video = oceans_video if oceans_video.exists() else cls.repo_root / "workdir" / "test.mp4"
+        cls._sample_dir = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._sample_dir.cleanup)
+        cls.sample_video = Path(cls._sample_dir.name) / "smoke-source.mp4"
+        cls.sample_video.write_bytes(b"portable-smoke-fixture")
         cls.app = QApplication.instance() or QApplication([])
 
-    def require_sample_video(self) -> None:
-        if not self.sample_video.exists():
-            self.skipTest(f"Sample video is missing: {self.sample_video}")
+    def _sample_plan(self) -> EncodePlan:
+        options = EncodeOptions(overwrite=True)
+        media = MediaInfo(
+            path=self.sample_video,
+            duration=12.0,
+            format_bitrate_bps=1_128_000,
+            video_bitrate_bps=1_000_000,
+            audio_bitrate_bps=128_000,
+            width=640,
+            height=360,
+            fps=30.0,
+            video_codec="h264",
+            audio_codec="aac",
+            audio_stream_count=1,
+            pix_fmt="yuv420p",
+            bit_depth=8,
+        )
+        encoder = EncoderInfo(
+            codec=CodecChoice.HEVC,
+            backend=BackendChoice.CPU,
+            encoder_name="libx265",
+            supports_two_pass=True,
+            default_preset="slow",
+        )
+        output_root = self.sample_video.parent / "output"
+        return EncodePlan(
+            items=[
+                EncodePlanItem(
+                    source_path=self.sample_video,
+                    output_path=output_root / "smoke-source_hevc.mp4",
+                    media_info=media,
+                    encoder_info=encoder,
+                    options=options,
+                )
+            ],
+            ffmpeg_path=Path("ffmpeg"),
+            ffprobe_path=Path("ffprobe"),
+            input_root=self.sample_video.parent,
+            output_root=output_root,
+        )
 
     def test_app_config_path_uses_workdir(self) -> None:
         config_path = app_config_path(config_dir())
         self.assertEqual(config_path, self.repo_root / "workdir" / "app_config.json")
 
-    def test_oceans_video_is_used_as_smoke_sample_when_present(self) -> None:
-        if not (self.repo_root / "workdir" / "oceans.mp4").exists():
-            self.skipTest("oceans.mp4 is not present in workdir")
-        self.assertEqual(self.sample_video.name, "oceans.mp4")
+    def test_smoke_fixture_is_isolated_from_project_workdir(self) -> None:
+        self.assertTrue(self.sample_video.is_file())
+        self.assertNotEqual(self.sample_video.parent, self.repo_root / "workdir")
 
     def test_cli_plan_smoke(self) -> None:
-        self.require_sample_video()
         stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
+        with patch("cli.cli_entry.build_encode_plan", return_value=self._sample_plan()), contextlib.redirect_stdout(
+            stdout
+        ):
             exit_code = main(["--cli", "plan", str(self.sample_video), "--overwrite"])
         self.assertEqual(exit_code, 0)
         output = stdout.getvalue()
@@ -59,12 +105,7 @@ class SmokeTestCase(unittest.TestCase):
         self.assertIn(str(self.sample_video), output)
 
     def test_queue_metrics_after_plan_add(self) -> None:
-        self.require_sample_video()
-        plan = build_encode_plan(
-            input_path=self.sample_video,
-            options=EncodeOptions(overwrite=True),
-            workdir=self.repo_root / "workdir",
-        )
+        plan = self._sample_plan()
         model = QueueTableModel(get_translator("en", self.repo_root / "config"))
         manager = QueueManager(model)
         added = manager.add_plan(plan, self.repo_root / "workdir")

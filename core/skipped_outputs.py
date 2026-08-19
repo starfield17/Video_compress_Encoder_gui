@@ -57,7 +57,11 @@ def publish_skipped_sources(
     return published
 
 
-def skipped_output_policy_from_items(items: list[EncodePlanItem]) -> SkippedOutputPolicy:
-    if not items:
-        return SkippedOutputPolicy.COPY
-    return items[0].options.skipped_output_policy
+def group_skipped_output_pairs(
+    pairs: list[tuple[EncodePlanItem, EncodeResult]],
+) -> dict[SkippedOutputPolicy, list[tuple[EncodePlanItem, EncodeResult]]]:
+    grouped = {policy: [] for policy in SkippedOutputPolicy}
+    for item, result in pairs:
+        if is_eligible_skipped_item(item, result):
+            grouped[item.options.skipped_output_policy].append((item, result))
+    return grouped

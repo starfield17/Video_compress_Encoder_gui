@@ -50,6 +50,7 @@ from core.smart_quality import (
 )
 from core.i18n import get_translator
 from gui.queue_model import QueueTableModel
+from gui.queue_manager import QueueManager
 from gui.queue_state import QueueItemRecord, QueueItemStatus, compute_metrics, mark_finished
 from gui.queue_state import QueueJobSnapshot
 
@@ -299,6 +300,33 @@ class ConstraintDecisionTestCase(unittest.TestCase):
             self.assertEqual(metrics.needs_decision_items, 1)
             self.assertEqual(metrics.completed_items, 0)
             self.assertLess(metrics.queue_percent, 100.0)
+
+    def test_queue_manager_reconciles_idle_after_last_decision_skip(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _item(root)
+            record = QueueItemRecord(
+                item_id="one",
+                plan_item=item,
+                job_snapshot=QueueJobSnapshot(root, root / "ffmpeg", root / "ffprobe", root),
+                status=QueueItemStatus.SKIPPED,
+                total_passes=1,
+                result=EncodeResult(
+                    source_path=item.source_path,
+                    output_path=item.output_path,
+                    success=False,
+                    skipped=True,
+                ),
+            )
+            model = QueueTableModel(get_translator("en", Path(__file__).resolve().parent.parent / "config"))
+            model.add_records([record])
+            manager = QueueManager(model)
+            states: list[str] = []
+            manager.stateChanged.connect(states.append)
+
+            manager.reconcile_after_decision()
+
+            self.assertEqual(states, ["idle"])
 
     def test_queue_applies_a_local_quality_decision_without_reanalysis(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

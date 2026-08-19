@@ -254,6 +254,15 @@ class QueueManager(QObject):
         state = "awaiting_decision" if self.model.metrics().needs_decision_items else "idle"
         self.stateChanged.emit(state)
 
+    def reconcile_after_decision(self) -> None:
+        """Publish the terminal queue state after a local decision is applied."""
+        if self._worker is not None:
+            return
+        if self.model.metrics().needs_decision_items:
+            self.stateChanged.emit("awaiting_decision")
+        elif not self.model.execution_records():
+            self.stateChanged.emit("idle")
+
     def _on_worker_thread_finished(self) -> None:
         self._worker = None
         self._active_item_ids.clear()
