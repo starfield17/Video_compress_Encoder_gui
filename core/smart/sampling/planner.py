@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import math
+import statistics
 from dataclasses import dataclass, replace
 from typing import Iterable
 
 from core.models import AnalysisProfileSettings
 
 
-SI_WEIGHT = 0.45
-TI_WEIGHT = 0.55
 _EPSILON = 1e-9
 
 
@@ -36,6 +35,32 @@ class ScoutObservation:
     ti_p90: float
     scene_cut_times: tuple[float, ...] = ()
     max_scene_score: float = 0.0
+    dark: float = 0.0
+    flat_or_gradient: float = 0.0
+    high_frequency_or_noise: float = 0.0
+    text_edge_like: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class CompressionRiskVector:
+    spatial_detail: float
+    motion: float
+    transition: float
+    dark: float
+    flat_or_gradient: float
+    high_frequency_or_noise: float
+    text_edge_like: float = 0.0
+
+    @property
+    def global_risk(self) -> float:
+        return (
+            0.27 * self.spatial_detail
+            + 0.30 * self.motion
+            + 0.17 * self.transition
+            + 0.08 * self.dark
+            + 0.08 * self.flat_or_gradient
+            + 0.10 * self.high_frequency_or_noise
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +83,9 @@ class SamplePlan:
     search_windows: tuple[PlannedWindow, ...]
     holdout_windows: tuple[PlannedWindow, ...]
     whole_video: bool
+    reserve_windows: tuple[PlannedWindow, ...] = ()
+    content_uncertainty: float = 0.0
+    content_heterogeneity: float = 0.0
 
 
 def planned_window_payload(window: PlannedWindow) -> dict[str, object]:
@@ -94,6 +122,10 @@ def scout_observation_payload(observation: ScoutObservation) -> dict[str, object
         "scene_cut_times": list(observation.scene_cut_times),
         "scene_cut_count": len(observation.scene_cut_times),
         "max_scene_score": observation.max_scene_score,
+        "dark": observation.dark,
+        "flat_or_gradient": observation.flat_or_gradient,
+        "high_frequency_or_noise": observation.high_frequency_or_noise,
+        "text_edge_like": observation.text_edge_like,
     }
 
 
@@ -110,6 +142,10 @@ def scout_observation_from_payload(data: dict[str, object]) -> ScoutObservation:
         ti_p90=float(str(data["ti_p90"])),
         scene_cut_times=cuts,
         max_scene_score=float(str(data.get("max_scene_score", 0.0))),
+        dark=float(str(data.get("dark", 0.0))),
+        flat_or_gradient=float(str(data.get("flat_or_gradient", 0.0))),
+        high_frequency_or_noise=float(str(data.get("high_frequency_or_noise", 0.0))),
+        text_edge_like=float(str(data.get("text_edge_like", 0.0))),
     )
 
 
@@ -119,6 +155,7 @@ class RankedScoutObservation:
     si_rank: float
     ti_rank: float
     difficulty: float
+    risk: CompressionRiskVector
 
 
 def _configured_search_window_count(
@@ -134,7 +171,10 @@ def _configured_search_window_count(
 
 
 def search_window_count(duration_sec: float, settings: AnalysisProfileSettings) -> int:
-    configured = _configured_search_window_count(duration_sec, settings)
+    configured = max(
+        settings.search_min_windows,
+        min(settings.search_max_windows, _configured_search_window_count(duration_sec, settings)),
+    )
     capacity = max(1, int(math.floor(duration_sec / settings.sample_duration_sec)))
     return max(1, min(int(configured), capacity))
 
@@ -160,8 +200,18 @@ def plan_scout_windows(duration_sec: float, settings: AnalysisProfileSettings) -
         raise SamplePlanningError("Source duration must be finite and positive.")
     if should_analyze_whole_video(duration_sec, settings):
         return ()
-    search_count = search_window_count(duration_sec, settings)
-    requested = min(settings.scout_max_windows, search_count * settings.scout_multiplier)
+    required_pools = (
+        settings.search_max_windows
+        + settings.holdout_target_max
+        + settings.reserve_window_count
+    )
+    requested = min(
+        settings.scout_max_windows,
+        max(
+            required_pools * 2,
+            search_window_count(duration_sec, settings) * settings.scout_multiplier,
+        ),
+    )
     count = max(1, int(requested))
     scout_duration = min(float(settings.scout_duration_sec), duration_sec)
     max_start = max(0.0, duration_sec - scout_duration)
@@ -204,15 +254,32 @@ def rank_scout_observations(observations: Iterable[ScoutObservation]) -> tuple[R
         raise SamplePlanningError("Scout window IDs must be unique.")
     si_ranks = _midrank_percentiles([item.si_p90 for item in items])
     ti_ranks = _midrank_percentiles([item.ti_p90 for item in items])
-    return tuple(
-        RankedScoutObservation(
-            observation=item,
-            si_rank=si_ranks[index],
-            ti_rank=ti_ranks[index],
-            difficulty=SI_WEIGHT * si_ranks[index] + TI_WEIGHT * ti_ranks[index],
+    transition_ranks = _midrank_percentiles([item.max_scene_score for item in items])
+
+    def component(raw: float, scale: float, rank: float) -> float:
+        return 0.55 * min(1.0, max(0.0, raw / scale)) + 0.45 * rank
+
+    result: list[RankedScoutObservation] = []
+    for index, item in enumerate(items):
+        risk = CompressionRiskVector(
+            spatial_detail=component(item.si_p90, 100.0, si_ranks[index]),
+            motion=component(item.ti_p90, 50.0, ti_ranks[index]),
+            transition=component(item.max_scene_score, 100.0, transition_ranks[index]),
+            dark=min(1.0, max(0.0, item.dark)),
+            flat_or_gradient=min(1.0, max(0.0, item.flat_or_gradient)),
+            high_frequency_or_noise=min(1.0, max(0.0, item.high_frequency_or_noise)),
+            text_edge_like=min(1.0, max(0.0, item.text_edge_like)),
         )
-        for index, item in enumerate(items)
-    )
+        result.append(
+            RankedScoutObservation(
+                observation=item,
+                si_rank=si_ranks[index],
+                ti_rank=ti_ranks[index],
+                difficulty=risk.global_risk,
+                risk=risk,
+            )
+        )
+    return tuple(result)
 
 
 def ranked_scout_payloads(observations: Iterable[ScoutObservation]) -> list[dict[str, object]]:
@@ -224,10 +291,48 @@ def ranked_scout_payloads(observations: Iterable[ScoutObservation]) -> list[dict
                 "si_rank": ranked.si_rank,
                 "ti_rank": ranked.ti_rank,
                 "difficulty": ranked.difficulty,
+                "compression_risk": {
+                    name: getattr(ranked.risk, name)
+                    for name in ranked.risk.__dataclass_fields__
+                },
             }
         )
         payloads.append(payload)
     return payloads
+
+
+def content_statistics(
+    observations: Iterable[ScoutObservation],
+) -> tuple[float, float]:
+    ranked = rank_scout_observations(observations)
+    names = tuple(CompressionRiskVector.__dataclass_fields__)
+    vectors = [tuple(getattr(item.risk, name) for name in names) for item in ranked]
+    dispersion = (
+        statistics.fmean(statistics.pstdev(values) for values in zip(*vectors))
+        if len(vectors) > 1
+        else 0.0
+    )
+    scene_density = sum(len(item.observation.scene_cut_times) for item in ranked) / max(1, len(ranked))
+    absolute = statistics.fmean(item.risk.global_risk for item in ranked)
+    high_modes = sum(
+        max(getattr(item.risk, name) for item in ranked) >= 0.65
+        for name in names[:-1]
+    ) / max(1, len(names) - 1)
+    heterogeneity = min(1.0, 2.2 * dispersion + 0.12 * scene_density + 0.25 * high_modes)
+    uncertainty = min(1.0, 0.55 * heterogeneity + 0.30 * absolute + 0.15 / math.sqrt(len(ranked)))
+    return uncertainty, heterogeneity
+
+
+def adaptive_search_window_count(
+    duration_sec: float,
+    settings: AnalysisProfileSettings,
+    observations: Iterable[ScoutObservation],
+) -> int:
+    uncertainty, heterogeneity = content_statistics(observations)
+    duration_factor = min(1.0, math.log1p(duration_sec / 600.0) / math.log1p(18.0))
+    span = settings.search_max_windows - settings.search_min_windows
+    extra = round(span * (0.30 * duration_factor + 0.45 * uncertainty + 0.25 * heterogeneity))
+    return min(settings.search_max_windows, settings.search_min_windows + max(0, extra))
 
 
 def _project_window(
@@ -457,16 +562,28 @@ def build_sample_plan(
     if actual != expected:
         raise SamplePlanningError("Scout observations do not match the deterministic scout plan.")
 
-    expected_holdouts = holdout_window_count(duration_sec, settings)
+    uncertainty, heterogeneity = content_statistics(item.observation for item in ranked)
+    target_holdouts = settings.holdout_target_min + round(
+        (settings.holdout_target_max - settings.holdout_target_min) * uncertainty
+    )
+    expected_holdouts = max(holdout_window_count(duration_sec, settings), target_holdouts)
+    expected_holdouts = min(settings.holdout_target_max, expected_holdouts)
     projected_capacity = _available_window_capacity(
         ranked,
         [],
         duration_sec=duration_sec,
         sample_duration_sec=settings.sample_duration_sec,
     )
-    target = min(
-        search_window_count(duration_sec, settings),
-        projected_capacity - expected_holdouts,
+    expected_reserves = min(
+        settings.reserve_window_count,
+        max(0, projected_capacity - expected_holdouts - 1),
+    )
+    target = max(
+        1,
+        min(
+            adaptive_search_window_count(duration_sec, settings, (item.observation for item in ranked)),
+            projected_capacity - expected_holdouts - expected_reserves,
+        ),
     )
     if target < 1:
         raise SamplePlanningError(
@@ -484,7 +601,7 @@ def build_sample_plan(
         ):
             return False
         if len(trial) > len(search):
-            remaining = target - len(trial) + expected_holdouts
+            remaining = target - len(trial) + expected_holdouts + expected_reserves
             if _available_window_capacity(
                 ranked,
                 trial,
@@ -498,9 +615,9 @@ def build_sample_plan(
     # Preserve the three distinct compression-risk representatives first.  On
     # very small K this intentionally outweighs the approximate 50/50 split.
     representatives = (
-        ("si", "highest_si", 0.25),
-        ("ti", "highest_ti", 0.75),
-        ("difficulty", "global_hardest", 0.50),
+        ("si", "highest_spatial_risk", 0.25),
+        ("ti", "highest_motion_risk", 0.75),
+        ("difficulty", "global_compression_risk", 0.50),
     )
     for key, reason, anchor_fraction in representatives:
         candidate = _project_window(
@@ -512,9 +629,39 @@ def build_sample_plan(
             duration_sec=duration_sec,
             sample_duration_sec=settings.sample_duration_sec,
             kind="search",
-            reasons=(reason,),
+            reasons=(
+                reason,
+                {
+                    "highest_spatial_risk": "highest_si",
+                    "highest_motion_risk": "highest_ti",
+                    "global_compression_risk": "global_hardest",
+                }[reason],
+            ),
         )
         add_search(candidate)
+
+    transition_candidates = sorted(
+        ranked,
+        key=lambda item: (
+            -item.risk.transition,
+            -item.observation.max_scene_score,
+            item.observation.window.start_sec,
+        ),
+    )
+    if transition_candidates and (
+        transition_candidates[0].observation.max_scene_score >= 10.0
+        or transition_candidates[0].observation.scene_cut_times
+    ):
+        add_search(
+            _project_window(
+                transition_candidates[0],
+                duration_sec=duration_sec,
+                sample_duration_sec=settings.sample_duration_sec,
+                kind="search",
+                reasons=("transition_risk",),
+            ),
+            allow_merge=True,
+        )
 
     coverage_slots = target // 2
     for candidates, reason, midpoint in _coverage_candidates(
@@ -579,11 +726,32 @@ def build_sample_plan(
             "Unable to select the requested number of independent holdout windows."
         )
     holdouts.sort(key=lambda window: (window.start_sec, window.id))
+    reserve_seed = _select_holdouts(
+        ranked,
+        [*search, *holdouts],
+        duration_sec=duration_sec,
+        sample_duration_sec=settings.sample_duration_sec,
+        count=expected_reserves,
+    )
+    reserves = [
+        replace(
+            window,
+            id=window.id.replace("holdout:", "reserve:", 1),
+            reasons=("reserve_risk_and_timeline_diversity",),
+        )
+        for window in reserve_seed
+    ]
+    if len(reserves) != expected_reserves:
+        raise SamplePlanningError("Unable to reserve fresh independent validation windows.")
+    reserves.sort(key=lambda window: (window.start_sec, window.id))
     return SamplePlan(
         scout_windows=tuple(item.observation.window for item in ranked),
         search_windows=tuple(search),
         holdout_windows=tuple(holdouts),
         whole_video=False,
+        reserve_windows=tuple(reserves),
+        content_uncertainty=uncertainty,
+        content_heterogeneity=heterogeneity,
     )
 
 
@@ -608,6 +776,12 @@ def align_window_to_scene_cuts(
             if math.isfinite(float(cut)) and _EPSILON < float(cut) < source_duration_sec - _EPSILON
         }
     )
+    if "transition_risk" in window.reasons:
+        crosses = any(
+            window.start_sec + _EPSILON < cut < window.start_sec + window.duration_sec - _EPSILON
+            for cut in cuts
+        )
+        return replace(window, crosses_scene_cut=crosses)
     end = window.start_sec + window.duration_sec
     if not any(window.start_sec + _EPSILON < cut < end - _EPSILON for cut in cuts):
         return replace(window, crosses_scene_cut=False)

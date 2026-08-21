@@ -19,6 +19,7 @@ from core.models import (
     SizeBlockedPolicy,
     SkippedOutputPolicy,
     AnalysisProfileName,
+    VmafViewingContext,
 )
 
 
@@ -56,6 +57,7 @@ def encode_options_to_preset_data(options: EncodeOptions) -> dict[str, Any]:
         "parallel_backends": [backend.value for backend in options.parallel_backends],
         "ratio": options.ratio,
         "min_vmaf": options.min_vmaf,
+        "viewing_context": options.viewing_context.value,
         "max_output_ratio": options.max_output_ratio,
         "min_video_kbps": options.min_video_kbps,
         "max_video_kbps": options.max_video_kbps,
@@ -87,6 +89,8 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
         data["compression_mode"] = CompressionMode.FIXED_BITRATE.value
     if "min_vmaf" not in data:
         data["min_vmaf"] = 90.0
+    if "viewing_context" not in data:
+        data["viewing_context"] = VmafViewingContext.HIGH_FIDELITY.value
     if "max_output_ratio" not in data:
         data["max_output_ratio"] = None
 
@@ -97,6 +101,7 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
         "decode_acceleration",
         "ratio",
         "min_vmaf",
+        "viewing_context",
         "max_output_ratio",
         "min_video_kbps",
         "max_video_kbps",
@@ -120,6 +125,7 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
     CompressionMode(data["compression_mode"])
     BackendChoice(data["backend"])
     DecodeAcceleration(data["decode_acceleration"])
+    VmafViewingContext(data["viewing_context"])
     for backend in data["parallel_backends"]:
         BackendChoice(backend)
     ContainerChoice(data["container"])
@@ -146,6 +152,7 @@ def preset_data_to_encode_options(data: dict[str, Any]) -> EncodeOptions:
         parallel_backends=tuple(BackendChoice(item) for item in data.get("parallel_backends", [])),
         ratio=None if data["ratio"] is None else float(data["ratio"]),
         min_vmaf=float(data["min_vmaf"]),
+        viewing_context=VmafViewingContext(data["viewing_context"]),
         max_output_ratio=None if data["max_output_ratio"] is None else float(data["max_output_ratio"]),
         min_video_kbps=int(data["min_video_kbps"]),
         max_video_kbps=int(data["max_video_kbps"]),

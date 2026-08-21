@@ -28,13 +28,17 @@ from .vmaf import (
     VMAF_SCALE_FLAGS,
     candidate_encode_metadata,
     select_vmaf_model,
+    TEMPORAL_DROP_TOLERANCE,
 )
+from .size_prediction import SIZE_PREDICTION_VERSION
 
 
 # These version values are part of the persisted receipt identity.  Keep them
 # stable for behavior-preserving refactors.
-SMART_SAMPLE_SCHEME_VERSION = 5
-SMART_ANALYSIS_ALGORITHM_VERSION = 7
+SMART_SAMPLE_SCHEME_VERSION = 6
+SMART_ANALYSIS_ALGORITHM_VERSION = 8
+SMART_RISK_VECTOR_VERSION = 2
+SMART_ADAPTIVE_PLANNER_VERSION = 2
 
 
 class _SampleWindow(Protocol):
@@ -66,7 +70,7 @@ def measurement_configuration_payload(
         raise ValueError("Smart analysis requires probed media.")
     options = item.options
     media = item.media_info
-    model_spec = select_vmaf_model(media)
+    model_spec = select_vmaf_model(media, options.viewing_context)
     encode_metadata = candidate_encode_metadata(media, options.pix_fmt)
     return {
         "source": path_identity(item.source_path),
@@ -91,6 +95,11 @@ def measurement_configuration_payload(
         "sample_count_over_180m": options.analysis_settings.sample_count_over_180m,
         "holdout_window_count": options.analysis_settings.holdout_window_count,
         "holdout_window_count_over_180m": options.analysis_settings.holdout_window_count_over_180m,
+        "search_min_windows": options.analysis_settings.search_min_windows,
+        "search_max_windows": options.analysis_settings.search_max_windows,
+        "holdout_target_min": options.analysis_settings.holdout_target_min,
+        "holdout_target_max": options.analysis_settings.holdout_target_max,
+        "reserve_window_count": options.analysis_settings.reserve_window_count,
         "max_refinement_rounds": options.analysis_settings.max_refinement_rounds,
         "source_width": media.width,
         "source_height": media.height,
@@ -102,7 +111,12 @@ def measurement_configuration_payload(
         "candidate_encode_bit_depth": encode_metadata.bit_depth,
         "vmaf_generation": VMAF_MODEL_GENERATION,
         "vmaf_resolution_mode": VMAF_RESOLUTION_MODE,
-        "vmaf_pooling": "lowest_sampled_window_mean",
+        "viewing_context": options.viewing_context.value,
+        "vmaf_pooling": "smart_v2_temporal_mean_worst_1s_v1",
+        "temporal_drop_tolerance": TEMPORAL_DROP_TOLERANCE,
+        "risk_vector_version": SMART_RISK_VECTOR_VERSION,
+        "adaptive_planner_version": SMART_ADAPTIVE_PLANNER_VERSION,
+        "size_prediction_version": SIZE_PREDICTION_VERSION,
         "vmaf_model": model_spec.name,
         "vmaf_hfr": model_spec.hfr,
         "vmaf_display_width": model_spec.display_width,
@@ -183,6 +197,13 @@ def analysis_receipt(
     vmaf_backend: VmafBackend,
     vmaf_subsample: int,
     search_fingerprint: str,
+    reserve_windows: list[PlannedWindow] | None = None,
+    content_uncertainty: float = 0.0,
+    content_heterogeneity: float = 0.0,
+    independent_final_holdout: bool = False,
+    adaptive_expansion_events: list[dict[str, object]] | None = None,
+    rd_ambiguity_events: list[dict[str, object]] | None = None,
+    size_calibration_windows: list[dict[str, object]] | None = None,
 ) -> AnalysisReceipt:
     if item.encoder_info is None:
         raise ValueError("Smart analysis receipt requires a bound encoder.")
@@ -205,6 +226,7 @@ def analysis_receipt(
         scout_windows=ranked_scout_payloads(scout_observations) if scout_observations else [],
         search_windows=[planned_window_payload(value) for value in search_windows],
         holdout_windows=[planned_window_payload(value) for value in holdout_windows],
+        reserve_windows=[planned_window_payload(value) for value in (reserve_windows or [])],
         refinement_rounds=refinement_rounds,
         search_min_vmaf=search_min_vmaf,
         holdout_min_vmaf=holdout_min_vmaf,
@@ -212,4 +234,12 @@ def analysis_receipt(
         measurement_configuration={key: value for key, value in payload.items() if key not in {"source", "ffmpeg"}},
         candidates=candidates,
         created_at=datetime.now(timezone.utc).isoformat(),
+        content_uncertainty=content_uncertainty,
+        content_heterogeneity=content_heterogeneity,
+        adaptive_expansion_events=adaptive_expansion_events or [],
+        rd_ambiguity_events=rd_ambiguity_events or [],
+        size_calibration_windows=size_calibration_windows or [],
+        viewing_context=item.options.viewing_context.value,
+        selected_vmaf_model=str(payload["vmaf_model"]),
+        independent_final_holdout=independent_final_holdout,
     )

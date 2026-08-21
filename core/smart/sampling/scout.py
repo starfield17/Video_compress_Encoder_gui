@@ -84,6 +84,10 @@ def discover_sample_plan(
                 ti_p90=metrics.ti_p90,
                 scene_cut_times=tuple(scout.start_sec + value for value in metrics.scene_cut_times),
                 max_scene_score=metrics.max_scene_score,
+                dark=max(0.0, min(1.0, (64.0 - metrics.luma_mean) / 64.0)),
+                flat_or_gradient=max(0.0, 1.0 - min(1.0, metrics.si_p90 / 100.0)),
+                high_frequency_or_noise=min(1.0, metrics.si_p90 / 100.0)
+                * max(0.0, 1.0 - min(1.0, metrics.ti_p90 / 50.0)),
             )
         )
     progress("scout_finished", {"scout_count": len(observations)})
@@ -93,6 +97,7 @@ def discover_sample_plan(
         {
             "search_window_count": len(plan.search_windows),
             "holdout_window_count": len(plan.holdout_windows),
+            "reserve_window_count": len(plan.reserve_windows),
         },
     )
     return SamplingResult(
@@ -122,7 +127,7 @@ def _align_plan(
     if plan.whole_video:
         return plan
     aligned: list[PlannedWindow] = []
-    all_windows = [*plan.search_windows, *plan.holdout_windows]
+    all_windows = [*plan.search_windows, *plan.holdout_windows, *plan.reserve_windows]
     for index, window in enumerate(all_windows):
         progress(
             "boundary_alignment",
@@ -156,8 +161,10 @@ def _align_plan(
         )
         aligned.append(replace(window, crosses_scene_cut=True) if overlaps else candidate)
     search_count = len(plan.search_windows)
+    holdout_count = len(plan.holdout_windows)
     return replace(
         plan,
         search_windows=tuple(aligned[:search_count]),
-        holdout_windows=tuple(aligned[search_count:]),
+        holdout_windows=tuple(aligned[search_count : search_count + holdout_count]),
+        reserve_windows=tuple(aligned[search_count + holdout_count :]),
     )

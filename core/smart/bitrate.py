@@ -15,6 +15,7 @@ from core.models import (
     QualitySearchResult,
     QualitySearchStatus,
 )
+from .size_prediction import predict_size_distribution
 
 
 DEFAULT_MAX_OUTPUT_RATIO = {
@@ -113,6 +114,7 @@ def search_bitrate_candidates(
     max_output_bytes: int | None = None,
     initial_candidates: list[QualityCandidateResult] | None = None,
     tolerance_bps: int | None = None,
+    preferred_first_bitrate_bps: int | None = None,
 ) -> tuple[list[QualityCandidateResult], int | None, int | None]:
     """Return tested candidates, a selectable bitrate, and required bitrate."""
     cache: dict[int, QualityCandidateResult] = {
@@ -154,6 +156,18 @@ def search_bitrate_candidates(
 
     budget = _floor_candidate(budget_bitrate_bps)
     minimum = _ceil_candidate(min_bitrate_bps)
+    if preferred_first_bitrate_bps is not None:
+        predicted = min(
+            _floor_candidate(max(minimum, preferred_first_bitrate_bps)),
+            _floor_candidate(max(required_search_ceiling_bps, budget)),
+        )
+        predicted_score = test(predicted)
+        if predicted_score is not None and quality_passes(predicted_score):
+            if predicted_score.min_vmaf >= min_vmaf + 0.8 and evaluated < candidate_limit:
+                nearby = max(minimum, predicted - max(stop_delta, (predicted - minimum) // 3))
+                test(nearby)
+            selected, required = summarize(allow_selected=True)
+            return list(cache.values()), selected, required
     upper_score = test(budget)
     if upper_score is None:
         return list(cache.values()), None, None
@@ -201,6 +215,25 @@ def search_bitrate_candidates(
     return list(cache.values()), selected, required
 
 
+def rd_ambiguity_events(
+    candidates: list[QualityCandidateResult], *, tolerance: float = 0.5
+) -> list[dict[str, object]]:
+    ordered = sorted(candidates, key=lambda candidate: candidate.video_bitrate_bps)
+    events: list[dict[str, object]] = []
+    for lower, higher in zip(ordered, ordered[1:]):
+        if higher.min_vmaf < lower.min_vmaf - tolerance:
+            events.append(
+                {
+                    "lower_bitrate_bps": lower.video_bitrate_bps,
+                    "lower_quality_score": lower.min_vmaf,
+                    "higher_bitrate_bps": higher.video_bitrate_bps,
+                    "higher_quality_score": higher.min_vmaf,
+                    "tolerance": tolerance,
+                }
+            )
+    return events
+
+
 def refresh_candidate_predictions(
     candidates: list[QualityCandidateResult],
     budget: SmartBitrateBudget,
@@ -208,24 +241,55 @@ def refresh_candidate_predictions(
 ) -> list[QualityCandidateResult]:
     refreshed: list[QualityCandidateResult] = []
     for candidate in candidates:
-        observed_bitrate = candidate.observed_video_bitrate_bps
-        if observed_bitrate <= 0 and candidate.encoded_bytes and candidate.encoded_durations_sec:
+        if candidate.size_prediction is not None:
+            prior = candidate.size_prediction
+            predicted_bytes = predicted_output_size(
+                prior.upper_video_bitrate_bps,
+                budget.audio_bitrate_bps,
+                duration_sec,
+            )
+            prediction = replace(
+                prior,
+                predicted_output_bytes=predicted_bytes,
+                predicted_output_ratio=(predicted_bytes / budget.source_bytes if budget.source_bytes else None),
+            )
+            refreshed.append(
+                replace(
+                    candidate,
+                    observed_video_bitrate_bps=prediction.mean_video_bitrate_bps,
+                    predicted_output_bytes=prediction.predicted_output_bytes,
+                    predicted_output_ratio=prediction.predicted_output_ratio,
+                    size_prediction=prediction,
+                )
+            )
+            continue
+        measured_bitrates = list(candidate.observed_window_bitrates)
+        if not measured_bitrates and candidate.encoded_bytes and candidate.encoded_durations_sec:
             measured_bitrates = [
                 int(math.ceil(encoded_bytes * 8.0 / duration))
                 for encoded_bytes, duration in zip(candidate.encoded_bytes, candidate.encoded_durations_sec)
                 if duration > 0
             ]
-            if measured_bitrates:
-                observed_bitrate = max(measured_bitrates)
-        if observed_bitrate <= 0:
-            observed_bitrate = candidate.video_bitrate_bps
-        predicted_bytes = predicted_output_size(observed_bitrate, budget.audio_bitrate_bps, duration_sec)
+        if not measured_bitrates and candidate.observed_video_bitrate_bps > 0:
+            measured_bitrates = [candidate.observed_video_bitrate_bps]
+        if not measured_bitrates and candidate.predicted_output_bytes is not None:
+            refreshed.append(candidate)
+            continue
+        prediction = predict_size_distribution(
+            requested_bitrate_bps=candidate.video_bitrate_bps,
+            observed_window_bitrates=measured_bitrates,
+            duration_sec=duration_sec,
+            audio_bitrate_bps=budget.audio_bitrate_bps,
+            source_bytes=budget.source_bytes,
+        )
         refreshed.append(
             replace(
                 candidate,
-                observed_video_bitrate_bps=observed_bitrate,
-                predicted_output_bytes=predicted_bytes,
-                predicted_output_ratio=(predicted_bytes / budget.source_bytes if budget.source_bytes else None),
+                observed_window_bitrates=measured_bitrates,
+                observed_video_bitrate_bps=prediction.mean_video_bitrate_bps,
+                predicted_output_bytes=prediction.predicted_output_bytes,
+                predicted_output_ratio=prediction.predicted_output_ratio,
+                size_prediction=prediction,
             )
         )
     return refreshed

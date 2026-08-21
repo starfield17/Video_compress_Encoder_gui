@@ -9,6 +9,7 @@ from core.smart.sampling.planner import (
     ScoutObservation,
     align_window_to_scene_cuts,
     build_sample_plan,
+    content_statistics,
     holdout_window_count,
     plan_scout_windows,
     rank_scout_observations,
@@ -67,14 +68,16 @@ class SamplePlannerTest(unittest.TestCase):
         )
         self.assertEqual((tied[0].si_rank, tied[1].si_rank), (0.5, 0.5))
         plan = build_sample_plan(2 * 60 * 60, settings, observations)
-        self.assertEqual(len(plan.search_windows), 6)
+        self.assertGreaterEqual(len(plan.search_windows), settings.search_min_windows)
+        self.assertLessEqual(len(plan.search_windows), settings.search_max_windows)
         self.assertEqual(len(plan.holdout_windows), 2)
+        self.assertEqual(len(plan.reserve_windows), settings.reserve_window_count)
         reasons = {reason for window in plan.search_windows for reason in window.reasons}
         self.assertIn("highest_si", reasons)
         self.assertIn("highest_ti", reasons)
         self.assertIn("global_hardest", reasons)
         self.assertTrue(any(reason.startswith("coverage_bin_") for reason in reasons))
-        all_windows = (*plan.search_windows, *plan.holdout_windows)
+        all_windows = (*plan.search_windows, *plan.holdout_windows, *plan.reserve_windows)
         self.assertEqual(len({window.id for window in all_windows}), len(all_windows))
         for left, right in zip(sorted(all_windows, key=lambda item: item.start_sec), sorted(all_windows, key=lambda item: item.start_sec)[1:]):
             self.assertLessEqual(left.start_sec + left.duration_sec, right.start_sec)
@@ -121,10 +124,7 @@ class SamplePlannerTest(unittest.TestCase):
                     for window in plan_scout_windows(duration, settings)
                 )
                 plan = build_sample_plan(duration, settings, observations)
-                self.assertEqual(
-                    len(plan.search_windows),
-                    search_window_count(duration, settings),
-                )
+                self.assertEqual(len(plan.search_windows), settings.search_min_windows)
                 self.assertEqual(
                     len(plan.holdout_windows), settings.holdout_window_count
                 )
@@ -136,12 +136,73 @@ class SamplePlannerTest(unittest.TestCase):
                     max(window.center_sec for window in plan.search_windows),
                     duration * 0.6,
                 )
-                all_windows = (*plan.search_windows, *plan.holdout_windows)
+                all_windows = (*plan.search_windows, *plan.holdout_windows, *plan.reserve_windows)
                 ordered = sorted(all_windows, key=lambda item: item.start_sec)
                 for left, right in zip(ordered, ordered[1:]):
                     self.assertLessEqual(
                         left.start_sec + left.duration_sec, right.start_sec
                     )
+
+    def test_absolute_risk_changes_uncertainty_with_identical_ranks(self) -> None:
+        settings = FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.BALANCE]
+        windows = plan_scout_windows(600.0, settings)
+        easy = tuple(
+            ScoutObservation(window, si_p90=2.0 + index / 100, ti_p90=1.0 + index / 100)
+            for index, window in enumerate(windows)
+        )
+        hard = tuple(
+            ScoutObservation(window, si_p90=80.0 + index, ti_p90=35.0 + index)
+            for index, window in enumerate(windows)
+        )
+        easy_uncertainty, _ = content_statistics(easy)
+        hard_uncertainty, _ = content_statistics(hard)
+        self.assertGreater(hard_uncertainty, easy_uncertainty)
+
+    def test_transition_risk_is_selected_and_not_aligned_away(self) -> None:
+        settings = FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.BALANCE]
+        windows = plan_scout_windows(600.0, settings)
+        observations = tuple(
+            ScoutObservation(
+                window,
+                si_p90=10.0,
+                ti_p90=5.0,
+                scene_cut_times=(window.center_sec,) if index == len(windows) // 2 else (),
+                max_scene_score=80.0 if index == len(windows) // 2 else 0.0,
+            )
+            for index, window in enumerate(windows)
+        )
+        plan = build_sample_plan(600.0, settings, observations)
+        transition = next(
+            window for window in plan.search_windows if "transition_risk" in window.reasons
+        )
+        cut = next(item for item in observations if item.window.id == transition.scout_id).scene_cut_times[0]
+        aligned = align_window_to_scene_cuts(transition, (cut,), 600.0)
+        self.assertEqual(aligned.start_sec, transition.start_sec)
+        self.assertTrue(aligned.crosses_scene_cut)
+
+    def test_adaptive_workload_expands_for_heterogeneous_content(self) -> None:
+        settings = FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.BALANCE]
+        windows = plan_scout_windows(3 * 60 * 60, settings)
+        simple = tuple(
+            ScoutObservation(window, si_p90=3.0, ti_p90=1.0)
+            for window in windows
+        )
+        varied = tuple(
+            ScoutObservation(
+                window,
+                si_p90=5.0 if index % 2 == 0 else 120.0,
+                ti_p90=2.0 if index % 3 == 0 else 70.0,
+                scene_cut_times=(window.center_sec,),
+                max_scene_score=90.0 if index % 4 == 0 else 15.0,
+                dark=1.0 if index % 5 == 0 else 0.0,
+            )
+            for index, window in enumerate(windows)
+        )
+        simple_plan = build_sample_plan(3 * 60 * 60, settings, simple)
+        varied_plan = build_sample_plan(3 * 60 * 60, settings, varied)
+        self.assertEqual(len(simple_plan.search_windows), settings.search_min_windows + 1)
+        self.assertGreater(len(varied_plan.search_windows), len(simple_plan.search_windows))
+        self.assertLessEqual(len(varied_plan.search_windows), settings.search_max_windows)
 
     def test_scene_alignment_avoids_cut_when_a_shot_can_fit(self) -> None:
         window = PlannedWindow("search:1", 8.0, 5.0, ("coverage",))

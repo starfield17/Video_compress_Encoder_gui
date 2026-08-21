@@ -20,13 +20,14 @@ from core.models import (
 )
 from core.ffmpeg.subprocess import hidden_popen_kwargs
 
-from .bitrate import predicted_output_size
 from .runtime import SOURCE_DECODE_SOFTWARE, AnalysisExecutionPlan, AnalysisTier, source_decode_args
+from .size_prediction import predict_size_distribution
 from .vmaf import (
     EXACT_VMAF_SUBSAMPLE,
     PTS_RESET_FILTER,
     VmafEncodeMetadata,
     VmafModelSpec,
+    VmafWindowScore,
     build_cpu_vmaf_command,
     build_cpu_vmaf_filter_graph,
     build_cuda_vmaf_command,
@@ -226,24 +227,73 @@ def vmaf_command(
 
 
 def candidate_result(
-    item: EncodePlanItem, bitrate_bps: int, scores: list[float], encoded_bytes: list[int],
+    item: EncodePlanItem, bitrate_bps: int, scores: list[VmafWindowScore], encoded_bytes: list[int],
     encoded_durations_sec: list[float], audio_bitrate_bps: int, source_bytes: int | None,
 ) -> QualityCandidateResult:
-    observed_video_bitrate_bps = max(
+    observed_window_bitrates = [
         int(math.ceil(encoded_size * 8.0 / duration))
         for encoded_size, duration in zip(encoded_bytes, encoded_durations_sec)
+    ]
+    prediction = predict_size_distribution(
+        requested_bitrate_bps=bitrate_bps,
+        observed_window_bitrates=observed_window_bitrates,
+        duration_sec=item.media_info.duration if item.media_info is not None else 0.0,
+        audio_bitrate_bps=audio_bitrate_bps,
+        source_bytes=source_bytes,
     )
-    predicted_bytes = predicted_output_size(
-        observed_video_bitrate_bps, audio_bitrate_bps,
-        item.media_info.duration if item.media_info is not None else 0.0,
-    )
-    predicted_ratio = predicted_bytes / source_bytes if source_bytes is not None and source_bytes > 0 else None
     return QualityCandidateResult(
-        video_bitrate_bps=bitrate_bps, segment_vmaf=scores, min_vmaf=min(scores),
+        video_bitrate_bps=bitrate_bps,
+        segment_vmaf=[score.gate_score for score in scores],
+        min_vmaf=min(score.gate_score for score in scores),
         encoded_bytes=encoded_bytes, encoded_durations_sec=encoded_durations_sec,
-        observed_video_bitrate_bps=observed_video_bitrate_bps,
-        predicted_output_bytes=predicted_bytes, predicted_output_ratio=predicted_ratio,
+        observed_window_bitrates=observed_window_bitrates,
+        observed_video_bitrate_bps=prediction.mean_video_bitrate_bps,
+        predicted_output_bytes=prediction.predicted_output_bytes,
+        predicted_output_ratio=prediction.predicted_output_ratio,
+        size_prediction=prediction,
+        segment_mean_vmaf=[score.mean for score in scores],
+        segment_p10_vmaf=[score.p10 for score in scores],
+        segment_worst_1s_vmaf=[score.worst_1s for score in scores],
+        segment_quality_scores=[score.gate_score for score in scores],
     )
+
+
+def measure_size_only(
+    ffmpeg_path: Path,
+    item: EncodePlanItem,
+    windows: list[SampleWindow],
+    bitrate_bps: int,
+    temp_root: Path,
+    log_file: TextIO,
+    plan: AnalysisExecutionPlan,
+    *,
+    cancel_check: Callable[[], bool] | None,
+    process_callback: Callable[[subprocess.Popen[str] | None], None] | None,
+) -> list[int]:
+    """Encode representative windows without VMAF for borderline size calibration."""
+
+    candidate_item = bind_candidate_item(item, bitrate_bps, plan)
+    video_args = build_video_args(candidate_item, extra_args=plan.encoder_extra_args)
+    measured: list[int] = []
+    for index, window in enumerate(windows):
+        output_path = temp_root / f"size-calibration-{bitrate_bps}-{index}.mkv"
+        command = [
+            str(ffmpeg_path), "-hide_banner", "-loglevel", "error", "-y",
+            *source_decode_args(plan.source_decode_acceleration),
+            "-ss", f"{window.start_sec:.3f}", "-t", f"{window.duration_sec:.3f}",
+            "-i", str(item.source_path), "-map", "0:v:0", "-an", "-sn", "-dn",
+            *video_args, str(output_path),
+        ]
+        run_logged(
+            command,
+            log_file,
+            cancel_check=cancel_check,
+            process_callback=process_callback,
+            phase="representative size calibration",
+        )
+        encoded_size = output_path.stat().st_size
+        measured.append(int(math.ceil(encoded_size * 8.0 / window.duration_sec)))
+    return measured
 
 
 def score_candidate_loopback(
@@ -257,10 +307,10 @@ def score_candidate_loopback(
     candidate_item = bind_candidate_item(item, bitrate_bps, plan)
     if item.media_info is None:
         raise ValueError("Smart analysis requires probed media.")
-    model_spec = select_vmaf_model(item.media_info)
+    model_spec = select_vmaf_model(item.media_info, item.options.viewing_context)
     encode_metadata = candidate_encode_metadata(item.media_info, item.options.pix_fmt)
     order = window_order or list(range(len(windows)))
-    scores: dict[int, float] = {}
+    scores: dict[int, VmafWindowScore] = {}
     encoded_bytes: dict[int, int] = {}
     encoded_durations: dict[int, float] = {}
     for window_index in order:
@@ -283,12 +333,12 @@ def score_candidate_loopback(
             raise RuntimeError(f"Smart loopback encode did not produce its sample output: {candidate_path}") from exc
         if window.duration_sec <= 0:
             raise RuntimeError(f"Smart candidate encode produced an invalid sample duration: {window.duration_sec}")
-        score = parse_vmaf_json(json_path, model_spec)
+        score = parse_vmaf_json(json_path, model_spec, fps=item.media_info.fps)
         scores[window_index] = score
         encoded_bytes[window_index] = encoded_size
         encoded_durations[window_index] = float(window.duration_sec)
-        if min_vmaf_target is not None and score < min_vmaf_target:
-            log_timing(log_file, f"{plan.tier.value} candidate {bitrate_bps}: window {window_index + 1} VMAF={score:.3f} early rejected")
+        if min_vmaf_target is not None and score.gate_score < min_vmaf_target:
+            log_timing(log_file, f"{plan.tier.value} candidate {bitrate_bps}: window {window_index + 1} quality_score={score.gate_score:.3f} early rejected")
             break
     measured = sorted(scores)
     return candidate_result(
@@ -317,13 +367,13 @@ def score_candidate(
             vmaf_backend=VmafBackend.CPU, vmaf_threads=1, vmaf_subsample=EXACT_VMAF_SUBSAMPLE,
             use_loopback=False,
         )
-    scores: dict[int, float] = {}
+    scores: dict[int, VmafWindowScore] = {}
     encoded_bytes: dict[int, int] = {}
     encoded_durations: dict[int, float] = {}
     candidate_item = bind_candidate_item(item, bitrate_bps, plan)
     if item.media_info is None:
         raise ValueError("Smart analysis requires probed media.")
-    model_spec = select_vmaf_model(item.media_info)
+    model_spec = select_vmaf_model(item.media_info, item.options.viewing_context)
     encode_metadata = candidate_encode_metadata(item.media_info, item.options.pix_fmt)
     order = window_order or list(range(len(references)))
     for window_index in order:
@@ -366,13 +416,13 @@ def score_candidate(
             cwd=temp_root, phase="VMAF scoring",
         )
         vmaf_elapsed = time.perf_counter() - vmaf_started
-        score = parse_vmaf_json(json_path, model_spec)
+        score = parse_vmaf_json(json_path, model_spec, fps=item.media_info.fps)
         scores[window_index] = score
         encoded_bytes[window_index] = encoded_size
         encoded_durations[window_index] = float(duration)
-        log_timing(log_file, f"{plan.tier.value} candidate {bitrate_bps} window {window_index + 1}: encode={encode_elapsed:.2f}s vmaf={vmaf_elapsed:.2f}s VMAF={score:.3f}")
-        if min_vmaf_target is not None and score < min_vmaf_target:
-            log_timing(log_file, f"{plan.tier.value} candidate {bitrate_bps}: window {window_index + 1} VMAF={score:.3f} early rejected")
+        log_timing(log_file, f"{plan.tier.value} candidate {bitrate_bps} window {window_index + 1}: encode={encode_elapsed:.2f}s vmaf={vmaf_elapsed:.2f}s quality_score={score.gate_score:.3f}")
+        if min_vmaf_target is not None and score.gate_score < min_vmaf_target:
+            log_timing(log_file, f"{plan.tier.value} candidate {bitrate_bps}: window {window_index + 1} quality_score={score.gate_score:.3f} early rejected")
             break
     measured = sorted(scores)
     return candidate_result(

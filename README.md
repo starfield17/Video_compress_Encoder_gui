@@ -200,7 +200,7 @@ The GUI now includes:
 - preset load/save/delete controls
 - plan summary, preview summary, and encode result summary panels
 - a detailed plan/result table with resolution, duration, bitrate, note, and status columns
-- smart-analysis stages, selected bitrate, lowest sampled-window mean VMAF, and predicted size
+- smart-analysis stages, selected bitrate, SMART temporal quality score, and predicted size
 - language switching across English, Simplified Chinese, and any user-provided language packs
 
 ### Translations / language packs

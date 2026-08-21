@@ -27,6 +27,11 @@ FACTORY_ANALYSIS_PROFILES: dict[AnalysisProfileName, AnalysisProfileSettings] = 
         search_tolerance_ratio=0.06,
         max_refinement_rounds=1,
         preferred_vmaf_margin=0.2,
+        search_min_windows=2,
+        search_max_windows=4,
+        holdout_target_min=1,
+        holdout_target_max=1,
+        reserve_window_count=1,
     ),
     AnalysisProfileName.BALANCE: AnalysisProfileSettings(),
     AnalysisProfileName.PRECISE: AnalysisProfileSettings(
@@ -49,6 +54,11 @@ FACTORY_ANALYSIS_PROFILES: dict[AnalysisProfileName, AnalysisProfileSettings] = 
         search_tolerance_ratio=0.015,
         max_refinement_rounds=2,
         preferred_vmaf_margin=0.5,
+        search_min_windows=4,
+        search_max_windows=10,
+        holdout_target_min=2,
+        holdout_target_max=4,
+        reserve_window_count=4,
     ),
 }
 
@@ -97,6 +107,12 @@ def validate_analysis_settings(settings: AnalysisProfileSettings) -> AnalysisPro
         search_tolerance_ratio=min(0.25, max(0.005, float(settings.search_tolerance_ratio))),
         max_refinement_rounds=min(4, max(0, int(settings.max_refinement_rounds))),
         preferred_vmaf_margin=min(5.0, max(0.0, float(settings.preferred_vmaf_margin))),
+        search_min_windows=min(16, max(1, int(settings.search_min_windows))),
+        search_max_windows=min(16, max(int(settings.search_min_windows), int(settings.search_max_windows))),
+        holdout_target_min=min(8, max(0, int(settings.holdout_target_min))),
+        holdout_target_max=min(8, max(int(settings.holdout_target_min), int(settings.holdout_target_max))),
+        reserve_window_count=min(8, max(0, int(settings.reserve_window_count))),
+        quality_confidence_band=min(2.0, max(0.1, float(settings.quality_confidence_band))),
     )
 
 

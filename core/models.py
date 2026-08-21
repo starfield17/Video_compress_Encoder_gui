@@ -60,6 +60,12 @@ class AnalysisProfileSettings:
     search_tolerance_ratio: float = 0.03
     max_refinement_rounds: int = 2
     preferred_vmaf_margin: float = 0.4
+    search_min_windows: int = 3
+    search_max_windows: int = 6
+    holdout_target_min: int = 1
+    holdout_target_max: int = 2
+    reserve_window_count: int = 2
+    quality_confidence_band: float = 0.7
 
 
 class BackendChoice(str, Enum):
@@ -94,6 +100,11 @@ class PreviewSampleMode(str, Enum):
 class VmafBackend(str, Enum):
     CPU = "cpu"
     CUDA = "cuda"
+
+
+class VmafViewingContext(str, Enum):
+    HIGH_FIDELITY = "high_fidelity"
+    STANDARD_DISPLAY = "standard_display"
 
 
 class OperationCancelledError(RuntimeError):
@@ -136,6 +147,7 @@ class EncodeOptions:
     # None means choose the default compression ratio for the selected codec.
     ratio: Optional[float] = None
     min_vmaf: float = 90.0
+    viewing_context: VmafViewingContext = VmafViewingContext.HIGH_FIDELITY
     # None means choose the smart output ratio for the selected codec.
     max_output_ratio: Optional[float] = None
     min_video_kbps: int = 250
@@ -295,6 +307,23 @@ class QualityCandidateResult:
     observed_video_bitrate_bps: int = 0
     predicted_output_bytes: Optional[int] = None
     predicted_output_ratio: Optional[float] = None
+    segment_mean_vmaf: list[float] = field(default_factory=list)
+    segment_p10_vmaf: list[float] = field(default_factory=list)
+    segment_worst_1s_vmaf: list[float] = field(default_factory=list)
+    segment_quality_scores: list[float] = field(default_factory=list)
+    observed_window_bitrates: list[int] = field(default_factory=list)
+    size_prediction: Optional["SizePrediction"] = None
+    rd_ambiguous: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SizePrediction:
+    mean_video_bitrate_bps: int
+    upper_video_bitrate_bps: int
+    predicted_output_bytes: int
+    predicted_output_ratio: Optional[float]
+    uncertainty: float
+    method: str
 
 
 @dataclass(slots=True)
@@ -342,6 +371,7 @@ class AnalysisReceipt:
     scout_windows: list[dict[str, object]] = field(default_factory=list)
     search_windows: list[dict[str, object]] = field(default_factory=list)
     holdout_windows: list[dict[str, object]] = field(default_factory=list)
+    reserve_windows: list[dict[str, object]] = field(default_factory=list)
     refinement_rounds: list[dict[str, object]] = field(default_factory=list)
     search_min_vmaf: Optional[float] = None
     holdout_min_vmaf: Optional[float] = None
@@ -349,6 +379,14 @@ class AnalysisReceipt:
     measurement_configuration: dict[str, object] = field(default_factory=dict)
     candidates: list[QualityCandidateResult] = field(default_factory=list)
     created_at: str = ""
+    content_uncertainty: float = 0.0
+    content_heterogeneity: float = 0.0
+    adaptive_expansion_events: list[dict[str, object]] = field(default_factory=list)
+    rd_ambiguity_events: list[dict[str, object]] = field(default_factory=list)
+    size_calibration_windows: list[dict[str, object]] = field(default_factory=list)
+    viewing_context: str = VmafViewingContext.HIGH_FIDELITY.value
+    selected_vmaf_model: str = ""
+    independent_final_holdout: bool = False
 
 
 @dataclass(slots=True)

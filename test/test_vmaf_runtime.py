@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from core.models import MediaInfo, VmafBackend
+from core.models import MediaInfo, VmafBackend, VmafViewingContext
 from core.ffmpeg.probe import probe_media_info
 from core.smart.vmaf import (
     COARSE_VMAF_SUBSAMPLE,
@@ -85,6 +85,20 @@ class VmafRuntimeTestCase(unittest.TestCase):
         self.assertEqual(select_vmaf_model(_media(width=2560, height=1440)), VMAF_STANDARD_MODEL)
         self.assertEqual(select_vmaf_model(_media(width=1080, height=1920)), VMAF_STANDARD_MODEL)
         self.assertEqual(select_vmaf_model(_media(fps=None)), VMAF_STANDARD_MODEL)
+        self.assertEqual(
+            select_vmaf_model(
+                _media(width=3840, height=2160, fps=30),
+                VmafViewingContext.STANDARD_DISPLAY,
+            ),
+            VMAF_STANDARD_MODEL,
+        )
+        self.assertEqual(
+            select_vmaf_model(
+                _media(width=3840, height=2160, fps=60),
+                VmafViewingContext.STANDARD_DISPLAY,
+            ),
+            VMAF_STANDARD_HFR_MODEL,
+        )
 
     def test_bit_depth_inference_is_conservative(self) -> None:
         for pix_fmt in ("yuv420p", "nv12"):
@@ -145,7 +159,7 @@ class VmafRuntimeTestCase(unittest.TestCase):
         )
         graph = command[command.index("-filter_complex") + 1]
         self.assertEqual(PTS_RESET_FILTER, "settb=AVTB,setpts=PTS-STARTPTS")
-        self.assertEqual(VMAF_MEASUREMENT_PIPELINE_VERSION, 2)
+        self.assertEqual(VMAF_MEASUREMENT_PIPELINE_VERSION, 3)
         self.assertEqual(command[command.index("-loglevel") + 1], "error")
         self.assertEqual(graph.count("trunc(iw*sar/2)*2"), 2)
         self.assertEqual(graph.count("scale=1920:1080"), 2)
@@ -184,13 +198,67 @@ class VmafRuntimeTestCase(unittest.TestCase):
             path = Path(temp_dir) / "vmaf.json"
             for value in (float("nan"), float("inf"), -0.1, 100.1):
                 path.write_text(
-                    json.dumps({"pooled_metrics": {"vmaf": {"mean": value}}}),
+                    json.dumps(
+                        {
+                            "pooled_metrics": {"vmaf": {"mean": value}},
+                            "frames": [{"frameNum": 0, "metrics": {"vmaf": value}}],
+                        }
+                    ),
                     encoding="utf-8",
                 )
                 with self.subTest(value=value), self.assertRaisesRegex(
                     RuntimeError, "invalid score"
                 ):
                     parse_vmaf_json(path, VMAF_STANDARD_MODEL)
+
+    def test_temporal_pooling_catches_one_second_collapse(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "vmaf.json"
+            frame_scores = [95.0] * 120 + [78.0] * 30
+            mean = sum(frame_scores) / len(frame_scores)
+            path.write_text(
+                json.dumps(
+                    {
+                        "pooled_metrics": {"vmaf": {"mean": mean}},
+                        "frames": [
+                            {"frameNum": index, "metrics": {"vmaf": score}}
+                            for index, score in enumerate(frame_scores)
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = parse_vmaf_json(path, VMAF_STANDARD_MODEL, fps=30.0)
+
+        self.assertGreater(result.mean, 90.0)
+        self.assertEqual(result.p10, 78.0)
+        self.assertEqual(result.worst_1s, 78.0)
+        self.assertEqual(result.gate_score, 82.0)
+
+    def test_temporal_pooling_does_not_use_single_frame_minimum(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "vmaf.json"
+            frame_scores = [95.0] * 150
+            frame_scores[75] = 78.0
+            mean = sum(frame_scores) / len(frame_scores)
+            path.write_text(
+                json.dumps(
+                    {
+                        "pooled_metrics": {"vmaf": {"mean": mean}},
+                        "frames": [
+                            {"frameNum": index, "metrics": {"vmaf": score}}
+                            for index, score in enumerate(frame_scores)
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = parse_vmaf_json(path, VMAF_STANDARD_MODEL, fps=30.0)
+
+        self.assertEqual(result.p10, 95.0)
+        self.assertGreater(result.worst_1s, 94.0)
+        self.assertGreater(result.gate_score, 94.0)
+        self.assertNotEqual(result.gate_score, 78.0)
 
     def test_even_subsample_cannot_be_rendered(self) -> None:
         with self.assertRaises(InvalidVmafSubsample):

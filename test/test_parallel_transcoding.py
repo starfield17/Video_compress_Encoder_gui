@@ -313,6 +313,25 @@ class ParallelGuiTestCase(unittest.TestCase):
         finally:
             window.close()
 
+    def test_parallel_controls_live_in_advanced_tab(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            panel = window.options_panel
+            controls = (
+                panel.parallel_check,
+                panel.parallel_backends_label,
+                panel.parallel_nvenc_check,
+                panel.parallel_qsv_check,
+                panel.parallel_amf_check,
+                panel.parallel_videotoolbox_check,
+                panel.parallel_cpu_check,
+            )
+            self.assertTrue(all(panel.advanced_tab.isAncestorOf(widget) for widget in controls))
+            self.assertTrue(all(not panel.basic_tab.isAncestorOf(widget) for widget in controls))
+            self.assertIn("multiple encoders", panel.advanced_info.text())
+        finally:
+            window.close()
+
     def test_gui_parallel_validation_rejects_invalid_combinations(self) -> None:
         window = MainWindow(self.repo_root, language="en")
         try:

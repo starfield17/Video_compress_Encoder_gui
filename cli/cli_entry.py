@@ -49,6 +49,7 @@ from core.models import (
     EncodeOptions,
     PreviewOptions,
     PreviewSampleMode,
+    VmafViewingContext,
 )
 from core.smart import (
     bind_analysis_profile,
@@ -103,6 +104,7 @@ def _merge_options(base: EncodeOptions, args: argparse.Namespace) -> EncodeOptio
         "decode_acceleration": lambda value: DecodeAcceleration(value),
         "ratio": float,
         "min_vmaf": float,
+        "viewing_context": lambda value: VmafViewingContext(value),
         "max_output_ratio": float,
         "min_video_kbps": int,
         "max_video_kbps": int,
@@ -241,6 +243,12 @@ def _add_encode_flags(parser: argparse.ArgumentParser) -> None:
         help="Smart VMAF scan profile: fast, balance, or precise",
     )
     parser.add_argument(
+        "--viewing-context",
+        dest="viewing_context",
+        choices=[context.value for context in VmafViewingContext],
+        help="Smart viewing scenario: high_fidelity (default) or standard_display",
+    )
+    parser.add_argument(
         "--max-output-ratio",
         dest="max_output_ratio",
         type=float,
@@ -309,8 +317,12 @@ def _validate_compression_options(options: EncodeOptions, args: argparse.Namespa
     if options.compression_mode == CompressionMode.FIXED_BITRATE and (
         getattr(args, "min_vmaf", None) is not None
         or getattr(args, "max_output_ratio", None) is not None
+        or getattr(args, "viewing_context", None) is not None
     ):
-        raise ValueError("--min-vmaf and --max-output-ratio require --compression-mode smart")
+        raise ValueError(
+            "--min-vmaf, --max-output-ratio, and --viewing-context require "
+            "--compression-mode smart"
+        )
 
 
 def _resolve_encoder_info(options: EncodeOptions, args: argparse.Namespace):

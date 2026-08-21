@@ -40,7 +40,9 @@ from core.models import (
     MediaInfo,
     QualityCandidateResult,
     QualitySearchStatus,
+    SizePrediction,
     VmafRuntimeSupport,
+    VmafViewingContext,
 )
 from core.smart_quality import (
     SMART_ANALYSIS_ALGORITHM_VERSION,
@@ -97,14 +99,31 @@ def _three_window_sampling() -> SamplingResult:
 
 def _sampling_with_holdout() -> SamplingResult:
     base = _three_window_sampling().plan
-    holdout = PlannedWindow(
-        id="holdout:test",
-        start_sec=55.0,
+    holdouts = (
+        PlannedWindow(
+            id=f"holdout:test-{index}",
+            start_sec=start,
+            duration_sec=5.0,
+            reasons=("test_holdout",),
+            scout_id=f"scout-holdout-{index}",
+        )
+        for index, start in enumerate((50.0, 55.0), 1)
+    )
+    reserve = PlannedWindow(
+        id="reserve:test",
+        start_sec=45.0,
         duration_sec=5.0,
-        reasons=("test_holdout",),
+        reasons=("test_reserve",),
+        scout_id="scout-reserve",
     )
     return SamplingResult(
-        SamplePlan(base.scout_windows, base.search_windows, (holdout,), False),
+        SamplePlan(
+            base.scout_windows,
+            base.search_windows,
+            tuple(holdouts),
+            False,
+            reserve_windows=(reserve,),
+        ),
         (),
     )
 
@@ -482,28 +501,39 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             cpu = measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CPU)
             cuda = measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CUDA)
             self.assertNotEqual(cpu, cuda)
-            self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 5)
-            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 7)
-            self.assertEqual(ANALYSIS_RECEIPT_SCHEMA_VERSION, 4)
+            standard_display = replace(
+                item,
+                options=replace(
+                    item.options,
+                    viewing_context=VmafViewingContext.STANDARD_DISPLAY,
+                ),
+            )
+            self.assertNotEqual(
+                measurement_configuration_fingerprint(ffmpeg, standard_display),
+                cpu,
+            )
+            self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 6)
+            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 8)
+            self.assertEqual(ANALYSIS_RECEIPT_SCHEMA_VERSION, 5)
             from core.smart_quality import measurement_configuration_payload
 
             payload = measurement_configuration_payload(ffmpeg, item, vmaf_backend=VmafBackend.CPU)
-            self.assertEqual(payload["sample_scheme_version"], 5)
+            self.assertEqual(payload["sample_scheme_version"], 6)
             self.assertEqual(payload["vmaf_subsample"], 1)
             self.assertEqual(payload["vmaf_backend"], "cpu")
-            self.assertEqual(payload["analysis_algorithm_version"], 7)
+            self.assertEqual(payload["analysis_algorithm_version"], 8)
             self.assertEqual(payload["vmaf_resolution_mode"], "display_model_canvas")
             self.assertEqual(payload["vmaf_generation"], "v1")
             self.assertEqual(payload["vmaf_model"], "vmaf_v1.0.16_3d0h")
             self.assertEqual(payload["vmaf_measurement_pix_fmt"], "yuv420p10le")
             self.assertEqual(payload["vmaf_measurement_bit_depth"], 10)
-            self.assertEqual(payload["vmaf_measurement_pipeline_version"], 2)
+            self.assertEqual(payload["vmaf_measurement_pipeline_version"], 3)
             self.assertEqual(payload["vmaf_scale_algorithm"], "bicubic")
             self.assertEqual(
                 payload["vmaf_aspect_policy"], "square_pixels_fit_and_even_pad"
             )
             self.assertEqual(payload["candidate_encode_bit_depth"], 8)
-            self.assertEqual(payload["vmaf_pooling"], "lowest_sampled_window_mean")
+            self.assertEqual(payload["vmaf_pooling"], "smart_v2_temporal_mean_worst_1s_v1")
             self.assertNotIn("n_threads", payload)
             self.assertNotIn("vmaf_threads", payload)
             assert item.media_info is not None
@@ -702,9 +732,14 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             receipt = load_analysis_receipt(root, result.measurement_fingerprint)
             self.assertIsNotNone(receipt)
             assert receipt is not None
-            self.assertEqual(len(receipt.search_windows), 4)
-            self.assertEqual(receipt.holdout_windows, [])
-            self.assertEqual(receipt.refinement_rounds[0]["promoted_window_ids"], ["holdout:test"])
+            self.assertEqual(len(receipt.search_windows), 5)
+            self.assertEqual(len(receipt.holdout_windows), 1)
+            self.assertIn("fresh_reserve_holdout", receipt.holdout_windows[0]["reasons"])
+            self.assertTrue(receipt.independent_final_holdout)
+            self.assertEqual(
+                receipt.refinement_rounds[0]["promoted_window_ids"],
+                ["holdout:test-1", "holdout:test-2"],
+            )
 
             changed_policy = replace(
                 item,
@@ -745,13 +780,65 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
 
             self.assertEqual(reused.status, QualitySearchStatus.FOUND)
             self.assertTrue(reference_counts)
-            self.assertEqual(set(reference_counts), {4})
-            self.assertFalse(
+            self.assertEqual(set(reference_counts), {1, 5})
+            self.assertTrue(
                 any(
                     event.get("state") == "holdout_verification"
                     for event in reused_progress
                 )
             )
+
+    def test_near_size_boundary_calibrates_without_vmaf_before_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _analysis_item(root)
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"binary")
+
+            def search(**kwargs):
+                result = kwargs["evaluate"](2_000_000)
+                return [result], 2_000_000, 2_000_000
+
+            def score(_ffmpeg, _item, references, bitrate, *_args, **_kwargs):
+                count = len(references)
+                prediction = SizePrediction(
+                    mean_video_bitrate_bps=10_000_000,
+                    upper_video_bitrate_bps=11_000_000,
+                    predicted_output_bytes=82_000_000,
+                    predicted_output_ratio=0.82,
+                    uncertainty=0.10,
+                    method="test_boundary",
+                )
+                return QualityCandidateResult(
+                    video_bitrate_bps=bitrate,
+                    min_vmaf=95.0,
+                    segment_vmaf=[95.0] * count,
+                    observed_window_bitrates=[2_000_000] * count,
+                    observed_video_bitrate_bps=10_000_000,
+                    predicted_output_bytes=82_000_000,
+                    predicted_output_ratio=0.82,
+                    size_prediction=prediction,
+                )
+
+            with (
+                patch(
+                    "core.smart.workflow.select_vmaf_runtime",
+                    return_value=VmafRuntimeSupport(VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True),
+                ),
+                patch("core.smart.workflow.detect_analysis_capabilities", return_value=_capabilities()),
+                patch("core.smart.workflow.discover_sample_plan", return_value=_sampling_with_holdout()),
+                patch("core.smart.workflow._run_logged"),
+                patch("core.smart.workflow._score_candidate", side_effect=score),
+                patch("core.smart.workflow.search_bitrate_candidates", side_effect=search),
+                patch(
+                    "core.smart.workflow._measure_size_only",
+                    return_value=[1_000_000, 1_100_000],
+                ) as calibrate,
+            ):
+                result = analyze_quality(ffmpeg, item, root, root / "size.log")
+
+            calibrate.assert_called_once()
+            self.assertEqual(result.status, QualitySearchStatus.FOUND)
 
     def test_holdout_failure_at_refinement_limit_is_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -941,7 +1028,15 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                     graph = command[command.index("-filter_complex") + 1]
                     name = graph.split("log_path='")[1].split("'")[0]
                     (kwargs["cwd"] / name).write_text(
-                        json.dumps({"pooled_metrics": {"vmaf": {"mean": 90.0}}}),
+                        json.dumps(
+                            {
+                                "pooled_metrics": {"vmaf": {"mean": 90.0}},
+                                "frames": [
+                                    {"frameNum": index, "metrics": {"vmaf": 90.0}}
+                                    for index in range(150)
+                                ],
+                            }
+                        ),
                         encoding="utf-8",
                     )
 

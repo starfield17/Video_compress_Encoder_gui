@@ -38,6 +38,7 @@ from core.models import (
     QualitySearchStatus,
     VmafBackend,
     VmafRuntimeSupport,
+    VmafViewingContext,
 )
 from core.config.store import encode_options_to_preset_data, preset_data_to_encode_options
 from core.encoding import execute_plan_parallel
@@ -116,6 +117,28 @@ class SmartConfigurationTestCase(unittest.TestCase):
         data = encode_options_to_preset_data(EncodeOptions(min_vmaf=95.0))
         self.assertEqual(preset_data_to_encode_options(data).min_vmaf, 95.0)
 
+    def test_viewing_context_preset_round_trip_and_legacy_default(self) -> None:
+        data = encode_options_to_preset_data(
+            EncodeOptions(viewing_context=VmafViewingContext.STANDARD_DISPLAY)
+        )
+        self.assertEqual(data["viewing_context"], "standard_display")
+        self.assertEqual(
+            preset_data_to_encode_options(data).viewing_context,
+            VmafViewingContext.STANDARD_DISPLAY,
+        )
+
+        data.pop("viewing_context")
+        self.assertEqual(
+            preset_data_to_encode_options(data).viewing_context,
+            VmafViewingContext.HIGH_FIDELITY,
+        )
+
+    def test_invalid_viewing_context_in_preset_is_rejected(self) -> None:
+        data = encode_options_to_preset_data(EncodeOptions())
+        data["viewing_context"] = "mobile"
+        with self.assertRaises(ValueError):
+            preset_data_to_encode_options(data)
+
     def test_cli_rejects_fixed_ratio_flag_in_smart_mode(self) -> None:
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
@@ -131,6 +154,30 @@ class SmartConfigurationTestCase(unittest.TestCase):
             )
         self.assertEqual(exit_code, 2)
         self.assertIn("--ratio cannot be used", stderr.getvalue())
+
+    def test_cli_accepts_viewing_context_for_smart_and_rejects_it_for_fixed(self) -> None:
+        from cli.cli_entry import _build_parser, _merge_options, _validate_compression_options
+
+        smart_args = _build_parser().parse_args(
+            ["plan", "missing.mov", "--viewing-context", "standard_display"]
+        )
+        smart_options = _merge_options(EncodeOptions(), smart_args)
+        self.assertEqual(smart_options.viewing_context, VmafViewingContext.STANDARD_DISPLAY)
+        _validate_compression_options(smart_options, smart_args)
+
+        fixed_args = _build_parser().parse_args(
+            [
+                "plan",
+                "missing.mov",
+                "--compression-mode",
+                "fixed_bitrate",
+                "--viewing-context",
+                "standard_display",
+            ]
+        )
+        fixed_options = _merge_options(EncodeOptions(), fixed_args)
+        with self.assertRaisesRegex(ValueError, "--viewing-context"):
+            _validate_compression_options(fixed_options, fixed_args)
 
     def test_cli_returns_three_when_a_constraint_needs_a_decision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -319,7 +366,7 @@ class SmartSearchTestCase(unittest.TestCase):
             preferred = reselect_from_candidates(candidates, item)
             self.assertEqual(preferred.selected_video_bitrate_bps, 1_700_000)
 
-            item.options = replace(item.options, max_output_ratio=0.133)
+            item.options = replace(item.options, max_output_ratio=0.155)
             fallback = reselect_from_candidates(candidates, item)
             self.assertEqual(fallback.status, QualitySearchStatus.FOUND)
             self.assertEqual(fallback.selected_video_bitrate_bps, 1_600_000)
@@ -599,7 +646,15 @@ class SmartCommandAndMeasurementTestCase(unittest.TestCase):
                     cwd = kwargs["cwd"]
                     self.assertIsInstance(cwd, Path)
                     (cwd / json_name).write_text(
-                        json.dumps({"pooled_metrics": {"vmaf": {"mean": 96.0}}}),
+                        json.dumps(
+                            {
+                                "pooled_metrics": {"vmaf": {"mean": 96.0}},
+                                "frames": [
+                                    {"frameNum": index, "metrics": {"vmaf": 96.0}}
+                                    for index in range(300)
+                                ],
+                            }
+                        ),
                         encoding="utf-8",
                     )
 
@@ -633,6 +688,11 @@ class SmartCommandAndMeasurementTestCase(unittest.TestCase):
             self.assertIn("n_subsample=1", filter_graph)
             self.assertEqual(result.encoded_bytes, [1_000])
             self.assertEqual(result.encoded_durations_sec, [10.0])
+            self.assertEqual(result.segment_vmaf, [96.0])
+            self.assertEqual(result.segment_mean_vmaf, [96.0])
+            self.assertEqual(result.segment_p10_vmaf, [96.0])
+            self.assertEqual(result.segment_worst_1s_vmaf, [96.0])
+            self.assertEqual(result.segment_quality_scores, [96.0])
             self.assertEqual(result.observed_video_bitrate_bps, 800)
             self.assertIsNotNone(result.predicted_output_bytes)
             self.assertIsNotNone(result.predicted_output_ratio)
@@ -1030,7 +1090,36 @@ class SmartGuiTestCase(unittest.TestCase):
             self.assertFalse(panel.ratio_edit.isEnabled())
             self.assertTrue(panel.min_vmaf_spin.isEnabled())
             self.assertEqual(panel.min_vmaf_spin.value(), 90.0)
+            self.assertFalse(panel.viewing_context_combo.isHidden())
+            self.assertEqual(
+                panel.viewing_context_combo.currentData(),
+                VmafViewingContext.HIGH_FIDELITY.value,
+            )
+            self.assertEqual(
+                panel.viewing_context_combo.currentText(),
+                "High-fidelity / Large display",
+            )
+            standard_index = panel.viewing_context_combo.findData(
+                VmafViewingContext.STANDARD_DISPLAY.value
+            )
+            panel.viewing_context_combo.setCurrentIndex(standard_index)
+            self.assertEqual(
+                panel.read_options().viewing_context,
+                VmafViewingContext.STANDARD_DISPLAY,
+            )
             self.assertFalse(panel.sample_mode_combo.isEnabled())
+
+            fixed_index = panel.compression_mode_combo.findData(CompressionMode.FIXED_BITRATE.value)
+            panel.compression_mode_combo.setCurrentIndex(fixed_index)
+            self.assertTrue(panel.viewing_context_combo.isHidden())
+
+            panel.apply_options(
+                EncodeOptions(viewing_context=VmafViewingContext.STANDARD_DISPLAY)
+            )
+            self.assertEqual(
+                panel.viewing_context_combo.currentData(),
+                VmafViewingContext.STANDARD_DISPLAY.value,
+            )
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)

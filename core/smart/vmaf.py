@@ -11,7 +11,7 @@ from pathlib import Path
 
 from core.ffmpeg.subprocess import noninteractive_run_kwargs
 from core.media.metadata import infer_bit_depth_from_pix_fmt
-from core.models import MediaInfo, VmafBackend, VmafRuntimeSupport
+from core.models import MediaInfo, VmafBackend, VmafRuntimeSupport, VmafViewingContext
 
 
 PTS_RESET_FILTER = "settb=AVTB,setpts=PTS-STARTPTS"
@@ -27,7 +27,8 @@ VMAF_SCALE_FLAGS = "bicubic"
 VMAF_ASPECT_POLICY = "square_pixels_fit_and_even_pad"
 VMAF_RESOLUTION_MODE = "display_model_canvas"
 VMAF_HFR_MIN_FPS = 50.0
-VMAF_MEASUREMENT_PIPELINE_VERSION = 2
+VMAF_MEASUREMENT_PIPELINE_VERSION = 3
+TEMPORAL_DROP_TOLERANCE = 4.0
 VMAF_PROBE_STANDARD_FPS = 30
 VMAF_PROBE_STANDARD_FRAMES = 6
 VMAF_PROBE_HFR_FPS = 60
@@ -50,6 +51,14 @@ class VmafEncodeMetadata:
     width: int | None
     height: int | None
     bit_depth: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class VmafWindowScore:
+    mean: float
+    p10: float
+    worst_1s: float
+    gate_score: float
 
 
 VMAF_STANDARD_MODEL = VmafModelSpec(
@@ -86,8 +95,15 @@ def is_4k_geometry(width: int | None, height: int | None) -> bool:
     return short_side >= 2160 and long_side >= 3840
 
 
-def select_vmaf_model(media_info: MediaInfo) -> VmafModelSpec:
-    is_4k = is_4k_geometry(media_info.width, media_info.height)
+def select_vmaf_model(
+    media_info: MediaInfo,
+    viewing_context: VmafViewingContext = VmafViewingContext.HIGH_FIDELITY,
+) -> VmafModelSpec:
+    context = VmafViewingContext(viewing_context)
+    is_4k = (
+        context == VmafViewingContext.HIGH_FIDELITY
+        and is_4k_geometry(media_info.width, media_info.height)
+    )
     is_hfr = media_info.fps is not None and media_info.fps >= VMAF_HFR_MIN_FPS
     if is_4k:
         return VMAF_4K_HFR_MODEL if is_hfr else VMAF_4K_MODEL
@@ -352,13 +368,68 @@ def parse_vmaf_score(output: str, model_spec: VmafModelSpec) -> float:
     return validate_vmaf_score(float(matches[-1]), model_spec)
 
 
-def parse_vmaf_json(path: Path, model_spec: VmafModelSpec) -> float:
+def _percentile_10(scores: list[float]) -> float:
+    ordered = sorted(scores)
+    index = max(0, math.ceil(len(ordered) * 0.10) - 1)
+    return ordered[index]
+
+
+def _frame_scores(data: object, path: Path, model_spec: VmafModelSpec) -> tuple[list[float], list[int]]:
+    if not isinstance(data, dict) or not isinstance(data.get("frames"), list):
+        raise RuntimeError(f"VMAF JSON did not contain per-frame scores: {path}")
+    scores: list[float] = []
+    frame_numbers: list[int] = []
+    for index, frame in enumerate(data["frames"]):
+        try:
+            if not isinstance(frame, dict):
+                raise TypeError
+            metrics = frame["metrics"]
+            if not isinstance(metrics, dict):
+                raise TypeError
+            score = validate_vmaf_score(float(metrics["vmaf"]), model_spec)
+            frame_number = int(frame.get("frameNum", index))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"VMAF JSON contained an invalid per-frame score: {path}") from exc
+        if frame_numbers and frame_number <= frame_numbers[-1]:
+            raise RuntimeError(f"VMAF JSON frame numbers were not strictly increasing: {path}")
+        scores.append(score)
+        frame_numbers.append(frame_number)
+    if not scores:
+        raise RuntimeError(f"VMAF JSON did not contain per-frame scores: {path}")
+    return scores, frame_numbers
+
+
+def _worst_one_second(
+    scores: list[float], frame_numbers: list[int], fps: float | None, model_spec: VmafModelSpec
+) -> float:
+    effective_fps = float(fps) if fps is not None and math.isfinite(fps) and fps > 0 else (
+        60.0 if model_spec.hfr else 30.0
+    )
+    deltas = [right - left for left, right in zip(frame_numbers, frame_numbers[1:])]
+    cadence = sorted(deltas)[len(deltas) // 2] if deltas else 1
+    window_size = min(len(scores), max(1, int(math.ceil(effective_fps / max(1, cadence)))))
+    return min(
+        sum(scores[start : start + window_size]) / window_size
+        for start in range(len(scores) - window_size + 1)
+    )
+
+
+def parse_vmaf_json(
+    path: Path,
+    model_spec: VmafModelSpec,
+    *,
+    fps: float | None = None,
+) -> VmafWindowScore:
     data = json.loads(path.read_text(encoding="utf-8"))
     try:
-        score = float(data["pooled_metrics"]["vmaf"]["mean"])
+        mean = validate_vmaf_score(float(data["pooled_metrics"]["vmaf"]["mean"]), model_spec)
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError(f"VMAF JSON did not contain a pooled mean: {path}") from exc
-    return validate_vmaf_score(score, model_spec)
+    scores, frame_numbers = _frame_scores(data, path, model_spec)
+    p10 = _percentile_10(scores)
+    worst_1s = _worst_one_second(scores, frame_numbers, fps, model_spec)
+    gate_score = min(mean, worst_1s + TEMPORAL_DROP_TOLERANCE)
+    return VmafWindowScore(mean=mean, p10=p10, worst_1s=worst_1s, gate_score=gate_score)
 
 
 def _run_capture(cmd: list[str]) -> subprocess.CompletedProcess[str]:

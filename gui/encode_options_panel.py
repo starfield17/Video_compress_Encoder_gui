@@ -34,6 +34,7 @@ from core.models import (
     EncodeOptions,
     PreviewOptions,
     PreviewSampleMode,
+    VmafViewingContext,
 )
 from core.smart import analysis_profiles_from_config, parse_analysis_profile_name, resolve_max_output_ratio
 
@@ -154,13 +155,6 @@ class EncodeOptionsPanel(QWidget):
 
         self.overwrite_check = QCheckBox()
         self.recursive_check = QCheckBox()
-        self.parallel_check = QCheckBox()
-        self.parallel_backends_label = QLabel()
-        self.parallel_nvenc_check = QCheckBox("NVENC")
-        self.parallel_qsv_check = QCheckBox("QSV")
-        self.parallel_amf_check = QCheckBox("AMF")
-        self.parallel_videotoolbox_check = QCheckBox("VideoToolbox")
-        self.parallel_cpu_check = QCheckBox("CPU")
 
         layout.addWidget(self.codec_label, 0, 0)
         layout.addWidget(self.codec_combo, 0, 1)
@@ -178,19 +172,19 @@ class EncodeOptionsPanel(QWidget):
         layout.addWidget(self.max_output_ratio_spin, 2, 1)
         layout.addWidget(self.overwrite_check, 2, 2)
         layout.addWidget(self.recursive_check, 2, 3)
-        layout.addWidget(self.parallel_check, 2, 4, 1, 2)
-        layout.addWidget(self.parallel_backends_label, 3, 0)
-        layout.addWidget(self.parallel_nvenc_check, 3, 1)
-        layout.addWidget(self.parallel_qsv_check, 3, 2)
-        layout.addWidget(self.parallel_amf_check, 3, 3)
-        layout.addWidget(self.parallel_videotoolbox_check, 3, 4)
-        layout.addWidget(self.parallel_cpu_check, 3, 5)
 
         self.analysis_profile_label = QLabel()
         self.analysis_profile_combo = QComboBox()
         self._fill_analysis_profile_combo()
-        layout.addWidget(self.analysis_profile_label, 4, 0)
-        layout.addWidget(self.analysis_profile_combo, 4, 1)
+        layout.addWidget(self.analysis_profile_label, 3, 0)
+        layout.addWidget(self.analysis_profile_combo, 3, 1)
+
+        self.viewing_context_label = QLabel()
+        self.viewing_context_combo = QComboBox()
+        for context in VmafViewingContext:
+            self.viewing_context_combo.addItem("", context.value)
+        layout.addWidget(self.viewing_context_label, 3, 2)
+        layout.addWidget(self.viewing_context_combo, 3, 3)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
         layout.setColumnStretch(5, 1)
@@ -329,14 +323,35 @@ class EncodeOptionsPanel(QWidget):
 
     def _build_advanced_tab(self) -> None:
         page = QWidget()
-        layout = QVBoxLayout(page)
+        layout = QGridLayout(page)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(10)
 
         self.advanced_info = QLabel()
         self.advanced_info.setWordWrap(True)
-        layout.addWidget(self.advanced_info)
-        layout.addStretch(1)
+        self.parallel_check = QCheckBox()
+        self.parallel_backends_label = QLabel()
+        self.parallel_nvenc_check = QCheckBox("NVENC")
+        self.parallel_qsv_check = QCheckBox("QSV")
+        self.parallel_amf_check = QCheckBox("AMF")
+        self.parallel_videotoolbox_check = QCheckBox("VideoToolbox")
+        self.parallel_cpu_check = QCheckBox("CPU")
+
+        layout.addWidget(self.advanced_info, 0, 0, 1, 6)
+        layout.addWidget(self.parallel_check, 1, 0, 1, 6)
+        layout.addWidget(self.parallel_backends_label, 2, 0)
+        layout.addWidget(self.parallel_nvenc_check, 2, 1)
+        layout.addWidget(self.parallel_qsv_check, 2, 2)
+        layout.addWidget(self.parallel_amf_check, 2, 3)
+        layout.addWidget(self.parallel_videotoolbox_check, 2, 4)
+        layout.addWidget(self.parallel_cpu_check, 2, 5)
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(2, 1)
+        layout.setColumnStretch(3, 1)
+        layout.setColumnStretch(4, 1)
+        layout.setColumnStretch(5, 1)
+        layout.setRowStretch(3, 1)
 
         self.options_tabs.addTab(page, "")
         self.advanced_tab = page
@@ -382,6 +397,7 @@ class EncodeOptionsPanel(QWidget):
             parallel_backends=tuple(self._selected_parallel_backends()),
             ratio=float(ratio_text) if ratio_text else None,
             min_vmaf=float(self.min_vmaf_spin.value()),
+            viewing_context=VmafViewingContext(self.viewing_context_combo.currentData()),
             max_output_ratio=float(self.max_output_ratio_spin.value()) / 100.0,
             min_video_kbps=int(self.min_bitrate_spin.value()),
             max_video_kbps=int(self.max_bitrate_spin.value()),
@@ -435,6 +451,9 @@ class EncodeOptionsPanel(QWidget):
             checkbox.setChecked(backend in selected and not checkbox.isHidden())
         self.ratio_edit.setText("" if options.ratio is None else str(options.ratio))
         self.min_vmaf_spin.setValue(options.min_vmaf)
+        viewing_index = self.viewing_context_combo.findData(options.viewing_context.value)
+        if viewing_index >= 0:
+            self.viewing_context_combo.setCurrentIndex(viewing_index)
         self.max_output_ratio_spin.setValue(
             resolve_max_output_ratio(options.codec, options.max_output_ratio) * 100.0
         )
@@ -530,6 +549,18 @@ class EncodeOptionsPanel(QWidget):
             self.tr.t("gui.value.analysis_precise"),
         )
         self.analysis_profile_combo.setToolTip(self.tr.t("gui.tooltip.analysis_profile"))
+        self.viewing_context_label.setText(self.tr.t("gui.label.viewing_context"))
+        self.viewing_context_combo.setItemText(
+            self.viewing_context_combo.findData(VmafViewingContext.HIGH_FIDELITY.value),
+            self.tr.t("gui.value.viewing_high_fidelity"),
+        )
+        self.viewing_context_combo.setItemText(
+            self.viewing_context_combo.findData(VmafViewingContext.STANDARD_DISPLAY.value),
+            self.tr.t("gui.value.viewing_standard_display"),
+        )
+        viewing_tooltip = self.tr.t("gui.tooltip.viewing_context")
+        self.viewing_context_label.setToolTip(viewing_tooltip)
+        self.viewing_context_combo.setToolTip(viewing_tooltip)
         self.overwrite_check.setText(self.tr.t("gui.checkbox.overwrite"))
         self.recursive_check.setText(self.tr.t("gui.checkbox.recursive"))
         self.parallel_check.setText(self.tr.t("gui.checkbox.parallel_enabled"))
@@ -558,7 +589,7 @@ class EncodeOptionsPanel(QWidget):
         self.sample_mode_label.setText(self.tr.t("gui.label.sample_mode"))
         self.sample_duration_label.setText(self.tr.t("gui.label.sample_duration"))
         self.sample_start_label.setText(self.tr.t("gui.label.sample_start"))
-        self.advanced_info.setText(self.tr.t("gui.advanced.placeholder"))
+        self.advanced_info.setText(self.tr.t("gui.advanced.parallel_description"))
         self.ratio_edit.setPlaceholderText(self.tr.t("gui.placeholder.auto_ratio"))
         self.pix_fmt_edit.setPlaceholderText("yuv420p")
         self.audio_bitrate_edit.setPlaceholderText("128k")
@@ -728,6 +759,9 @@ class EncodeOptionsPanel(QWidget):
         self.min_vmaf_spin.setEnabled(smart_mode)
         self.max_output_ratio_spin.setEnabled(smart_mode)
         self.analysis_profile_combo.setEnabled(smart_mode)
+        self.viewing_context_label.setVisible(smart_mode)
+        self.viewing_context_combo.setVisible(smart_mode)
+        self.viewing_context_combo.setEnabled(smart_mode)
         self.sample_mode_combo.setEnabled(not smart_mode)
         self.sample_duration_spin.setEnabled(not smart_mode)
         custom_sample = (

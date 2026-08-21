@@ -10,10 +10,10 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from core.models import AnalysisReceipt, QualityCandidateResult
+from core.models import AnalysisReceipt, QualityCandidateResult, SizePrediction
 
 
-ANALYSIS_RECEIPT_SCHEMA_VERSION = 4
+ANALYSIS_RECEIPT_SCHEMA_VERSION = 5
 _FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 _RECEIPT_LOCK = threading.RLock()
 _WINDOW_EPSILON_SEC = 1e-9
@@ -44,6 +44,22 @@ def _candidate_from_data(data: object) -> QualityCandidateResult:
     predicted_output_ratio = (
         None if data.get("predicted_output_ratio") is None else float(data["predicted_output_ratio"])
     )
+    segment_mean_vmaf = [float(value) for value in data.get("segment_mean_vmaf", [])]
+    segment_p10_vmaf = [float(value) for value in data.get("segment_p10_vmaf", [])]
+    segment_worst_1s_vmaf = [float(value) for value in data.get("segment_worst_1s_vmaf", [])]
+    segment_quality_scores = [float(value) for value in data.get("segment_quality_scores", segment_vmaf)]
+    observed_window_bitrates = [int(value) for value in data.get("observed_window_bitrates", [])]
+    raw_prediction = data.get("size_prediction")
+    size_prediction = None
+    if isinstance(raw_prediction, dict):
+        size_prediction = SizePrediction(
+            mean_video_bitrate_bps=int(raw_prediction["mean_video_bitrate_bps"]),
+            upper_video_bitrate_bps=int(raw_prediction["upper_video_bitrate_bps"]),
+            predicted_output_bytes=int(raw_prediction["predicted_output_bytes"]),
+            predicted_output_ratio=(None if raw_prediction.get("predicted_output_ratio") is None else float(raw_prediction["predicted_output_ratio"])),
+            uncertainty=float(raw_prediction["uncertainty"]),
+            method=str(raw_prediction["method"]),
+        )
     if video_bitrate_bps <= 0 or observed_video_bitrate_bps < 0:
         raise ValueError("Analysis receipt contains an invalid bitrate.")
     if not math.isfinite(min_vmaf) or any(not math.isfinite(value) for value in segment_vmaf):
@@ -73,6 +89,13 @@ def _candidate_from_data(data: object) -> QualityCandidateResult:
         observed_video_bitrate_bps=observed_video_bitrate_bps,
         predicted_output_bytes=predicted_output_bytes,
         predicted_output_ratio=predicted_output_ratio,
+        segment_mean_vmaf=segment_mean_vmaf,
+        segment_p10_vmaf=segment_p10_vmaf,
+        segment_worst_1s_vmaf=segment_worst_1s_vmaf,
+        segment_quality_scores=segment_quality_scores,
+        observed_window_bitrates=observed_window_bitrates,
+        size_prediction=size_prediction,
+        rd_ambiguous=bool(data.get("rd_ambiguous", False)),
     )
 
 
@@ -196,8 +219,10 @@ def _receipt_from_data(data: object) -> AnalysisReceipt:
         raise ValueError("Analysis receipt contains an invalid search fingerprint.")
     search_windows = _planned_windows(data.get("search_windows", []), "search_windows")
     holdout_windows = _planned_windows(data.get("holdout_windows", []), "holdout_windows")
+    reserve_windows = _planned_windows(data.get("reserve_windows", []), "reserve_windows")
     search_coordinates = _window_coordinates(search_windows)
     holdout_coordinates = _window_coordinates(holdout_windows)
+    reserve_coordinates = _window_coordinates(reserve_windows)
     if windows != search_coordinates:
         raise ValueError("Analysis receipt sample and search windows are inconsistent.")
     if any(
@@ -206,6 +231,11 @@ def _receipt_from_data(data: object) -> AnalysisReceipt:
         for holdout in holdout_coordinates
     ):
         raise ValueError("Analysis receipt search and holdout windows overlap.")
+    all_pools = (search_coordinates, holdout_coordinates, reserve_coordinates)
+    for left_index, left_pool in enumerate(all_pools):
+        for right_pool in all_pools[left_index + 1 :]:
+            if any(_windows_overlap(left, right) for left in left_pool for right in right_pool):
+                raise ValueError("Analysis receipt sample pools overlap.")
     measurement_configuration = _identity(
         data.get("measurement_configuration"), "measurement_configuration"
     )
@@ -220,6 +250,7 @@ def _receipt_from_data(data: object) -> AnalysisReceipt:
         scout_windows=_scout_windows(data.get("scout_windows", [])),
         search_windows=search_windows,
         holdout_windows=holdout_windows,
+        reserve_windows=reserve_windows,
         refinement_rounds=_object_list(data.get("refinement_rounds", []), "refinement_rounds"),
         search_min_vmaf=_optional_score(data.get("search_min_vmaf"), "search_min_vmaf"),
         holdout_min_vmaf=_optional_score(data.get("holdout_min_vmaf"), "holdout_min_vmaf"),
@@ -227,6 +258,14 @@ def _receipt_from_data(data: object) -> AnalysisReceipt:
         measurement_configuration=measurement_configuration,
         candidates=candidates,
         created_at=str(data.get("created_at", "")),
+        content_uncertainty=float(data.get("content_uncertainty", 0.0)),
+        content_heterogeneity=float(data.get("content_heterogeneity", 0.0)),
+        adaptive_expansion_events=_object_list(data.get("adaptive_expansion_events", []), "adaptive_expansion_events"),
+        rd_ambiguity_events=_object_list(data.get("rd_ambiguity_events", []), "rd_ambiguity_events"),
+        size_calibration_windows=_object_list(data.get("size_calibration_windows", []), "size_calibration_windows"),
+        viewing_context=str(data.get("viewing_context", "high_fidelity")),
+        selected_vmaf_model=str(data.get("selected_vmaf_model", "")),
+        independent_final_holdout=bool(data.get("independent_final_holdout", False)),
     )
 
 

@@ -50,6 +50,7 @@ from .sampling.planner import (
     ScoutObservation,
     planned_window_from_payload,
     scout_observation_from_payload,
+    rank_scout_observations,
     search_window_count,
     should_analyze_whole_video,
 )
@@ -58,7 +59,9 @@ from .bitrate import (
     calculate_smart_bitrate_budget,
     refresh_candidate_predictions as _refresh_candidate_predictions,
     reselect_from_candidates,
+    rd_ambiguity_events,
     search_bitrate_candidates,
+    predicted_output_size,
 )
 from .cache import (
     SMART_SAMPLE_SCHEME_VERSION,
@@ -74,8 +77,10 @@ from .measurement import (
     run_logged as _run_logged,
     score_candidate as _score_candidate,
     score_candidate_loopback as _score_candidate_loopback,
+    measure_size_only as _measure_size_only,
 )
 from .sampling.scout import discover_sample_plan
+from .size_prediction import predict_size_distribution
 from .vmaf import (
     VMAF_MEASUREMENT_BIT_DEPTH,
     VMAF_MEASUREMENT_PIX_FMT,
@@ -143,6 +148,24 @@ def _exact_search_bounds(
     return min_bitrate_bps, budget_bitrate_bps, ceiling_bps
 
 
+def _predicted_threshold_bitrate(
+    candidates: list[QualityCandidateResult], target: float
+) -> int | None:
+    ordered = sorted(candidates, key=lambda value: value.video_bitrate_bps)
+    for lower, upper in zip(ordered, ordered[1:]):
+        if lower.min_vmaf < target <= upper.min_vmaf:
+            delta = upper.min_vmaf - lower.min_vmaf
+            if delta <= 1e-9:
+                return upper.video_bitrate_bps
+            fraction = (target - lower.min_vmaf) / delta
+            return round(
+                lower.video_bitrate_bps
+                + fraction * (upper.video_bitrate_bps - lower.video_bitrate_bps)
+            )
+    passing = [value for value in ordered if value.min_vmaf >= target]
+    return passing[0].video_bitrate_bps if passing else None
+
+
 def _complete_candidates(
     candidates: list[QualityCandidateResult],
     window_count: int,
@@ -203,7 +226,7 @@ def _write_analysis_header(
 ) -> None:
     if item.media_info is None:
         raise ValueError("Smart analysis requires probed media.")
-    model_spec = select_vmaf_model(item.media_info)
+    model_spec = select_vmaf_model(item.media_info, item.options.viewing_context)
     metadata = candidate_encode_metadata(item.media_info, item.options.pix_fmt)
     sample_label = (
         f"{len(windows)}x{windows[0].duration_sec:.0f}s" if windows else "0"
@@ -215,13 +238,14 @@ def _write_analysis_header(
         f"tier={plan.tier.value}\n"
         f"vmaf_generation={model_spec.generation}\n"
         f"vmaf_model={model_spec.name}\n"
+        f"viewing_context={item.options.viewing_context.value}\n"
         f"vmaf_hfr={'yes' if model_spec.hfr else 'no'}\n"
         f"vmaf_display={model_spec.display_width}x{model_spec.display_height}\n"
         f"vmaf_measurement={VMAF_MEASUREMENT_PIX_FMT}/{VMAF_MEASUREMENT_BIT_DEPTH}-bit\n"
         f"candidate_encode={metadata.width}x{metadata.height}/{metadata.bit_depth}-bit\n"
         f"source_geometry={item.media_info.width}x{item.media_info.height}\n"
         f"source_bit_depth={item.media_info.bit_depth}\n"
-        "pooling=lowest_sampled_window_mean\n"
+        "pooling=smart_v2_temporal_mean_worst_1s_v1\n"
         f"hardware={plan.analysis_backend}\n"
         f"decode={plan.source_decode_acceleration}\n"
         f"candidate_encoder={plan.encoder_name}\n"
@@ -256,7 +280,7 @@ def analyze_quality(
             backend=item.encoder_info.backend,
             reason=unsupported,
         )
-    model_spec = select_vmaf_model(item.media_info)
+    model_spec = select_vmaf_model(item.media_info, item.options.viewing_context)
     runtime_support = select_vmaf_runtime(ffmpeg_path, model_spec)
 
     analysis_capabilities = detect_analysis_capabilities(ffmpeg_path)
@@ -362,6 +386,7 @@ def analyze_quality(
         if receipt is not None and receipt.search_windows:
             planned_search = [planned_window_from_payload(value) for value in receipt.search_windows]
             planned_holdouts = [planned_window_from_payload(value) for value in receipt.holdout_windows]
+            planned_reserves = [planned_window_from_payload(value) for value in receipt.reserve_windows]
             scout_observations = [
                 scout_observation_from_payload(value) for value in receipt.scout_windows
             ]
@@ -370,6 +395,9 @@ def analyze_quality(
                 search_windows=tuple(planned_search),
                 holdout_windows=tuple(planned_holdouts),
                 whole_video=not scout_observations,
+                reserve_windows=tuple(planned_reserves),
+                content_uncertainty=receipt.content_uncertainty,
+                content_heterogeneity=receipt.content_heterogeneity,
             )
         else:
             sample_plan = SamplePlan((), (), (), False)
@@ -435,14 +463,16 @@ def analyze_quality(
                     )
             planned_search = list(sample_plan.search_windows)
             planned_holdouts = list(sample_plan.holdout_windows)
+            planned_reserves = list(sample_plan.reserve_windows)
             windows = [_sample_window(window) for window in planned_search]
             _write_analysis_header(log_file, item, windows, exact_plan)
             log_file.write(
                 f"scout_windows={len(scout_observations)}\n"
                 f"search_windows={len(planned_search)}\n"
                 f"holdout_windows={len(planned_holdouts)}\n"
+                f"reserve_windows={len(planned_reserves)}\n"
             )
-            for window in [*planned_search, *planned_holdouts]:
+            for window in [*planned_search, *planned_holdouts, *planned_reserves]:
                 log_file.write(
                     f"sample={window.id} start={window.start_sec:.3f} duration={window.duration_sec:.3f} "
                     f"reasons={','.join(window.reasons)} crosses_scene_cut={window.crosses_scene_cut}\n"
@@ -624,6 +654,38 @@ def analyze_quality(
                     )
                 if len(result.segment_vmaf) == len(windows):
                     hardest_window = _hardest_window_index(result)
+                if (
+                    len(result.observed_window_bitrates) == len(planned_search)
+                    and len(windows) == len(planned_search)
+                    and scout_observations
+                ):
+                    assert item.media_info is not None
+                    ranked_risks = rank_scout_observations(scout_observations)
+                    risk_by_id = {
+                        value.observation.window.id: value.risk.global_risk
+                        for value in ranked_risks
+                    }
+                    timeline_risks = [value.risk.global_risk for value in ranked_risks]
+                    sample_risks = [
+                        risk_by_id.get(window.scout_id or "", 0.5)
+                        for window in planned_search
+                    ]
+                    prediction = predict_size_distribution(
+                        requested_bitrate_bps=result.video_bitrate_bps,
+                        observed_window_bitrates=result.observed_window_bitrates,
+                        duration_sec=item.media_info.duration,
+                        audio_bitrate_bps=budget.audio_bitrate_bps,
+                        source_bytes=budget.source_bytes,
+                        sample_risks=sample_risks,
+                        timeline_risks=timeline_risks,
+                    )
+                    result = replace(
+                        result,
+                        observed_video_bitrate_bps=prediction.mean_video_bitrate_bps,
+                        predicted_output_bytes=prediction.predicted_output_bytes,
+                        predicted_output_ratio=prediction.predicted_output_ratio,
+                        size_prediction=prediction,
+                    )
                 if progress_callback is not None:
                     progress_callback(
                         {
@@ -703,6 +765,12 @@ def analyze_quality(
             refinement_records: list[dict[str, object]] = []
             holdout_min_vmaf: float | None = None
             terminal_result: QualitySearchResult | None = None
+            remaining_reserves = list(planned_reserves)
+            adaptive_expansion_events: list[dict[str, object]] = []
+            size_calibration_records: list[dict[str, object]] = []
+            search_history_scout_ids = {
+                window.scout_id for window in planned_search if window.scout_id is not None
+            }
             try:
                 _emit_analysis_progress(progress_callback, item, "searching")
                 coarse_candidates: list[QualityCandidateResult] = []
@@ -739,6 +807,9 @@ def analyze_quality(
                         initial_candidates, budget, item.media_info.duration
                     ),
                     tolerance_bps=tolerance,
+                    preferred_first_bitrate_bps=_predicted_threshold_bitrate(
+                        coarse_candidates, float(item.options.min_vmaf)
+                    ),
                 )
                 candidates = _complete_candidates(searched, len(windows))
                 if not candidates:
@@ -750,35 +821,128 @@ def analyze_quality(
                     measurement_fingerprint=measurement_fingerprint,
                     fingerprint=fingerprint,
                 )
-                if selection.success and profile.preferred_vmaf_margin > 0:
-                    candidate_indexes[AnalysisTier.EXACT] = 0
-                    preferred_candidates, _preferred_selected, _preferred_required = (
-                        search_bitrate_candidates(
-                            evaluate=lambda bitrate: evaluate(bitrate, exact_plan),
-                            min_bitrate_bps=selection.selected_video_bitrate_bps,
-                            budget_bitrate_bps=max(
-                                selection.selected_video_bitrate_bps,
-                                budget.max_video_bitrate_bps,
-                            ),
-                            required_search_ceiling_bps=required_ceiling,
-                            min_vmaf=float(item.options.min_vmaf)
-                            + profile.preferred_vmaf_margin,
-                            max_candidates=profile.exact_max_candidates,
-                            max_output_bytes=budget.max_output_bytes,
-                            initial_candidates=candidates,
-                            tolerance_bps=tolerance,
-                        )
+                if (
+                    selection.failure_kind == ConstraintFailureKind.SIZE_BLOCKED
+                    and remaining_reserves
+                ):
+                    required_candidate = next(
+                        (
+                            candidate
+                            for candidate in candidates
+                            if candidate.video_bitrate_bps == selection.selected_video_bitrate_bps
+                        ),
+                        None,
                     )
-                    complete_preferred = _complete_candidates(preferred_candidates, len(windows))
-                    if complete_preferred:
-                        candidates = complete_preferred
-                        selection = reselect_from_candidates(
-                            candidates,
-                            item,
-                            measurement_fingerprint=measurement_fingerprint,
-                            fingerprint=fingerprint,
+                    prediction = required_candidate.size_prediction if required_candidate else None
+                    if prediction is not None and required_candidate is not None:
+                        assert item.media_info is not None
+                        media_duration = item.media_info.duration
+                        central_bytes = predicted_output_size(
+                            prediction.mean_video_bitrate_bps,
+                            budget.audio_bitrate_bps,
+                            media_duration,
                         )
-
+                        near_boundary = (
+                            central_bytes <= budget.max_output_bytes < prediction.predicted_output_bytes
+                        )
+                        if near_boundary:
+                            if scout_observations:
+                                ranked = rank_scout_observations(scout_observations)
+                                reserve_risks = {
+                                    value.observation.window.id: value.risk.global_risk
+                                    for value in ranked
+                                }
+                                ordered_risks = sorted(reserve_risks.values())
+                                median_risk = ordered_risks[len(ordered_risks) // 2]
+                                representatives = sorted(
+                                    remaining_reserves,
+                                    key=lambda window: (
+                                        abs(reserve_risks.get(window.scout_id or "", 0.5) - median_risk),
+                                        abs(window.center_sec - media_duration / 2.0),
+                                    ),
+                                )[:2]
+                            else:
+                                representatives = sorted(
+                                    remaining_reserves,
+                                    key=lambda window: abs(window.center_sec - media_duration / 2.0),
+                                )[:2]
+                            measured = _measure_size_only(
+                                ffmpeg_path,
+                                item,
+                                [_sample_window(window) for window in representatives],
+                                required_candidate.video_bitrate_bps,
+                                temp_root,
+                                log_file,
+                                exact_plan,
+                                cancel_check=cancel_check,
+                                process_callback=process_callback,
+                            )
+                            required_candidate.observed_window_bitrates.extend(measured)
+                            required_candidate.size_prediction = None
+                            size_calibration_records.extend(
+                                {
+                                    "window_id": window.id,
+                                    "observed_video_bitrate_bps": bitrate,
+                                }
+                                for window, bitrate in zip(representatives, measured)
+                            )
+                            candidates = _refresh_candidate_predictions(
+                                candidates, budget, item.media_info.duration
+                            )
+                            selection = reselect_from_candidates(
+                                candidates,
+                                item,
+                                measurement_fingerprint=measurement_fingerprint,
+                                fingerprint=fingerprint,
+                            )
+                if (
+                    selection.success
+                    and selection.min_vmaf is not None
+                    and selection.min_vmaf - float(item.options.min_vmaf)
+                    < profile.quality_confidence_band
+                    and remaining_reserves
+                ):
+                    expanded = max(
+                        remaining_reserves,
+                        key=lambda window: (len(window.reasons), -window.start_sec),
+                    )
+                    remaining_reserves.remove(expanded)
+                    promoted = replace(
+                        expanded,
+                        id=f"search:adaptive:{expanded.id}",
+                        reasons=tuple(dict.fromkeys((*expanded.reasons, "adaptive_near_threshold"))),
+                    )
+                    planned_search.append(promoted)
+                    if promoted.scout_id is not None:
+                        search_history_scout_ids.add(promoted.scout_id)
+                    adaptive_expansion_events.append(
+                        {
+                            "reason": "quality_score_near_threshold",
+                            "window_id": promoted.id,
+                            "selected_score": selection.min_vmaf,
+                        }
+                    )
+                    windows = [_sample_window(window) for window in planned_search]
+                    references = []
+                    hardest_window = 0
+                    candidate_indexes[AnalysisTier.EXACT] = 0
+                    expanded_candidates, _, _ = search_bitrate_candidates(
+                        evaluate=lambda bitrate: evaluate(bitrate, exact_plan),
+                        min_bitrate_bps=selection.selected_video_bitrate_bps,
+                        budget_bitrate_bps=max(selection.selected_video_bitrate_bps, budget.max_video_bitrate_bps),
+                        required_search_ceiling_bps=required_ceiling,
+                        min_vmaf=float(item.options.min_vmaf),
+                        max_candidates=profile.exact_max_candidates,
+                        max_output_bytes=budget.max_output_bytes,
+                        tolerance_bps=tolerance,
+                    )
+                    candidates = _complete_candidates(expanded_candidates, len(windows)) or expanded_candidates
+                    selection = reselect_from_candidates(
+                        candidates,
+                        item,
+                        measurement_fingerprint=measurement_fingerprint,
+                        fingerprint=fingerprint,
+                    )
                 remaining_holdouts = list(planned_holdouts)
                 refinement_round = 0
                 final_holdout_scores: list[float] = []
@@ -830,7 +994,32 @@ def analyze_quality(
                         )
                         for window in failed
                     )
+                    search_history_scout_ids.update(
+                        window.scout_id for window in failed if window.scout_id is not None
+                    )
                     remaining_holdouts = [window for window in remaining_holdouts if window not in failed]
+                    if not remaining_holdouts and remaining_reserves:
+                        reserve = remaining_reserves.pop(0)
+                        fresh = replace(
+                            reserve,
+                            id=f"holdout:fresh:{reserve.id}",
+                            reasons=tuple(
+                                dict.fromkeys((*reserve.reasons, "fresh_reserve_holdout"))
+                            ),
+                        )
+                        if fresh.scout_id not in search_history_scout_ids:
+                            remaining_holdouts.append(fresh)
+                            refinement_records[-1]["fresh_replacement_holdout_ids"] = [fresh.id]
+                    if not remaining_holdouts:
+                        terminal_result = replace(
+                            selection,
+                            status=QualitySearchStatus.FAILED,
+                            reason=(
+                                "Holdout refinement exhausted independent reserve windows; "
+                                "normal-confidence success is not valid."
+                            ),
+                        )
+                        break
                     windows = [_sample_window(window) for window in planned_search]
                     references = []
                     hardest_window = 0
@@ -855,36 +1044,6 @@ def analyze_quality(
                         measurement_fingerprint=measurement_fingerprint,
                         fingerprint=fingerprint,
                     )
-                    if selection.success and profile.preferred_vmaf_margin > 0:
-                        candidate_indexes[AnalysisTier.EXACT] = 0
-                        preferred_refined, _preferred_selected, _preferred_required = (
-                            search_bitrate_candidates(
-                                evaluate=lambda bitrate: evaluate(bitrate, exact_plan),
-                                min_bitrate_bps=selection.selected_video_bitrate_bps,
-                                budget_bitrate_bps=max(
-                                    selection.selected_video_bitrate_bps,
-                                    budget.max_video_bitrate_bps,
-                                ),
-                                required_search_ceiling_bps=required_ceiling,
-                                min_vmaf=float(item.options.min_vmaf)
-                                + profile.preferred_vmaf_margin,
-                                max_candidates=profile.exact_max_candidates,
-                                max_output_bytes=budget.max_output_bytes,
-                                initial_candidates=candidates,
-                                tolerance_bps=tolerance,
-                            )
-                        )
-                        complete_preferred = _complete_candidates(
-                            preferred_refined, len(windows)
-                        )
-                        if complete_preferred:
-                            candidates = complete_preferred
-                            selection = reselect_from_candidates(
-                                candidates,
-                                item,
-                                measurement_fingerprint=measurement_fingerprint,
-                                fingerprint=fingerprint,
-                            )
                     if not selection.success:
                         if selection.failure_kind == ConstraintFailureKind.SIZE_BLOCKED:
                             terminal_result = selection
@@ -900,8 +1059,32 @@ def analyze_quality(
                                 reason="Promoted holdout windows could not reach the VMAF target.",
                             )
                         break
-                if not remaining_holdouts:
+                if not remaining_holdouts and sample_plan.whole_video:
                     holdout_min_vmaf = None
+                ambiguity_records = rd_ambiguity_events(candidates)
+                if ambiguity_records:
+                    decision_point = min(
+                        candidates,
+                        key=lambda candidate: abs(candidate.min_vmaf - float(item.options.min_vmaf)),
+                    )
+                    repeated = evaluate(decision_point.video_bitrate_bps, exact_plan)
+                    candidates = [
+                        repeated
+                        if candidate.video_bitrate_bps == repeated.video_bitrate_bps
+                        else candidate
+                        for candidate in candidates
+                    ]
+                    still_ambiguous = rd_ambiguity_events(candidates)
+                    for event in ambiguity_records:
+                        event["reevaluated_bitrate_bps"] = repeated.video_bitrate_bps
+                        event["still_ambiguous"] = bool(still_ambiguous)
+                    candidates = [replace(candidate, rd_ambiguous=True) for candidate in candidates]
+                    selection = reselect_from_candidates(
+                        candidates,
+                        item,
+                        measurement_fingerprint=measurement_fingerprint,
+                        fingerprint=fingerprint,
+                    )
                 log_file.write(
                     f"selected_bitrate_bps={selection.selected_video_bitrate_bps}\n"
                     f"search_min_vmaf={selection.min_vmaf}\n"
@@ -960,6 +1143,19 @@ def analyze_quality(
                     vmaf_backend=exact_plan.vmaf_backend,
                     vmaf_subsample=exact_plan.vmaf_subsample,
                     search_fingerprint=completed_fingerprint,
+                    reserve_windows=remaining_reserves,
+                    content_uncertainty=sample_plan.content_uncertainty,
+                    content_heterogeneity=sample_plan.content_heterogeneity,
+                    independent_final_holdout=bool(
+                        remaining_holdouts
+                        and any(
+                            window.scout_id not in search_history_scout_ids
+                            for window in remaining_holdouts
+                        )
+                    ),
+                    adaptive_expansion_events=adaptive_expansion_events,
+                    rd_ambiguity_events=ambiguity_records,
+                    size_calibration_windows=size_calibration_records,
                 ),
             )
         except (OSError, ValueError) as exc:

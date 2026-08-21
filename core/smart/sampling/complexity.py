@@ -18,7 +18,9 @@ SCENE_CHANGE_THRESHOLD = 10.0
 SCOUT_MAX_WIDTH = 480
 
 _FRAME_RE = re.compile(r"^frame:\s*(\d+)\b")
-_METADATA_RE = re.compile(r"^(lavfi\.(?:siti\.(?:si|ti)|scd\.(?:score|time)))=(.+)$")
+_METADATA_RE = re.compile(
+    r"^(lavfi\.(?:siti\.(?:si|ti)|scd\.(?:score|time)|signalstats\.YAVG))=(.+)$"
+)
 
 
 class ComplexityProbeError(ValueError):
@@ -32,6 +34,7 @@ class ScoutMetrics:
     ti_p90: float
     scene_cut_times: tuple[float, ...]
     max_scene_score: float
+    luma_mean: float = 128.0
 
 
 def _filter_path(path: Path) -> str:
@@ -71,6 +74,7 @@ def build_scout_command(
         (
             _scout_prefix_filters(),
             "siti",
+            "signalstats",
             f"scdet=threshold={SCENE_CHANGE_THRESHOLD:g}",
             _metadata_filter(metadata_path),
         )
@@ -221,6 +225,10 @@ def parse_scout_metadata(metadata: str) -> ScoutMetrics:
         ti_p90=_percentile_90(ti_values),
         scene_cut_times=scene_cut_times,
         max_scene_score=max_scene_score,
+        luma_mean=(
+            sum(frame.get("lavfi.signalstats.YAVG", 128.0) for frame in frames)
+            / len(frames)
+        ),
     )
 
 
