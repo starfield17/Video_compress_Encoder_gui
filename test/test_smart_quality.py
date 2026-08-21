@@ -766,6 +766,23 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
             fingerprint="fingerprint",
         )
 
+    def test_facade_default_path_does_not_rebind_workflow_globals(self) -> None:
+        from core import smart_measurement, smart_quality, smart_workflow
+
+        observed_score_hook: list[object] = []
+        expected = self._quality_result()
+
+        def fake_workflow(*_args, **_kwargs):
+            observed_score_hook.append(smart_workflow._score_candidate)
+            return expected
+
+        item = _item(Path("source.mov"), Path("output.mp4"), EncodeOptions())
+        with patch.object(smart_workflow, "analyze_quality", side_effect=fake_workflow):
+            actual = smart_quality.analyze_quality(Path("ffmpeg"), item, Path("workdir"), Path("analysis.log"))
+
+        self.assertIs(actual, expected)
+        self.assertEqual(observed_score_hook, [smart_measurement.score_candidate])
+
     def test_parallel_workers_bind_before_analysis_and_serialize_searches(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

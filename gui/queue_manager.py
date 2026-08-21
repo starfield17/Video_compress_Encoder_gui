@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 from core.exec_encode import execute_plan
 from core.models import EncodePlan, EncodeResult, OperationCancelledError
 from core.parallel_queue_exec import execute_plan_parallel, normalize_parallel_backends
+from core.progress_events import ProgressEvent
 from gui.queue_state import QueueItemRecord, create_queue_records
 from gui.queue_model import QueueTableModel
 
@@ -39,7 +40,7 @@ class QueueExecuteWorker(QThread):
     def _emit_log(self, message: str) -> None:
         self.log.emit(message)
 
-    def _emit_progress(self, event: dict[str, object]) -> None:
+    def _emit_progress(self, event: ProgressEvent) -> None:
         self.progress.emit(event)
 
     def _set_current_process(self, slot: str, proc) -> None:
@@ -220,7 +221,7 @@ class QueueManager(QObject):
         self.model.assign_backend(item_id, backend, encoder)
         self.model.mark_running(item_id)
 
-    def _on_worker_progress(self, event: dict[str, object]) -> None:
+    def _on_worker_progress(self, event: ProgressEvent) -> None:
         self.model.apply_progress_event(event)
         self.progress.emit(event)
 

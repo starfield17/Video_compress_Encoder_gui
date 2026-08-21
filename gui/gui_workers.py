@@ -20,6 +20,7 @@ from core.models import (
 )
 from core.plan_encode import build_encode_plan
 from core.preview_sample import build_preview_job
+from core.progress_events import ProgressEvent
 from core.scan_videos import collect_video_files
 from core.vmaf_runtime import VMAF_PRODUCTION_MODELS, probe_vmaf_runtime
 
@@ -141,7 +142,7 @@ class PlanWorker(QThread):
         self.log.emit(message)
         _safe_console_print(message)
 
-    def _emit_progress(self, event: dict[str, object]) -> None:
+    def _emit_progress(self, event: ProgressEvent) -> None:
         self.progress.emit(event)
 
     def cancel(self) -> None:
@@ -203,7 +204,7 @@ class PreviewWorker(QThread):
         self.log.emit(message)
         _safe_console_print(message)
 
-    def _emit_progress(self, event: dict[str, object]) -> None:
+    def _emit_progress(self, event: ProgressEvent) -> None:
         self.progress.emit(event)
 
     def _set_current_process(self, proc) -> None:
@@ -294,7 +295,7 @@ class EncodeWorker(QThread):
         self.log.emit(message)
         _safe_console_print(message)
 
-    def _emit_progress(self, event: dict[str, object]) -> None:
+    def _emit_progress(self, event: ProgressEvent) -> None:
         self.progress.emit(event)
 
     def _set_current_process(self, proc) -> None:

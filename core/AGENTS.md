@@ -9,19 +9,32 @@
   It may depend on `core.models` but not on FFmpeg or Smart orchestration.
 - `smart_sampling.py` is the adapter that executes Scout and scene-guard
   commands through its supplied runner, then returns a `SamplingResult`.
-- `smart_quality.py` owns bitrate search, VMAF measurement, holdout promotion,
-  refinement, and top-level analysis lifecycle. It consumes the three modules
-  above through their public functions and data classes.
+- `smart_bitrate.py` owns bitrate budgets, candidate search and reselection.
+- `smart_cache.py` owns Smart measurement/quality fingerprints and receipt
+  construction. Measurement identity must not include quality/size policy.
+- `smart_measurement.py` owns FFmpeg/VMAF command execution and scoring one
+  candidate; it does not choose candidates or queue decisions.
+- `smart_workflow.py` owns the top-level Smart lifecycle: reuse, planning,
+  coarse search, holdout promotion, refinement and receipt persistence.
+- `smart_quality.py` is the stable compatibility facade. New core callers should
+  import the focused owner unless they need the top-level `analyze_quality()` API.
+- `constraint_resolution.py` owns user-decision policy and preserved-output
+  actions. Smart workflow must not import it.
 
 Keep the dependency direction:
 
 ```text
 content_complexity ─┐
-                    ├─> smart_sampling -> smart_quality -> vmaf_runtime
-sample_planner ─────┘
+                    ├─> smart_sampling ─┐
+sample_planner ─────┘                   │
+smart_bitrate ─────────────────────────┼─> smart_workflow -> smart_quality facade
+smart_cache ───────────────────────────┤
+smart_measurement ─────────────────────┘
+
+smart_bitrate + smart_cache -> constraint_resolution
 ```
 
-The architecture test enforces the lower three modules' direct core imports.
+The architecture test enforces these dependency directions.
 Run targeted checks with:
 
 ```text

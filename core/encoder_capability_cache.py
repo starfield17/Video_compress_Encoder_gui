@@ -11,13 +11,17 @@ from core.encoder_caps import (
     iter_codec_candidates,
     list_available_encoders,
     list_available_hwaccels,
+    preset_choices_for_encoder,
 )
 from core.models import BackendChoice, CodecChoice
 from core.preset_store import load_app_config, update_app_config
 from core.subprocess_utils import noninteractive_run_kwargs
 
 
-ENCODER_CAPABILITIES_SCHEMA_VERSION = 3
+# Preset choices are part of each usable encoder entry.  Bump the schema so
+# installations with the old, encoder-only payload are rebuilt in the
+# background rather than being presented as a complete GUI snapshot.
+ENCODER_CAPABILITIES_SCHEMA_VERSION = 4
 SMOKE_TEST_SOURCE_SIZE = "256x256"
 SMOKE_TEST_TIMEOUT_SEC = 10.0
 _CACHE_LOCK = threading.RLock()
@@ -88,6 +92,16 @@ def _valid_capability_shape(capabilities: dict) -> bool:
                 return False
             if expected.get(backend) != str(item.get("encoder", "")).strip():
                 return False
+            preset_choices = item.get("preset_choices")
+            if not isinstance(preset_choices, list):
+                return False
+            seen_presets: set[str] = set()
+            for preset in preset_choices:
+                if not isinstance(preset, str):
+                    return False
+                if not preset or preset != preset.strip() or preset in seen_presets:
+                    return False
+                seen_presets.add(preset)
     return True
 
 
@@ -202,16 +216,29 @@ def detect_encoder_capabilities(
         "codecs": {},
     }
 
-    codecs: dict[str, list[dict[str, str]]] = {}
+    codecs: dict[str, list[dict[str, object]]] = {}
     for codec in CodecChoice:
-        usable: list[dict[str, str]] = []
+        usable: list[dict[str, object]] = []
         for backend, encoder_name in iter_codec_candidates(codec):
             if encoder_name not in available_encoders:
                 _emit(progress_callback, f"{codec.value}/{backend.value}: {encoder_name} is not in this FFmpeg build.")
                 continue
             _emit(progress_callback, f"{codec.value}/{backend.value}: testing {encoder_name}...")
             if smoke_test_encoder(resolved, encoder_name):
-                usable.append({"backend": backend.value, "encoder": encoder_name})
+                _emit(progress_callback, f"{codec.value}/{backend.value}: reading preset choices...")
+                # Preset probing is deliberately part of capability detection.
+                # This function runs in the GUI worker, so the panel can render
+                # the resulting snapshot without starting FFmpeg on the UI
+                # thread.  ``preset_choices_for_encoder`` falls back to its
+                # static list when an encoder does not expose help output.
+                preset_choices = preset_choices_for_encoder(resolved, encoder_name)
+                usable.append(
+                    {
+                        "backend": backend.value,
+                        "encoder": encoder_name,
+                        "preset_choices": preset_choices,
+                    }
+                )
                 _emit(progress_callback, f"{codec.value}/{backend.value}: {encoder_name} is usable.")
             else:
                 _emit(progress_callback, f"{codec.value}/{backend.value}: {encoder_name} failed the smoke test.")

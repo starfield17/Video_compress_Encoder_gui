@@ -7,9 +7,9 @@ import threading
 import uuid
 from collections import deque
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import Callable, TextIO, cast
 
-from core.analysis_concurrency import analysis_concurrency_limit
+from core.analysis_concurrency import analysis_concurrency_limit, analysis_slot
 from core.build_ffmpeg_cmd import (
     build_encode_commands,
     build_preview_encode_commands,
@@ -35,11 +35,10 @@ from core.models import (
 )
 from core.path_utils import log_file_path
 from core.preview_estimate import estimate_preview
+from core.progress_events import ProgressCallback, ProgressEvent
 from core.safety_checks import validate_workdir
 from core.subprocess_utils import hidden_popen_kwargs
 from core.smart_quality import (
-    SMART_ANALYSIS_SEMAPHORE,
-    acquire_analysis_slot,
     analyze_quality,
     build_decision_options,
     constraint_policy_from_size_blocked,
@@ -107,11 +106,11 @@ def _emit(log_callback: Callable[[str], None] | None, message: str) -> None:
 
 
 def _emit_progress(
-    progress_callback: Callable[[dict[str, object]], None] | None,
+    progress_callback: ProgressCallback | None,
     **event: object,
 ) -> None:
     if progress_callback is not None:
-        progress_callback(event)
+        progress_callback(cast(ProgressEvent, event))
 
 
 def _parse_time_to_seconds(raw: str) -> float | None:
@@ -165,7 +164,7 @@ def _cancel_requested(cancel_check: Callable[[], bool] | None) -> bool:
 def _stop_running_command(
     proc: subprocess.Popen[str],
     log_callback: Callable[[str], None] | None,
-    progress_callback: Callable[[dict[str, object]], None] | None,
+    progress_callback: ProgressCallback | None,
     progress_context: dict[str, object] | None,
 ) -> None:
     message = "Cancellation requested. Stopping ffmpeg..."
@@ -185,7 +184,7 @@ def _emit_command_line(
     log_file: TextIO,
     cmd: list[str],
     log_callback: Callable[[str], None] | None,
-    progress_callback: Callable[[dict[str, object]], None] | None,
+    progress_callback: ProgressCallback | None,
     progress_context: dict[str, object] | None,
 ) -> None:
     command_line = "$ " + " ".join(cmd)
@@ -238,7 +237,7 @@ def _apply_pass_progress(
 
 def _emit_output_event(
     normalized: str,
-    progress_callback: Callable[[dict[str, object]], None] | None,
+    progress_callback: ProgressCallback | None,
     progress_context: dict[str, object] | None,
 ) -> None:
     raw_duration = progress_context.get("duration_sec") if progress_context else None
@@ -263,7 +262,7 @@ def _handle_output_line(
     log_file: TextIO,
     output_chunks: list[str],
     log_callback: Callable[[str], None] | None,
-    progress_callback: Callable[[dict[str, object]], None] | None,
+    progress_callback: ProgressCallback | None,
     progress_context: dict[str, object] | None,
 ) -> None:
     normalized = line.rstrip("\r\n")
@@ -280,7 +279,7 @@ def _run_logged_command(
     cmd: list[str],
     log_path: Path,
     log_callback: Callable[[str], None] | None = None,
-    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
     progress_context: dict[str, object] | None = None,
@@ -346,7 +345,7 @@ def _skipped_encode_result(
     queue_index: int,
     queue_total: int,
     log_callback: Callable[[str], None] | None,
-    progress_callback: Callable[[dict[str, object]], None] | None,
+    progress_callback: ProgressCallback | None,
 ) -> EncodeResult:
     # Items that failed during planning are surfaced as skipped results so the
     # rest of the batch can continue.
@@ -421,7 +420,7 @@ def analyze_plan_item(
     queue_index: int = 1,
     queue_total: int = 1,
     log_callback: Callable[[str], None] | None = None,
-    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
     extra_progress_context: dict[str, object] | None = None,
@@ -463,11 +462,10 @@ def analyze_plan_item(
         file_progress=0.0,
         **base_context,
     )
-    acquire_analysis_slot(cancel_check)
-    try:
+    with analysis_slot(cancel_check):
         _emit(log_callback, f"[{queue_index}/{queue_total}] Smart analysis started: {item.source_path.name}")
 
-        def analysis_progress(event: dict[str, object]) -> None:
+        def analysis_progress(event: ProgressEvent) -> None:
             _emit_progress(progress_callback, **{**base_context, **event})
 
         quality_result = analyze_quality(
@@ -479,8 +477,6 @@ def analyze_plan_item(
             cancel_check=cancel_check,
             process_callback=process_callback,
         )
-    finally:
-        SMART_ANALYSIS_SEMAPHORE.release()
 
     item.quality_search_result = quality_result
     result.quality_search_result = quality_result
@@ -548,7 +544,7 @@ def run_analysis_phase(
     workdir: Path,
     *,
     log_callback: Callable[[str], None] | None = None,
-    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
     process_callback: Callable[[str, subprocess.Popen[str] | None], None] | None = None,
     item_contexts: list[dict[str, object]] | None = None,
@@ -657,7 +653,7 @@ def execute_plan_item(
     queue_index: int = 1,
     queue_total: int = 1,
     log_callback: Callable[[str], None] | None = None,
-    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
     extra_progress_context: dict[str, object] | None = None,
@@ -885,7 +881,7 @@ def execute_plan(
     plan: EncodePlan,
     workdir: Path,
     log_callback: Callable[[str], None] | None = None,
-    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
     constraint_policy: ConstraintPolicy | None = None,
@@ -967,7 +963,7 @@ def execute_preview(
     ffmpeg_path: Path,
     workdir: Path,
     log_callback: Callable[[str], None] | None = None,
-    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
 ) -> PreviewResult:
@@ -1078,15 +1074,14 @@ def execute_smart_preview(
     ffmpeg_path: Path,
     workdir: Path,
     log_callback: Callable[[str], None] | None = None,
-    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
 ) -> SmartPreviewResult:
     workdir = validate_workdir(workdir)
     log_path = log_file_path(workdir, item.source_path, "smart-preview")
     try:
-        acquire_analysis_slot(cancel_check)
-        try:
+        with analysis_slot(cancel_check):
             quality_result = analyze_quality(
                 ffmpeg_path,
                 item,
@@ -1096,8 +1091,6 @@ def execute_smart_preview(
                 cancel_check=cancel_check,
                 process_callback=process_callback,
             )
-        finally:
-            SMART_ANALYSIS_SEMAPHORE.release()
         _emit(log_callback, f"Smart preview finished for {item.source_path.name}")
         return SmartPreviewResult(
             source_path=item.source_path,

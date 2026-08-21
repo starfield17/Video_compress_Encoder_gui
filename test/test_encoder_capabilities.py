@@ -152,6 +152,7 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
             patch("core.encoder_capability_cache._ffmpeg_mtime_ns", return_value=123),
             patch("core.encoder_capability_cache._ffmpeg_version_line", return_value="ffmpeg version test"),
             patch("core.encoder_capability_cache.smoke_test_encoder", side_effect=fake_smoke_test),
+            patch("core.encoder_capability_cache.preset_choices_for_encoder", return_value=["test-preset"]),
         ):
             capabilities = detect_encoder_capabilities(
                 Path("ffmpeg"),
@@ -162,13 +163,13 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
         self.assertEqual(
             capabilities["codecs"]["hevc"],
             [
-                {"backend": "qsv", "encoder": "hevc_qsv"},
-                {"backend": "cpu", "encoder": "libx265"},
+                {"backend": "qsv", "encoder": "hevc_qsv", "preset_choices": ["test-preset"]},
+                {"backend": "cpu", "encoder": "libx265", "preset_choices": ["test-preset"]},
             ],
         )
         self.assertEqual(
             capabilities["codecs"]["av1"],
-            [{"backend": "cpu", "encoder": "libsvtav1"}],
+            [{"backend": "cpu", "encoder": "libsvtav1", "preset_choices": ["test-preset"]}],
         )
 
     def test_smoke_test_uses_nvenc_compatible_frame_size(self) -> None:

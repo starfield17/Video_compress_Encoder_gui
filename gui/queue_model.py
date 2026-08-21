@@ -6,23 +6,24 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QStyle
 
-from core.analysis_receipts import delete_analysis_receipt
 from core.bitrate_policy import human_kbps
-from core.constraint_resolution import (
-    accept_rejected_output,
-    discard_rejected_output,
-    prepare_size_miss_retry,
-    reselect_after_quality_decision,
-)
 from core.i18n import Translator
-from core.models import DecisionActionCode, DecisionOption, QualitySearchStatus
-from core.smart_quality import build_decision_options
+from core.models import DecisionOption
+from core.progress_events import ProgressEvent
+from gui.queue_actions import (
+    accept_size_miss as accept_size_miss_action,
+    apply_quality_decision as apply_quality_decision_action,
+    decision_options_for_record,
+    discard_size_miss as discard_size_miss_action,
+    retry_size_miss as retry_size_miss_action,
+)
 from gui.queue_state import (
     ACTIVE_ITEM_STATUSES,
     QueueItemRecord,
     QueueItemStatus,
     QueueMetrics,
     assign_runtime_backend,
+    apply_progress_event as apply_record_progress_event,
     build_tags,
     build_tooltip,
     compute_metrics,
@@ -30,8 +31,8 @@ from gui.queue_state import (
     mark_failed,
     mark_finished,
     mark_started,
+    prepare_record_for_execution,
     reset_for_retry,
-    short_error,
     status_key,
 )
 
@@ -368,13 +369,7 @@ class QueueTableModel(QAbstractTableModel):
 
     def decision_options_for_row(self, row: int) -> list[DecisionOption]:
         record = self.record_for_row(row)
-        if record is None or record.status != QueueItemStatus.NEEDS_DECISION:
-            return []
-        result = record.result
-        if result is None or result.rejected_output_path is not None:
-            return []
-        quality = record.plan_item.quality_search_result
-        return build_decision_options(quality) if quality is not None else []
+        return decision_options_for_record(record) if record is not None else []
 
     def apply_quality_decision(self, row: int, decision: DecisionOption) -> bool:
         record = self.record_for_row(row)
@@ -383,110 +378,48 @@ class QueueTableModel(QAbstractTableModel):
         quality = record.plan_item.quality_search_result
         if quality is None:
             return False
-        if decision.action_code == DecisionActionCode.SKIP:
-            if record.result is not None:
-                record.result.needs_decision = False
-                record.result.skipped = True
-            record.status = QueueItemStatus.SKIPPED
-            record.error_summary = quality.reason
-            self._emit_rows_changed([row])
-            return True
-        if decision.action_code == DecisionActionCode.REANALYZE:
-            try:
-                if quality.measurement_fingerprint:
-                    delete_analysis_receipt(record.job_snapshot.workdir, quality.measurement_fingerprint)
-            except (OSError, ValueError) as exc:
-                record.error_summary = short_error(str(exc))
-                self._emit_rows_changed([row])
-                return False
-            record.plan_item.quality_search_result = None
-            reset_for_retry(record)
-            self._emit_rows_changed([row])
-            return True
-
-        reselected = reselect_after_quality_decision(
-            record.job_snapshot.ffmpeg_path,
-            record.plan_item,
-            quality,
-            decision,
-        )
-        record.plan_item.quality_search_result = reselected
-        if reselected.status == QualitySearchStatus.FOUND:
-            record.plan_item.target_video_bitrate_bps = reselected.selected_video_bitrate_bps
-            reset_for_retry(record)
-        elif decision.requires_analysis:
-            reselected.fingerprint = ""
-            reset_for_retry(record)
-        else:
-            if record.result is not None:
-                record.result.quality_search_result = reselected
-                record.result.error_message = reselected.reason
-            record.error_summary = reselected.reason
+        resolved = apply_quality_decision_action(record, decision)
         self._emit_rows_changed([row])
-        return True
+        return resolved
 
     def accept_size_miss(self, row: int) -> bool:
         record = self.record_for_row(row)
-        result = record.result if record is not None else None
         if (
             record is None
             or record.status != QueueItemStatus.NEEDS_DECISION
-            or result is None
-            or result.rejected_output_path is None
+            or record.result is None
+            or record.result.rejected_output_path is None
         ):
             return False
-        try:
-            accept_rejected_output(record.plan_item, result)
-        except (OSError, ValueError) as exc:
-            record.error_summary = short_error(str(exc))
-            self._emit_rows_changed([row])
-            return False
-        record.status = QueueItemStatus.DONE
-        record.file_progress = 100.0
-        record.error_summary = None
+        resolved = accept_size_miss_action(record)
         self._emit_rows_changed([row])
-        return True
+        return resolved
 
     def discard_size_miss(self, row: int) -> bool:
         record = self.record_for_row(row)
-        result = record.result if record is not None else None
         if (
             record is None
             or record.status != QueueItemStatus.NEEDS_DECISION
-            or result is None
-            or result.rejected_output_path is None
+            or record.result is None
+            or record.result.rejected_output_path is None
         ):
             return False
-        try:
-            discard_rejected_output(record.plan_item, result)
-        except (OSError, ValueError) as exc:
-            record.error_summary = short_error(str(exc))
-            self._emit_rows_changed([row])
-            return False
-        record.status = QueueItemStatus.SKIPPED
-        record.error_summary = result.error_message
+        resolved = discard_size_miss_action(record)
         self._emit_rows_changed([row])
-        return True
+        return resolved
 
     def retry_size_miss(self, row: int) -> bool:
         record = self.record_for_row(row)
-        result = record.result if record is not None else None
         if (
             record is None
             or record.status != QueueItemStatus.NEEDS_DECISION
-            or result is None
-            or result.rejected_output_path is None
+            or record.result is None
+            or record.result.rejected_output_path is None
         ):
             return False
-        try:
-            prepare_size_miss_retry(record.plan_item, result)
-        except ValueError as exc:
-            record.error_summary = short_error(str(exc))
-            self._emit_rows_changed([row])
-            return False
-        reset_for_retry(record)
+        resolved = retry_size_miss_action(record)
         self._emit_rows_changed([row])
-        return True
+        return resolved
 
     def prepare_for_execution(self, item_ids: list[str]) -> None:
         changed_rows: list[int] = []
@@ -495,8 +428,7 @@ class QueueTableModel(QAbstractTableModel):
             if row is None or record is None:
                 continue
             if record.status in {QueueItemStatus.QUEUED, QueueItemStatus.WAITING_ANALYSIS}:
-                record.last_speed = ""
-                record.elapsed_sec = None
+                prepare_record_for_execution(record)
                 changed_rows.append(row)
         self._emit_rows_changed(changed_rows)
 
@@ -527,82 +459,14 @@ class QueueTableModel(QAbstractTableModel):
         mark_failed(record, message)
         self._emit_rows_changed([row])
 
-    def apply_progress_event(self, event: dict[str, object]) -> None:
+    def apply_progress_event(self, event: ProgressEvent) -> None:
         item_id = str(event.get("queue_item_id") or "")
         if not item_id:
             return
         row, record = self.record_for_id(item_id)
         if row is None or record is None:
             return
-        state = str(event.get("state") or "")
-        backend = event.get("queue_backend")
-        encoder = event.get("queue_encoder")
-        if isinstance(backend, str) or isinstance(encoder, str):
-            assign_runtime_backend(
-                record,
-                backend if isinstance(backend, str) else record.assigned_backend,
-                encoder if isinstance(encoder, str) else record.assigned_encoder,
-            )
-        if state == "waiting_analysis":
-            record.status = QueueItemStatus.WAITING_ANALYSIS
-        elif state in {
-            "analyzing",
-            "candidate_finished",
-            "scouting",
-            "scout_finished",
-            "sample_plan_ready",
-            "boundary_alignment",
-            "searching",
-            "holdout_verification",
-            "refining",
-        }:
-            record.status = QueueItemStatus.ANALYZING
-        elif state == "analysis_finished":
-            record.status = QueueItemStatus.QUEUED
-        elif state in {"starting_file", "running_pass"}:
-            record.status = QueueItemStatus.ENCODING
-        elif state == "validating":
-            record.status = QueueItemStatus.VALIDATING
-        elif state == "needs_decision":
-            record.status = QueueItemStatus.NEEDS_DECISION
-        elif state == "failed":
-            record.status = QueueItemStatus.FAILED
-        candidate_index = event.get("candidate_index")
-        if isinstance(candidate_index, int):
-            record.analysis_candidate_index = candidate_index
-        candidate_limit = event.get("candidate_limit")
-        if isinstance(candidate_limit, int):
-            record.analysis_candidate_limit = candidate_limit
-        quality_result = event.get("quality_search_result")
-        if quality_result is not None:
-            record.plan_item.quality_search_result = quality_result
-        target_bitrate = event.get("target_video_bitrate_bps")
-        if isinstance(target_bitrate, int) and target_bitrate > 0:
-            record.plan_item.target_video_bitrate_bps = target_bitrate
-        current_pass_index = event.get("current_pass_index")
-        if isinstance(current_pass_index, int):
-            record.current_pass_index = current_pass_index
-        total_passes = event.get("total_passes")
-        if isinstance(total_passes, int) and total_passes > 0:
-            record.total_passes = total_passes
-        pass_percent = event.get("pass_percent")
-        if isinstance(pass_percent, (int, float)):
-            record.pass_percent = max(0.0, min(100.0, float(pass_percent)))
-        file_progress = event.get("file_progress")
-        if isinstance(file_progress, (int, float)):
-            record.file_progress = max(0.0, min(100.0, float(file_progress)))
-        percent = event.get("percent")
-        if isinstance(percent, (int, float)) and state not in {"finished_file", "failed_file"}:
-            record.file_progress = max(0.0, min(100.0, float(percent)))
-        speed = event.get("speed")
-        if isinstance(speed, str) and speed:
-            record.last_speed = speed
-        elapsed_sec = event.get("elapsed_sec")
-        if isinstance(elapsed_sec, (int, float)):
-            record.elapsed_sec = float(elapsed_sec)
-        message = short_error(str(event.get("message") or "").strip())
-        if message and state in {"failed_file", "cancelled_file"}:
-            record.error_summary = message
+        apply_record_progress_event(record, event)
         self._emit_rows_changed([row])
 
     def apply_result(self, item_id: str, result) -> None:

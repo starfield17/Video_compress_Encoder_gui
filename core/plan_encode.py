@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, cast
 
 from core.app_paths import config_dir as app_config_dir
 from core.bitrate_policy import choose_ratio, compute_target_video_bitrate
@@ -22,6 +22,7 @@ from core.models import (
 from core.external_subtitles import discover_external_subtitles
 from core.path_utils import build_output_path, choose_output_root
 from core.probe_media import probe_media_info
+from core.progress_events import ProgressCallback, ProgressEvent
 from core.safety_checks import validate_plan_item, validate_workdir
 from core.scan_videos import collect_video_files
 
@@ -32,11 +33,11 @@ def _emit(progress_callback: Callable[[str], None] | None, message: str) -> None
 
 
 def _emit_progress(
-    event_callback: Callable[[dict[str, object]], None] | None,
+    event_callback: ProgressCallback | None,
     **event: object,
 ) -> None:
     if event_callback is not None:
-        event_callback(event)
+        event_callback(cast(ProgressEvent, event))
 
 
 def _iter_sources(
@@ -210,7 +211,7 @@ def _emit_probe_started(
     index: int,
     total: int,
     progress_callback: Callable[[str], None] | None,
-    progress_event_callback: Callable[[dict[str, object]], None] | None,
+    progress_event_callback: ProgressCallback | None,
 ) -> None:
     _emit(
         progress_callback,
@@ -234,7 +235,7 @@ def _emit_plan_item_status(
     index: int,
     total: int,
     progress_callback: Callable[[str], None] | None,
-    progress_event_callback: Callable[[dict[str, object]], None] | None,
+    progress_event_callback: ProgressCallback | None,
     *,
     output_path: Path | None = None,
     error: str | None = None,
@@ -274,7 +275,7 @@ def build_encode_plan(
     config_dir: Path | None = None,
     files: Iterable[VideoFileItem] | None = None,
     progress_callback: Callable[[str], None] | None = None,
-    progress_event_callback: Callable[[dict[str, object]], None] | None = None,
+    progress_event_callback: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
 ) -> EncodePlan:
     _emit(progress_callback, "Planning started.")

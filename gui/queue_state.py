@@ -7,8 +7,10 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Mapping
 
-from core.models import CompressionMode, EncodePlan, EncodePlanItem, EncodeResult, MediaInfo
+from core.models import CompressionMode, EncodePlan, EncodePlanItem, EncodeResult, MediaInfo, QualitySearchResult
+from core.progress_events import ProgressEvent
 
 
 class QueueItemStatus(str, Enum):
@@ -374,6 +376,93 @@ def reset_for_retry(record: QueueItemRecord) -> None:
     record.result = None
     record.analysis_candidate_index = 0
     record.analysis_candidate_limit = 0
+
+
+def prepare_record_for_execution(record: QueueItemRecord) -> None:
+    """Clear transient progress values before a queue execution starts."""
+
+    record.last_speed = ""
+    record.elapsed_sec = None
+
+
+def apply_progress_event(record: QueueItemRecord, event: Mapping[str, object] | ProgressEvent) -> None:
+    """Apply one core progress payload to a record.
+
+    The payload remains a normal dictionary for compatibility with existing
+    producers.  This function is deliberately Qt-free; callers decide how to
+    notify views after the record has been updated.
+    """
+
+    state = str(event.get("state") or "")
+    backend = event.get("queue_backend")
+    encoder = event.get("queue_encoder")
+    if isinstance(backend, str) or isinstance(encoder, str):
+        assign_runtime_backend(
+            record,
+            backend if isinstance(backend, str) else record.assigned_backend,
+            encoder if isinstance(encoder, str) else record.assigned_encoder,
+        )
+    if state == "waiting_analysis":
+        record.status = QueueItemStatus.WAITING_ANALYSIS
+    elif state in {
+        "analyzing",
+        "candidate_finished",
+        "scouting",
+        "scout_finished",
+        "sample_plan_ready",
+        "boundary_alignment",
+        "searching",
+        "holdout_verification",
+        "refining",
+    }:
+        record.status = QueueItemStatus.ANALYZING
+    elif state == "analysis_finished":
+        record.status = QueueItemStatus.QUEUED
+    elif state in {"starting_file", "running_pass"}:
+        record.status = QueueItemStatus.ENCODING
+    elif state == "validating":
+        record.status = QueueItemStatus.VALIDATING
+    elif state == "needs_decision":
+        record.status = QueueItemStatus.NEEDS_DECISION
+    elif state == "failed":
+        record.status = QueueItemStatus.FAILED
+
+    candidate_index = event.get("candidate_index")
+    if isinstance(candidate_index, int):
+        record.analysis_candidate_index = candidate_index
+    candidate_limit = event.get("candidate_limit")
+    if isinstance(candidate_limit, int):
+        record.analysis_candidate_limit = candidate_limit
+    quality_result = event.get("quality_search_result")
+    if isinstance(quality_result, QualitySearchResult):
+        record.plan_item.quality_search_result = quality_result
+    target_bitrate = event.get("target_video_bitrate_bps")
+    if isinstance(target_bitrate, int) and target_bitrate > 0:
+        record.plan_item.target_video_bitrate_bps = target_bitrate
+    current_pass_index = event.get("current_pass_index")
+    if isinstance(current_pass_index, int):
+        record.current_pass_index = current_pass_index
+    total_passes = event.get("total_passes")
+    if isinstance(total_passes, int) and total_passes > 0:
+        record.total_passes = total_passes
+    pass_percent = event.get("pass_percent")
+    if isinstance(pass_percent, (int, float)):
+        record.pass_percent = max(0.0, min(100.0, float(pass_percent)))
+    file_progress = event.get("file_progress")
+    if isinstance(file_progress, (int, float)):
+        record.file_progress = max(0.0, min(100.0, float(file_progress)))
+    percent = event.get("percent")
+    if isinstance(percent, (int, float)) and state not in {"finished_file", "failed_file"}:
+        record.file_progress = max(0.0, min(100.0, float(percent)))
+    speed = event.get("speed")
+    if isinstance(speed, str) and speed:
+        record.last_speed = speed
+    elapsed_sec = event.get("elapsed_sec")
+    if isinstance(elapsed_sec, (int, float)):
+        record.elapsed_sec = float(elapsed_sec)
+    message = short_error(str(event.get("message") or "").strip())
+    if message and state in {"failed_file", "cancelled_file"}:
+        record.error_summary = message
 
 
 def mark_finished(record: QueueItemRecord, result: EncodeResult) -> None:

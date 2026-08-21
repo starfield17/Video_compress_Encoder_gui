@@ -20,6 +20,7 @@ from core.models import (
     EncodeResult,
     OperationCancelledError,
 )
+from core.progress_events import ProgressCallback
 from core.safety_checks import validate_workdir
 
 
@@ -108,7 +109,7 @@ def execute_plan_parallel(
     *,
     backends: tuple[BackendChoice, ...],
     log_callback: Callable[[str], None] | None = None,
-    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
     process_callback: ProcessCallback | None = None,
     item_contexts: Sequence[ProgressContext] | None = None,

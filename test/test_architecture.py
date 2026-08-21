@@ -220,6 +220,106 @@ class ArchitectureTestCase(unittest.TestCase):
                 f"{module} crossed the Smart sampling module boundary",
             )
 
+    def test_smart_quality_module_boundaries(self) -> None:
+        graph = _dependency_graph()
+        focused_modules = {
+            "core.smart_bitrate",
+            "core.smart_cache",
+            "core.smart_measurement",
+        }
+        forbidden_dependencies = {
+            "core.smart_quality",
+            "core.smart_workflow",
+            "core.constraint_resolution",
+        }
+        violations = {
+            module: sorted(graph[module] & forbidden_dependencies)
+            for module in focused_modules
+            if graph[module] & forbidden_dependencies
+        }
+        self.assertFalse(
+            violations,
+            "Focused Smart modules are lower-level owners and may not reach back "
+            f"into orchestration or decisions: {violations}",
+        )
+        self.assertFalse(
+            graph["core.smart_workflow"] & {"core.smart_quality", "core.constraint_resolution"},
+            "Smart workflow must orchestrate focused modules without importing the "
+            "compatibility facade or queue decision policy",
+        )
+
+    def test_queue_model_has_no_domain_side_effect_dependencies(self) -> None:
+        path = _app_modules()["gui.queue_model"]
+        forbidden = (
+            "core.analysis_receipts",
+            "core.constraint_resolution",
+            "core.external_subtitles",
+        )
+        violations = [
+            imported
+            for imported in _imports("gui.queue_model", path)
+            if imported.startswith(forbidden)
+        ]
+        self.assertFalse(
+            violations,
+            "QueueTableModel should emit Qt notifications and delegate record mutations "
+            f"to gui.queue_actions, not own domain/file side effects: {violations}",
+        )
+
+    def test_options_panel_does_not_probe_ffmpeg(self) -> None:
+        path = _app_modules()["gui.encode_options_panel"]
+        forbidden_names = {
+            "discover_ffmpeg_tools",
+            "list_available_encoders",
+            "preset_choices_for_encoder",
+            "resolve_encoder",
+        }
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+        }
+        self.assertFalse(
+            imported & forbidden_names,
+            "EncodeOptionsPanel must render the worker-produced capability snapshot; "
+            f"it may not probe FFmpeg synchronously: {sorted(imported & forbidden_names)}",
+        )
+
+    def test_main_window_uses_options_panel_public_contract(self) -> None:
+        path = _app_modules()["gui.gui_mainwindow"]
+        allowed = {
+            "analysis_profile_changed",
+            "apply_analysis_profile_settings",
+            "apply_options",
+            "begin_capability_detection",
+            "current_analysis_profile_name",
+            "notify_capability_detection_failed",
+            "read_options",
+            "read_preview_options",
+            "set_busy",
+            "set_runtime_capabilities",
+            "set_translator",
+            "sync_dependent_controls",
+            "validate_parallel_options",
+        }
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        used = {
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Attribute)
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id == "self"
+            and node.value.attr == "options_panel"
+        }
+        self.assertFalse(
+            used - allowed,
+            "MainWindow must use EncodeOptionsPanel's public contract instead of raw "
+            f"widgets: {sorted(used - allowed)}",
+        )
+
     def test_queue_view_depends_on_model(self) -> None:
         view_path = _app_modules().get("gui.queue_view")
         self.assertIsNotNone(view_path)

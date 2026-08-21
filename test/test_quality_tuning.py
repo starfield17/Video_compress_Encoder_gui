@@ -58,7 +58,10 @@ def _encoder_info(encoder_name: str, backend: BackendChoice, default_preset: str
 def _capabilities_for(codec: CodecChoice, entries: list[tuple[BackendChoice, str]]) -> dict:
     return {
         "codecs": {
-            codec.value: [{"backend": backend.value, "encoder": encoder_name} for backend, encoder_name in entries],
+            codec.value: [
+                {"backend": backend.value, "encoder": encoder_name, "preset_choices": []}
+                for backend, encoder_name in entries
+            ],
             (CodecChoice.AV1 if codec == CodecChoice.HEVC else CodecChoice.HEVC).value: [],
         }
     }
@@ -68,10 +71,25 @@ def _capabilities_by_codec(
     hevc: list[tuple[BackendChoice, str]],
     av1: list[tuple[BackendChoice, str]] | None = None,
 ) -> dict:
+    presets = {
+        "hevc_nvenc": ["p1", "p2", "p3"],
+        "hevc_qsv": ["veryfast", "fast", "slow"],
+        "libx265": ["fast", "medium", "slow"],
+    }
     return {
         "codecs": {
-            "hevc": [{"backend": backend.value, "encoder": encoder_name} for backend, encoder_name in hevc],
-            "av1": [{"backend": backend.value, "encoder": encoder_name} for backend, encoder_name in (av1 or [])],
+            "hevc": [
+                {
+                    "backend": backend.value,
+                    "encoder": encoder_name,
+                    "preset_choices": presets.get(encoder_name, []),
+                }
+                for backend, encoder_name in hevc
+            ],
+            "av1": [
+                {"backend": backend.value, "encoder": encoder_name, "preset_choices": []}
+                for backend, encoder_name in (av1 or [])
+            ],
         }
     }
 
@@ -127,6 +145,22 @@ class EncoderCapsTestCase(unittest.TestCase):
         with patch("core.encoder_caps._cached_runtime_preset_choices", return_value=("p5", "p6")):
             self.assertTrue(is_valid_preset(ffmpeg_path, "hevc_nvenc", "p6"))
             self.assertFalse(is_valid_preset(ffmpeg_path, "hevc_nvenc", "slow"))
+
+    def test_runtime_preset_cache_tracks_ffmpeg_file_identity(self) -> None:
+        from core.encoder_caps import _cached_runtime_preset_choices
+
+        first_help = "-preset value\n  fast 1\n"
+        second_help = "-preset value\n  slow 1\n"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ffmpeg_path = Path(temp_dir) / "ffmpeg"
+            ffmpeg_path.write_bytes(b"first")
+            _cached_runtime_preset_choices.cache_clear()
+            with patch("core.encoder_caps._run_encoder_help", side_effect=[first_help, second_help]) as help_probe:
+                self.assertEqual(preset_choices_for_encoder(ffmpeg_path, "hevc_amf"), ["fast"])
+                ffmpeg_path.write_bytes(b"second-binary")
+                self.assertEqual(preset_choices_for_encoder(ffmpeg_path, "hevc_amf"), ["slow"])
+            self.assertEqual(help_probe.call_count, 2)
+            _cached_runtime_preset_choices.cache_clear()
 
 
 class PlanningAndCommandTestCase(unittest.TestCase):
@@ -250,29 +284,13 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
                     [(BackendChoice.NVENC, "hevc_nvenc"), (BackendChoice.QSV, "hevc_qsv")]
                 )
             )
-            with (
-                patch("gui.encode_options_panel.discover_ffmpeg_tools", return_value=(Path("ffmpeg"), Path("ffprobe"))),
-                patch("gui.encode_options_panel.list_available_encoders", return_value={"hevc_nvenc", "hevc_qsv"}),
-                patch(
-                    "gui.encode_options_panel.resolve_encoder",
-                    side_effect=lambda codec, backend, available, ffmpeg_path=None, runtime_capabilities=None: _encoder_info(
-                        "hevc_nvenc" if backend == BackendChoice.NVENC else "hevc_qsv",
-                        backend,
-                        "p6" if backend == BackendChoice.NVENC else "slow",
-                    ),
-                ),
-                patch(
-                    "gui.encode_options_panel.preset_choices_for_encoder",
-                    side_effect=lambda ffmpeg_path, encoder_name: ["p1", "p2", "p3"] if encoder_name == "hevc_nvenc" else ["veryfast", "fast", "slow"],
-                ),
-            ):
-                panel = window.options_panel
-                panel.backend_combo.setCurrentText("nvenc")
-                panel.refresh_encoder_preset_choices()
-                self.assertEqual(panel.encoder_preset_combo.itemText(1), "p1")
-                panel.backend_combo.setCurrentText("qsv")
-                panel.refresh_encoder_preset_choices()
-                self.assertEqual(panel.encoder_preset_combo.itemText(1), "veryfast")
+            panel = window.options_panel
+            panel.backend_combo.setCurrentText("nvenc")
+            panel.refresh_encoder_preset_choices()
+            self.assertEqual(panel.encoder_preset_combo.itemText(1), "p1")
+            panel.backend_combo.setCurrentText("qsv")
+            panel.refresh_encoder_preset_choices()
+            self.assertEqual(panel.encoder_preset_combo.itemText(1), "veryfast")
         finally:
             window.close()
 
@@ -370,17 +388,13 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
     def test_gui_invalid_loaded_preset_falls_back_to_default(self) -> None:
         window = MainWindow(self.repo_root, language="en")
         try:
-            with (
-                patch("gui.encode_options_panel.discover_ffmpeg_tools", return_value=(Path("ffmpeg"), Path("ffprobe"))),
-                patch("gui.encode_options_panel.list_available_encoders", return_value={"hevc_nvenc"}),
-                patch(
-                    "gui.encode_options_panel.resolve_encoder",
-                    return_value=_encoder_info("hevc_nvenc", BackendChoice.NVENC, "p6"),
-                ),
-                patch("gui.encode_options_panel.preset_choices_for_encoder", return_value=["p5", "p6"]),
-            ):
-                window.options_panel.apply_options(EncodeOptions(backend=BackendChoice.NVENC, encoder_preset="invalid"))
-                self.assertIsNone(window.options_panel.encoder_preset_combo.currentData())
+            window._on_encoder_capability_detection_completed(
+                _capabilities_by_codec([(BackendChoice.NVENC, "hevc_nvenc")])
+            )
+            window.options_panel.apply_options(
+                EncodeOptions(backend=BackendChoice.NVENC, encoder_preset="invalid")
+            )
+            self.assertIsNone(window.options_panel.encoder_preset_combo.currentData())
         finally:
             window.close()
 

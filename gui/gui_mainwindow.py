@@ -58,7 +58,7 @@ from gui.constraint_decision_dialog import (
 )
 from gui.encode_options_panel import EncodeOptionsPanel
 from gui.gui_workers import EncoderCapabilityDetectWorker, PlanWorker, PreviewWorker
-from gui.preview_result_dialog import PreviewResultDialog
+from gui.preview_result_dialog import PreviewResultDialog, build_preview_summary
 from gui.preset_manager_dialog import PresetManagerDialog
 from gui.queue_manager import QueueManager
 from gui.queue_state import QueueItemRecord
@@ -76,6 +76,27 @@ EXPLICIT_BACKEND_ORDER: tuple[BackendChoice, ...] = (
     BackendChoice.AMF,
     BackendChoice.VIDEOTOOLBOX,
     BackendChoice.CPU,
+)
+
+RUNTIME_CONFIG_KEYS = frozenset(
+    {
+        "analysis_profile",
+        "analysis_profiles",
+        "default_preset_name",
+        "ffmpeg_path",
+        "ffprobe_path",
+        "keep_preview_temp",
+        "language",
+        "last_output_dir",
+        "last_source_path",
+        "log_level",
+        "quality_unreachable_policy",
+        "queue_table_header_state",
+        "recent_paths",
+        "size_blocked_policy",
+        "skipped_output_policy",
+        "workdir_path",
+    }
 )
 
 
@@ -203,7 +224,23 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         apply_theme(self)
+        self._build_toolbar()
+        root_layout = self._build_central_content()
+        self.source_box = self._build_source_box()
+        self.options_panel = EncodeOptionsPanel(
+            self.tr,
+            self.app_config,
+            self,
+            append_log=self._append_log,
+        )
+        self.jobs_box = self._build_jobs_box()
+        root_layout.addWidget(self.source_box)
+        root_layout.addWidget(self.options_panel)
+        root_layout.addWidget(self.jobs_box, 1)
+        self._build_status_bar()
+        self._apply_initial_window_geometry()
 
+    def _build_toolbar(self) -> None:
         toolbar = QToolBar(self)
         toolbar.setMovable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
@@ -243,6 +280,7 @@ class MainWindow(QMainWindow):
         ]:
             toolbar.addAction(action)
 
+    def _build_central_content(self) -> QVBoxLayout:
         central = QScrollArea(self)
         central.setWidgetResizable(True)
         central.setFrameShape(QFrame.NoFrame)
@@ -258,7 +296,11 @@ class MainWindow(QMainWindow):
         root_layout = QVBoxLayout(content)
         root_layout.setContentsMargins(12, 12, 12, 12)
         root_layout.setSpacing(10)
+        self.main_scroll_area = central
+        self.main_content_widget = content
+        return root_layout
 
+    def _build_source_box(self) -> QGroupBox:
         source_box = QGroupBox()
         source_layout = QGridLayout(source_box)
         source_layout.setHorizontalSpacing(10)
@@ -292,14 +334,9 @@ class MainWindow(QMainWindow):
         source_layout.setColumnStretch(1, 1)
         source_layout.setColumnStretch(2, 1)
         source_layout.setColumnStretch(3, 1)
+        return source_box
 
-        self.options_panel = EncodeOptionsPanel(
-            self.tr,
-            self.app_config,
-            self,
-            append_log=self._append_log,
-        )
-
+    def _build_jobs_box(self) -> QGroupBox:
         jobs_box = QGroupBox()
         jobs_layout = QVBoxLayout(jobs_box)
         jobs_layout.setContentsMargins(12, 12, 12, 12)
@@ -378,14 +415,9 @@ class MainWindow(QMainWindow):
         jobs_layout.addWidget(self.queue_progress_text)
         jobs_layout.addWidget(self.queue_progress_bar)
         jobs_layout.addWidget(self.table_view, 1)
+        return jobs_box
 
-        root_layout.addWidget(source_box)
-        root_layout.addWidget(self.options_panel)
-        root_layout.addWidget(jobs_box, 1)
-
-        self.source_box = source_box
-        self.jobs_box = jobs_box
-
+    def _build_status_bar(self) -> None:
         status_bar = QStatusBar(self)
         self.setStatusBar(status_bar)
         self.status_stage_label = QLabel()
@@ -404,9 +436,6 @@ class MainWindow(QMainWindow):
         status_bar.addPermanentWidget(self.status_elapsed_label)
         status_bar.addPermanentWidget(self.status_current_progress_label)
         status_bar.addPermanentWidget(self.current_progress_bar)
-        self.main_scroll_area = central
-        self.main_content_widget = content
-        self._apply_initial_window_geometry()
 
     def _apply_initial_window_geometry(self) -> None:
         minimum = clamped_window_size(760, 520)
@@ -807,10 +836,14 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, self.tr.t("gui.message.error"), str(exc))
 
     def _save_app_config_preserving_capabilities(self) -> None:
-        snapshot = {key: value for key, value in self.app_config.items() if key != "encoder_capabilities"}
+        patch = {
+            key: value
+            for key, value in self.app_config.items()
+            if key in RUNTIME_CONFIG_KEYS
+        }
 
         def merge(data: dict) -> dict:
-            data.update(snapshot)
+            data.update(patch)
             return data
 
         update_app_config(self.config_dir, merge)
@@ -1176,42 +1209,7 @@ class MainWindow(QMainWindow):
 
     def _on_preview_ready(self, result) -> None:
         if isinstance(result, SmartPreviewResult):
-            quality = result.quality_search_result
-            summary = [
-                self.tr.t("gui.summary.preview_source", path=result.source_path),
-                self.tr.t(
-                    "gui.summary.smart_target_bitrate",
-                    value=(
-                        f"{quality.selected_video_bitrate_bps / 1000:.0f} kbps"
-                        if quality.selected_video_bitrate_bps
-                        else "-"
-                    ),
-                ),
-                self.tr.t(
-                    "gui.summary.smart_min_vmaf",
-                    value=f"{quality.min_vmaf:.2f}" if quality.min_vmaf is not None else "-",
-                ),
-                self.tr.t(
-                    "gui.summary.smart_predicted_ratio",
-                    value=(
-                        f"{quality.predicted_output_ratio * 100:.2f}%"
-                        if quality.predicted_output_ratio is not None
-                        else "-"
-                    ),
-                ),
-                self.tr.t(
-                    "gui.summary.smart_required_ratio",
-                    value=(
-                        f"{quality.required_output_ratio * 100:.2f}%"
-                        if quality.required_output_ratio is not None
-                        else "-"
-                    ),
-                ),
-                self.tr.t("gui.summary.log_path", path=result.log_path or ""),
-            ]
-            if result.error_message:
-                summary.append(f"{self.tr.t('gui.message.warning')}: {result.error_message}")
-            dialog = PreviewResultDialog(self.tr, summary, self)
+            dialog = PreviewResultDialog(self.tr, build_preview_summary(self.tr, result), self)
             dialog.exec()
             self._set_status_snapshot(
                 self.tr.t("gui.status.done") if result.success else self.tr.t("gui.status.failed"),
@@ -1223,15 +1221,6 @@ class MainWindow(QMainWindow):
             return
 
         if result.success:
-            summary = [
-                self.tr.t("gui.summary.preview_source", path=result.job.source_path),
-                self.tr.t("gui.summary.preview_window", start=result.job.start_sec, duration=result.job.duration_sec),
-                self.tr.t("gui.summary.preview_source_sample", path=result.job.source_sample_path),
-                self.tr.t("gui.summary.preview_encoded_sample", path=result.job.encoded_sample_path),
-                self.tr.t("gui.summary.preview_ratio", value=f"{result.sample_compression_ratio:.3f}"),
-                self.tr.t("gui.summary.preview_estimated_size", value=format_size(result.estimated_full_output_size)),
-                self.tr.t("gui.summary.log_path", path=result.log_path or ""),
-            ]
             self._append_log(self.tr.t("gui.log.preview_done"))
             self._append_log(
                 self.tr.t(
@@ -1240,7 +1229,7 @@ class MainWindow(QMainWindow):
                     size=format_size(result.estimated_full_output_size),
                 )
             )
-            dialog = PreviewResultDialog(self.tr, summary, self)
+            dialog = PreviewResultDialog(self.tr, build_preview_summary(self.tr, result), self)
             dialog.exec()
             self._set_status_snapshot(self.tr.t("gui.status.done"), result.job.source_path.name, "-", "-", 100.0)
             return

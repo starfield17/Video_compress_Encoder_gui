@@ -229,9 +229,13 @@ class VideoToolboxHardwareCapabilityTestCase(unittest.TestCase):
                 available_encoders={"hevc_videotoolbox", "libx265", "libsvtav1"},
                 available_hwaccels={"VULKAN", "videotoolbox"},
             )
-        self.assertIn(
-            {"backend": "videotoolbox", "encoder": "hevc_videotoolbox"},
-            capabilities["codecs"]["hevc"],
+        self.assertTrue(
+            any(
+                item["backend"] == "videotoolbox"
+                and item["encoder"] == "hevc_videotoolbox"
+                and item["preset_choices"] == []
+                for item in capabilities["codecs"]["hevc"]
+            )
         )
         self.assertNotIn("videotoolbox", {item["backend"] for item in capabilities["codecs"]["av1"]})
         self.assertEqual(capabilities["hwaccels"], ["videotoolbox", "vulkan"])

@@ -1,15 +1,98 @@
 from __future__ import annotations
 
+import math
 import os
+from dataclasses import replace
 from pathlib import Path
 
 from core.external_subtitles import copy_external_subtitles
-from core.models import DecisionActionCode, DecisionOption, EncodePlanItem, EncodeResult, QualitySearchResult
-from core.smart_quality import (
-    apply_decision_to_options,
-    quality_configuration_fingerprint,
-    reselect_from_candidates,
+from core.models import (
+    AudioMode,
+    ConstraintFailureKind,
+    ConstraintPolicy,
+    DecisionActionCode,
+    DecisionOption,
+    EncodeOptions,
+    EncodePlanItem,
+    EncodeResult,
+    QualitySearchResult,
+    SizeBlockedPolicy,
 )
+from core.smart_bitrate import reselect_from_candidates
+from core.smart_cache import quality_configuration_fingerprint
+
+
+def build_decision_options(result: QualitySearchResult) -> list[DecisionOption]:
+    """Describe the valid next actions for an unsatisfied Smart result."""
+    options: list[DecisionOption] = []
+    if (
+        result.failure_kind == ConstraintFailureKind.SIZE_BLOCKED
+        and result.required_output_ratio is not None
+        and result.required_output_ratio <= 1.0
+    ):
+        options.append(
+            DecisionOption(
+                action_code=DecisionActionCode.RELAX_SIZE,
+                suggested_value=math.nextafter(result.required_output_ratio, 1.0),
+                requires_analysis=False,
+            )
+        )
+    if result.best_size_fitting_vmaf is not None:
+        options.append(
+            DecisionOption(
+                action_code=DecisionActionCode.RELAX_QUALITY,
+                suggested_value=result.best_size_fitting_vmaf,
+                requires_analysis=False,
+            )
+        )
+    if result.failure_kind == ConstraintFailureKind.MEDIA_BUDGET_TOO_SMALL:
+        options.append(
+            DecisionOption(
+                action_code=DecisionActionCode.CHANGE_MEDIA_BUDGET,
+                suggested_value=AudioMode.AAC.value,
+                requires_analysis=True,
+            )
+        )
+    if result.failure_kind == ConstraintFailureKind.QUALITY_UNREACHABLE:
+        options.append(
+            DecisionOption(
+                action_code=DecisionActionCode.REANALYZE,
+                requires_analysis=True,
+                parameters={"change_encoder": True},
+            )
+        )
+    options.append(DecisionOption(action_code=DecisionActionCode.SKIP))
+    return options
+
+
+def constraint_policy_from_size_blocked(policy: SizeBlockedPolicy) -> ConstraintPolicy:
+    if policy == SizeBlockedPolicy.RELAX_SIZE:
+        return ConstraintPolicy.RELAX_SIZE
+    if policy == SizeBlockedPolicy.RELAX_QUALITY:
+        return ConstraintPolicy.RELAX_QUALITY
+    return ConstraintPolicy.FAIL
+
+
+def size_blocked_from_constraint_policy(policy: ConstraintPolicy) -> SizeBlockedPolicy:
+    if policy == ConstraintPolicy.RELAX_SIZE:
+        return SizeBlockedPolicy.RELAX_SIZE
+    if policy == ConstraintPolicy.RELAX_QUALITY:
+        return SizeBlockedPolicy.RELAX_QUALITY
+    return SizeBlockedPolicy.ASK
+
+
+def apply_decision_to_options(options: EncodeOptions, decision: DecisionOption) -> EncodeOptions:
+    if decision.action_code == DecisionActionCode.RELAX_SIZE:
+        if not isinstance(decision.suggested_value, (int, float)):
+            raise ValueError("Relax-size decision requires an output ratio.")
+        return replace(options, max_output_ratio=float(decision.suggested_value))
+    if decision.action_code == DecisionActionCode.RELAX_QUALITY:
+        if not isinstance(decision.suggested_value, (int, float)):
+            raise ValueError("Relax-quality decision requires a VMAF value.")
+        return replace(options, min_vmaf=float(decision.suggested_value))
+    if decision.action_code == DecisionActionCode.CHANGE_MEDIA_BUDGET:
+        return replace(options, audio_mode=AudioMode.AAC)
+    return options
 
 
 def reselect_after_quality_decision(

@@ -162,8 +162,21 @@ def _extract_preset_choices(help_text: str) -> list[str]:
     return choices
 
 
+def _ffmpeg_file_identity(ffmpeg_path: Path) -> tuple[int, int, int]:
+    """Return the file fields that invalidate in-process encoder-help caches."""
+    try:
+        stat = ffmpeg_path.stat()
+    except OSError:
+        return (-1, -1, -1)
+    return (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
+
 @lru_cache(maxsize=64)
-def _cached_runtime_preset_choices(ffmpeg_path: Path, encoder_name: str) -> tuple[str, ...]:
+def _cached_runtime_preset_choices(
+    ffmpeg_path: Path,
+    encoder_name: str,
+    _ffmpeg_identity: tuple[int, int, int],
+) -> tuple[str, ...]:
     output = _run_encoder_help(ffmpeg_path, encoder_name)
     return tuple(_extract_preset_choices(output))
 
@@ -171,7 +184,19 @@ def _cached_runtime_preset_choices(ffmpeg_path: Path, encoder_name: str) -> tupl
 def preset_choices_for_encoder(ffmpeg_path: Path, encoder_name: str) -> list[str]:
     if encoder_name.endswith("_videotoolbox"):
         return []
-    choices = list(_cached_runtime_preset_choices(ffmpeg_path, encoder_name))
+    try:
+        choices = list(
+            _cached_runtime_preset_choices(
+                ffmpeg_path,
+                encoder_name,
+                _ffmpeg_file_identity(ffmpeg_path),
+            )
+        )
+    except (OSError, subprocess.SubprocessError):
+        # Capability discovery should still report a usable encoder when its
+        # optional help probe cannot be run.  The static list below is the same
+        # safe fallback used when FFmpeg returns help without a preset section.
+        choices = []
     if choices:
         return choices
     return _fallback_preset_choices(encoder_name)
@@ -229,26 +254,96 @@ def _runtime_candidates_for_codec(
 ) -> dict[BackendChoice, str] | None:
     if runtime_capabilities is None:
         return None
+    candidates: dict[BackendChoice, str] = {}
+    for backend in ENCODER_CANDIDATES[codec]:
+        entry = encoder_capability_for_backend(runtime_capabilities, codec, backend)
+        if entry is None:
+            continue
+        encoder_name = entry.get("encoder")
+        if isinstance(encoder_name, str) and encoder_name:
+            candidates[backend] = encoder_name
+    return candidates
+
+
+def encoder_capability_for_backend(
+    runtime_capabilities: dict | None,
+    codec: CodecChoice,
+    backend: BackendChoice,
+) -> dict[str, object] | None:
+    """Return the validated runtime entry for one codec/backend pair.
+
+    Capability payloads are persisted as JSON dictionaries, so callers should
+    use this query instead of reaching through ``codecs`` themselves.  The
+    expected encoder mapping is checked here as a defense against stale or
+    hand-edited payloads.
+    """
+    if runtime_capabilities is None or backend not in ENCODER_CANDIDATES[codec]:
+        return None
     codecs = runtime_capabilities.get("codecs")
     if not isinstance(codecs, dict):
-        return {}
+        return None
     items = codecs.get(codec.value)
     if not isinstance(items, list):
-        return {}
-
-    expected = ENCODER_CANDIDATES[codec]
-    candidates: dict[BackendChoice, str] = {}
+        return None
+    expected_encoder = ENCODER_CANDIDATES[codec][backend]
     for item in items:
         if not isinstance(item, dict):
             continue
-        try:
-            backend = BackendChoice(str(item.get("backend", "")))
-        except ValueError:
+        if str(item.get("backend", "")).strip() != backend.value:
             continue
-        encoder_name = str(item.get("encoder", "")).strip()
-        if expected.get(backend) == encoder_name:
-            candidates[backend] = encoder_name
-    return candidates
+        if str(item.get("encoder", "")).strip() != expected_encoder:
+            continue
+        return dict(item)
+    return None
+
+
+def available_backends_for_codec(
+    runtime_capabilities: dict | None,
+    codec: CodecChoice,
+) -> tuple[BackendChoice, ...]:
+    """Return the usable concrete backends recorded for ``codec``."""
+    if runtime_capabilities is None:
+        return ()
+    return tuple(
+        backend
+        for backend in AUTO_BACKEND_PRIORITY
+        if encoder_capability_for_backend(runtime_capabilities, codec, backend) is not None
+    )
+
+
+def encoder_name_for_backend(
+    runtime_capabilities: dict | None,
+    codec: CodecChoice,
+    backend: BackendChoice,
+) -> str | None:
+    """Return the concrete encoder recorded for a usable backend."""
+    entry = encoder_capability_for_backend(runtime_capabilities, codec, backend)
+    encoder_name = entry.get("encoder") if entry is not None else None
+    return encoder_name if isinstance(encoder_name, str) and encoder_name else None
+
+
+def preset_choices_from_capabilities(
+    runtime_capabilities: dict | None,
+    codec: CodecChoice,
+    backend: BackendChoice,
+) -> list[str]:
+    """Return preset choices from a completed capability snapshot.
+
+    Missing ``preset_choices`` is tolerated for in-memory legacy snapshots and
+    uses the deterministic encoder fallback.  Persisted legacy snapshots are
+    rejected by the cache schema validator and are rebuilt before reaching the
+    GUI.  A present but malformed value is treated as unavailable.
+    """
+    entry = encoder_capability_for_backend(runtime_capabilities, codec, backend)
+    if entry is None:
+        return []
+    raw_choices = entry.get("preset_choices")
+    if raw_choices is None:
+        encoder_name = entry.get("encoder")
+        return _fallback_preset_choices(encoder_name) if isinstance(encoder_name, str) else []
+    if not isinstance(raw_choices, list):
+        return []
+    return [choice for choice in raw_choices if isinstance(choice, str) and choice]
 
 
 def resolve_encoder(

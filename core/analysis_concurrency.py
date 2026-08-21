@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
+import threading
+from collections.abc import Callable, Iterator
+
+from core.models import OperationCancelledError
 
 
 MAX_ANALYSIS_JOBS = 2
@@ -20,3 +25,25 @@ def analysis_concurrency_limit(*, cpu_count: int | None = None) -> int:
     if count >= MIN_CPUS_FOR_PARALLEL_ANALYSIS:
         return MAX_ANALYSIS_JOBS
     return 1
+
+
+# One module owns the process-wide resource and its release discipline.  It is
+# deliberately independent from Smart workflow code so previews and encodes
+# cannot accidentally use different semaphores.
+SMART_ANALYSIS_SEMAPHORE = threading.Semaphore(analysis_concurrency_limit())
+
+
+def acquire_analysis_slot(cancel_check: Callable[[], bool] | None) -> None:
+    while not SMART_ANALYSIS_SEMAPHORE.acquire(timeout=0.1):
+        if cancel_check is not None and cancel_check():
+            raise OperationCancelledError("Smart analysis cancelled.")
+
+
+@contextmanager
+def analysis_slot(cancel_check: Callable[[], bool] | None) -> Iterator[None]:
+    """Acquire a cancellable analysis slot and always release it."""
+    acquire_analysis_slot(cancel_check)
+    try:
+        yield
+    finally:
+        SMART_ANALYSIS_SEMAPHORE.release()

@@ -31,26 +31,30 @@ and Smart/Fixed control syncing.
   `analysis_profile_changed`, `options_changed`.
 - `MainWindow` must not reach into the panel's raw widgets; tests that need widget
   state access them via `window.options_panel.<widget>`.
+- The panel renders the capability snapshot produced by `CapabilityWorker`.
+  Encoder entries include `preset_choices`; never run FFmpeg discovery or encoder
+  probing synchronously from a widget refresh path.
 
 ## Queue layering
 
 - `gui.queue_state` — Qt-free queue record/status/metrics logic. Imports `core` only.
+- `gui.queue_actions` — Qt-free quality/size decision and file-side-effect actions
+  over one queue record.
 - `gui.queue_model` — `QueueTableModel`, `QueueColumn` and column metadata, cell
-  formatting and roles. Depends on `gui.queue_state` and `core`; never on the view.
+  formatting, roles and Qt notifications. Delegates mutations to `queue_state` and
+  `queue_actions`; never owns receipt, constraint or file side effects.
 - `gui.queue_view` — `ResponsiveQueueTableView`, header resize modes, reflow, and the
   `create_queue_view()` factory. May use `gui.queue_model`'s column definitions.
 - `gui.queue_manager` — Qt worker/thread orchestration over the model.
 - View may depend on the model; model and state must not depend on the view.
 
-## MainWindow scope (evaluated 2026-08-18)
+## MainWindow scope (evaluated 2026-08-21)
 
-After extracting `EncodeOptionsPanel` and splitting the queue into view/model/state,
-`MainWindow` is ~1380 lines and is mostly composition, worker orchestration, and
-top-level actions. The remaining cohesive-looking chunk is queue coordination, but it
-is a thin state machine over shared `MainWindow` state (`queue_busy`, `active_worker`,
-status labels, Activity Log) and would require a large callback/signal surface to
-extract — a net negative. Revisit `SourcePanel` / `QueueDashboard` only if a chunk
-clearly exceeds ~400 lines with a narrow interface. Do not split by line count alone.
+`MainWindow` remains the GUI composition root. Its UI construction is split into
+same-class builder methods and preview summary formatting lives in
+`preview_result_dialog`; avoid introducing pass-through controller objects. Revisit a
+`SourcePanel` / `QueueDashboard` extraction only when a cohesive feature has a narrow
+interface. Do not split by line count alone.
 
 ## Canonical checks
 

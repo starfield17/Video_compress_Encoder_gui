@@ -17,12 +17,10 @@ from PySide6.QtWidgets import (
 )
 
 from core.analysis_profiles import analysis_profiles_from_config, parse_analysis_profile_name
-from core.discover_ffmpeg import discover_ffmpeg_tools
 from core.encoder_caps import (
     ENCODER_CANDIDATES,
-    list_available_encoders,
-    preset_choices_for_encoder,
-    resolve_encoder,
+    available_backends_for_codec,
+    preset_choices_from_capabilities,
 )
 from core.i18n import Translator
 from core.models import (
@@ -77,7 +75,9 @@ class EncodeOptionsPanel(QWidget):
         self.app_config = app_config
         self._append_log = append_log if append_log is not None else (lambda message: None)
         self._encoder_capabilities_ready = False
+        self._runtime_capabilities_snapshot: dict | None = None
         self._pending_backend: BackendChoice | None = None
+        self._pending_encoder_preset: str | None = None
         self._last_codec_for_ratio = CodecChoice.HEVC
 
         self.options_tabs = QTabWidget()
@@ -459,24 +459,35 @@ class EncodeOptionsPanel(QWidget):
 
     def begin_capability_detection(self) -> None:
         self._encoder_capabilities_ready = False
+        self._runtime_capabilities_snapshot = None
         self._rebuild_backend_controls()
+        # Do not show stale choices while the worker refreshes the snapshot.
+        # ``refresh_encoder_preset_choices`` retains a selected value so it
+        # can be restored after detection completes.
+        self.refresh_encoder_preset_choices()
 
     def set_runtime_capabilities(self, capabilities: dict) -> None:
         self._encoder_capabilities_ready = True
+        self._runtime_capabilities_snapshot = dict(capabilities)
         pending_backend = self._pending_backend
         self._pending_backend = None
+        pending_preset = self._pending_encoder_preset
+        self._pending_encoder_preset = None
         self._rebuild_backend_controls(
             preferred_backend=pending_backend,
             log_reset=pending_backend is not None,
         )
         self._refresh_decode_acceleration_choices(log_reset=True)
         self._refresh_smart_mode_availability()
-        self.refresh_encoder_preset_choices()
+        self.refresh_encoder_preset_choices(preset=pending_preset)
 
     def notify_capability_detection_failed(self) -> None:
         self._encoder_capabilities_ready = False
+        self._runtime_capabilities_snapshot = None
         self._pending_backend = None
+        self._pending_encoder_preset = None
         self._rebuild_backend_controls()
+        self.refresh_encoder_preset_choices()
         self._refresh_decode_acceleration_choices(log_reset=True, force_unavailable=True)
         self._refresh_smart_mode_availability(force_unavailable=True)
 
@@ -576,14 +587,6 @@ class EncodeOptionsPanel(QWidget):
         self.refresh_encoder_preset_choices()
         self.codec_changed.emit(current_codec)
 
-    def _configured_ffmpeg(self) -> str | None:
-        text = str(self.app_config.get("ffmpeg_path", "")).strip()
-        return text or None
-
-    def _configured_ffprobe(self) -> str | None:
-        text = str(self.app_config.get("ffprobe_path", "")).strip()
-        return text or None
-
     def _parallel_backend_widgets(self) -> list[tuple[QCheckBox, BackendChoice]]:
         return [
             (self.parallel_nvenc_check, BackendChoice.NVENC),
@@ -597,8 +600,11 @@ class EncodeOptionsPanel(QWidget):
         return CodecChoice(self.codec_combo.currentText())
 
     def _runtime_capabilities(self) -> dict | None:
-        capabilities = self.app_config.get("encoder_capabilities")
-        return capabilities if self._encoder_capabilities_ready and isinstance(capabilities, dict) else None
+        return (
+            self._runtime_capabilities_snapshot
+            if self._encoder_capabilities_ready
+            else None
+        )
 
     def _refresh_decode_acceleration_choices(
         self,
@@ -656,17 +662,7 @@ class EncodeOptionsPanel(QWidget):
         capabilities = self._runtime_capabilities()
         if capabilities is None:
             return backend == BackendChoice.CPU
-        codecs = capabilities.get("codecs")
-        if not isinstance(codecs, dict):
-            return False
-        items = codecs.get(codec.value)
-        if not isinstance(items, list):
-            return False
-        return any(
-            isinstance(item, dict)
-            and str(item.get("backend", "")).strip() == backend.value
-            for item in items
-        )
+        return backend in available_backends_for_codec(capabilities, codec)
 
     def _available_explicit_backends_for_current_codec(self) -> list[BackendChoice]:
         codec = self._current_codec()
@@ -693,12 +689,12 @@ class EncodeOptionsPanel(QWidget):
             selected_backend = desired_backend
         else:
             selected_backend = BackendChoice.AUTO
-            if self._runtime_capabilities() is None and desired_backend == BackendChoice.VIDEOTOOLBOX:
+            if self._runtime_capabilities() is None and desired_backend != BackendChoice.AUTO:
                 self._pending_backend = desired_backend
             if log_reset and desired_backend != BackendChoice.AUTO:
                 if not (
                     self._runtime_capabilities() is None
-                    and desired_backend == BackendChoice.VIDEOTOOLBOX
+                    and desired_backend != BackendChoice.AUTO
                 ):
                     self._append_log(
                         self.tr.t(
@@ -778,25 +774,6 @@ class EncodeOptionsPanel(QWidget):
         value = self.encoder_preset_combo.currentData()
         return value if isinstance(value, str) and value else None
 
-    def _resolve_encoder_for_preset_choices(self):
-        try:
-            ffmpeg_path, _ffprobe_path = discover_ffmpeg_tools(
-                self._configured_ffmpeg(),
-                self._configured_ffprobe(),
-            )
-            runtime_capabilities = self._runtime_capabilities()
-            available_encoders = set() if runtime_capabilities is not None else list_available_encoders(ffmpeg_path)
-            encoder_info = resolve_encoder(
-                CodecChoice(self.codec_combo.currentText()),
-                BackendChoice(self.backend_combo.currentText()),
-                available_encoders,
-                ffmpeg_path,
-                runtime_capabilities=runtime_capabilities,
-            )
-            return ffmpeg_path, encoder_info
-        except Exception:
-            return None
-
     def _set_encoder_preset_items(self, choices: list[str]) -> None:
         self.encoder_preset_combo.blockSignals(True)
         self.encoder_preset_combo.clear()
@@ -825,20 +802,35 @@ class EncodeOptionsPanel(QWidget):
     ) -> None:
         desired_preset = self._current_encoder_preset() if preset is self._PRESET_UNSET else preset
         if self.backend_combo.currentText() == BackendChoice.AUTO.value:
+            # ``apply_options`` may request an explicit backend before the
+            # worker has produced a snapshot.  Keep its preset alongside the
+            # pending backend; a true AUTO selection must discard it.
+            if desired_preset is not None and self._pending_backend is not None:
+                self._pending_encoder_preset = desired_preset
+            else:
+                self._pending_encoder_preset = None
             self._set_encoder_preset_items([])
             self.encoder_preset_combo.setEnabled(False)
             self.encoder_preset_combo.setToolTip(self.tr.t("gui.tooltip.encoder_preset_auto"))
             self._select_encoder_preset(None, log_invalid=False)
             return
-        resolved = self._resolve_encoder_for_preset_choices()
-        if resolved is None:
+        capabilities = self._runtime_capabilities()
+        if capabilities is None:
+            if desired_preset is not None:
+                self._pending_encoder_preset = desired_preset
+            else:
+                self._pending_encoder_preset = None
             self._set_encoder_preset_items([])
             self.encoder_preset_combo.setEnabled(False)
             self.encoder_preset_combo.setToolTip(self.tr.t("gui.tooltip.encoder_preset_unavailable"))
             self._select_encoder_preset(None, log_invalid=log_invalid and desired_preset is not None)
             return
-        ffmpeg_path, encoder_info = resolved
-        choices = preset_choices_for_encoder(ffmpeg_path, encoder_info.encoder_name)
+        self._pending_encoder_preset = None
+        choices = preset_choices_from_capabilities(
+            capabilities,
+            self._current_codec(),
+            BackendChoice(self.backend_combo.currentText()),
+        )
         self._set_encoder_preset_items(choices)
         self.encoder_preset_combo.setEnabled(bool(choices))
         tooltip_key = "gui.tooltip.encoder_preset_unavailable" if not choices else ""

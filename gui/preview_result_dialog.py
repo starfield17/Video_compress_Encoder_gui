@@ -3,6 +3,77 @@ from __future__ import annotations
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QPlainTextEdit, QVBoxLayout
 
 from core.i18n import Translator
+from core.models import PreviewResult, SmartPreviewResult
+
+
+def _format_size(size_bytes: int) -> str:
+    value = float(size_bytes)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024.0 or unit == "TiB":
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+    return str(size_bytes)
+
+
+def build_preview_summary(
+    tr: Translator,
+    result: PreviewResult | SmartPreviewResult,
+) -> list[str]:
+    """Build the translated preview report without depending on a window."""
+    if isinstance(result, SmartPreviewResult):
+        quality = result.quality_search_result
+        lines = [
+            tr.t("gui.summary.preview_source", path=result.source_path),
+            tr.t(
+                "gui.summary.smart_target_bitrate",
+                value=(
+                    f"{quality.selected_video_bitrate_bps / 1000:.0f} kbps"
+                    if quality.selected_video_bitrate_bps
+                    else "-"
+                ),
+            ),
+            tr.t(
+                "gui.summary.smart_min_vmaf",
+                value=f"{quality.min_vmaf:.2f}" if quality.min_vmaf is not None else "-",
+            ),
+            tr.t(
+                "gui.summary.smart_predicted_ratio",
+                value=(
+                    f"{quality.predicted_output_ratio * 100:.2f}%"
+                    if quality.predicted_output_ratio is not None
+                    else "-"
+                ),
+            ),
+            tr.t(
+                "gui.summary.smart_required_ratio",
+                value=(
+                    f"{quality.required_output_ratio * 100:.2f}%"
+                    if quality.required_output_ratio is not None
+                    else "-"
+                ),
+            ),
+            tr.t("gui.summary.log_path", path=result.log_path or ""),
+        ]
+        if result.error_message:
+            lines.append(f"{tr.t('gui.message.warning')}: {result.error_message}")
+        return lines
+
+    return [
+        tr.t("gui.summary.preview_source", path=result.job.source_path),
+        tr.t(
+            "gui.summary.preview_window",
+            start=result.job.start_sec,
+            duration=result.job.duration_sec,
+        ),
+        tr.t("gui.summary.preview_source_sample", path=result.job.source_sample_path),
+        tr.t("gui.summary.preview_encoded_sample", path=result.job.encoded_sample_path),
+        tr.t("gui.summary.preview_ratio", value=f"{result.sample_compression_ratio:.3f}"),
+        tr.t(
+            "gui.summary.preview_estimated_size",
+            value=_format_size(result.estimated_full_output_size),
+        ),
+        tr.t("gui.summary.log_path", path=result.log_path or ""),
+    ]
 
 
 class PreviewResultDialog(QDialog):
