@@ -9,8 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, TextIO
 
-from core.analysis_runtime import SOURCE_DECODE_SOFTWARE, AnalysisExecutionPlan, AnalysisTier, source_decode_args
-from core.build_ffmpeg_cmd import build_encode_commands, build_video_args
+from core.ffmpeg.commands import build_encode_commands, build_video_args
 from core.models import (
     ContainerChoice,
     DecodeAcceleration,
@@ -19,9 +18,11 @@ from core.models import (
     QualityCandidateResult,
     VmafBackend,
 )
-from core.smart_bitrate import predicted_output_size
-from core.subprocess_utils import hidden_popen_kwargs
-from core.vmaf_runtime import (
+from core.ffmpeg.subprocess import hidden_popen_kwargs
+
+from .bitrate import predicted_output_size
+from .runtime import SOURCE_DECODE_SOFTWARE, AnalysisExecutionPlan, AnalysisTier, source_decode_args
+from .vmaf import (
     EXACT_VMAF_SUBSAMPLE,
     PTS_RESET_FILTER,
     VmafEncodeMetadata,

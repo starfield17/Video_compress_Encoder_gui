@@ -14,7 +14,7 @@ from core.models import (
     QualityUnreachablePolicy,
     SkippedOutputPolicy,
 )
-from core.skipped_outputs import (
+from core.media.skipped import (
     group_skipped_output_pairs,
     is_eligible_skipped_item,
     publish_skipped_source,

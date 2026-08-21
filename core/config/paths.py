@@ -19,7 +19,7 @@ def is_frozen() -> bool:
 
 
 def source_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+    return Path(__file__).resolve().parent.parent.parent
 
 
 def macos_app_bundle_path(executable_path: str | Path | None = None) -> Path | None:

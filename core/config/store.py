@@ -6,7 +6,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Callable
 
-from core.app_paths import workdir_dir
+from core.config.paths import workdir_dir
 from core.models import (
     AudioMode,
     BackendChoice,

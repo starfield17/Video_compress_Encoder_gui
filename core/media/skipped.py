@@ -4,9 +4,9 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.external_subtitles import copy_external_subtitles
+from core.media.subtitles import copy_external_subtitles
 from core.models import EncodePlanItem, EncodeResult, SkippedOutputPolicy
-from core.path_utils import ensure_dir
+from core.media.paths import ensure_dir
 
 
 @dataclass(frozen=True, slots=True)

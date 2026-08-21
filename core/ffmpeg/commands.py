@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from core.models import AudioMode, ContainerChoice, DecodeAcceleration, EncodePlanItem, PreviewJob
-from core.path_utils import passlog_prefix
+from core.media.paths import passlog_prefix
 
 
 def _null_sink() -> str:

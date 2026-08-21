@@ -41,7 +41,7 @@ from core.models import (
     SmartPreviewResult,
     VideoFileItem,
 )
-from core.preset_store import (
+from core.config import (
     delete_preset,
     list_presets,
     load_app_config,
@@ -49,7 +49,7 @@ from core.preset_store import (
     save_preset,
     update_app_config,
 )
-from core.skipped_outputs import group_skipped_output_pairs, is_eligible_skipped_item, publish_skipped_source
+from core.media import group_skipped_output_pairs, is_eligible_skipped_item, publish_skipped_source
 from gui.activity_log_window import ActivityLogWindow
 from gui.constraint_decision_dialog import (
     SizeMissDecision,

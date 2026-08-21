@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 from core.models import BackendChoice, CodecChoice, EncoderInfo
-from core.subprocess_utils import noninteractive_run_kwargs
+from core.ffmpeg.subprocess import noninteractive_run_kwargs
 
 
 # Ordered by preference: hardware encoders (NVENC, QSV, AMF, VideoToolbox) are

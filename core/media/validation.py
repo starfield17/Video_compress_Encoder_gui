@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.models import EncodeOptions, EncoderInfo
-from core.path_utils import ensure_dir
+from core.media.paths import ensure_dir
 
 
 def validate_workdir(workdir: Path) -> Path:

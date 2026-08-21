@@ -16,6 +16,11 @@ This project refactors the original single-file compressor into a modular layout
 ```text
 main.py
 core/
+  config/      application paths, configuration and presets
+  media/       media-domain paths, files, subtitles and validation
+  ffmpeg/      FFmpeg discovery, probing, capabilities and commands
+  smart/       Smart/VMAF analysis and sampling
+  encoding/    planning, execution, preview and parallel scheduling
 cli/
 gui/
 FFmpeg/

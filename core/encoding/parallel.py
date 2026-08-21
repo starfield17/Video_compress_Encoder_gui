@@ -7,10 +7,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Sequence
 
-from core.app_paths import config_dir as app_config_dir
-from core.encoder_capability_cache import ensure_encoder_capabilities
-from core.encoder_caps import resolve_encoder
-from core.exec_encode import execute_plan_item, run_analysis_phase
+from core.config.paths import config_dir as app_config_dir
+from core.encoding.analysis import run_analysis_phase
+from core.encoding.executor import execute_plan_item
+from core.ffmpeg.capabilities import ensure_encoder_capabilities
+from core.ffmpeg.encoders import resolve_encoder
 from core.models import (
     BackendChoice,
     CompressionMode,
@@ -21,7 +22,7 @@ from core.models import (
     OperationCancelledError,
 )
 from core.progress_events import ProgressCallback
-from core.safety_checks import validate_workdir
+from core.media.validation import validate_workdir
 
 
 ProgressContext = dict[str, object]

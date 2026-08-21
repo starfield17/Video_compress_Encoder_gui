@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from cli.cli_entry import _build_parser, _options_from_args
-from core.analysis_profiles import (
+from core.smart.profiles import (
     FACTORY_ANALYSIS_PROFILES,
     all_analysis_profile_payloads,
     analysis_profiles_from_config,
@@ -26,7 +26,7 @@ from core.models import (
     EncodeOptions,
     SizeBlockedPolicy,
 )
-from core.preset_store import _default_app_config
+from core.config.store import _default_app_config
 from gui.gui_mainwindow import MainWindow
 from gui.settings_dialog import SettingsDialog
 

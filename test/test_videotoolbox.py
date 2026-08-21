@@ -14,20 +14,20 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from cli.cli_entry import _build_parser, _merge_options
-from core.build_ffmpeg_cmd import (
+from core.ffmpeg.commands import (
     build_encode_commands,
     build_input_acceleration_args,
     build_preview_encode_commands,
     build_video_args,
 )
-from core.encoder_capability_cache import (
+from core.ffmpeg.capabilities import (
     ENCODER_CAPABILITIES_SCHEMA_VERSION,
     _valid_capability_shape,
     detect_encoder_capabilities,
     is_encoder_capability_cache_valid,
     smoke_test_encoder,
 )
-from core.encoder_caps import (
+from core.ffmpeg.encoders import (
     iter_codec_candidates,
     default_preset_for_encoder,
     list_available_hwaccels,
@@ -44,8 +44,8 @@ from core.models import (
     EncoderInfo,
     PreviewJob,
 )
-from core.plan_encode import _validate_decode_acceleration
-from core.preset_store import encode_options_to_preset_data, preset_data_to_encode_options
+from core.encoding.planning import _validate_decode_acceleration
+from core.config.store import encode_options_to_preset_data, preset_data_to_encode_options
 from gui.gui_mainwindow import MainWindow
 
 
@@ -131,7 +131,7 @@ class VideoToolboxEncoderMappingTestCase(unittest.TestCase):
         self.assertIn((BackendChoice.VIDEOTOOLBOX, "hevc_videotoolbox"), hevc)
         self.assertNotIn(BackendChoice.VIDEOTOOLBOX, [backend for backend, _ in av1])
         self.assertIsNone(default_preset_for_encoder("hevc_videotoolbox"))
-        with patch("core.encoder_caps._cached_runtime_preset_choices", return_value=("slow",)):
+        with patch("core.ffmpeg.encoders._cached_runtime_preset_choices", return_value=("slow",)):
             self.assertEqual(preset_choices_for_encoder(Path("ffmpeg"), "hevc_videotoolbox"), [])
 
     def test_explicit_and_auto_resolution(self) -> None:
@@ -178,7 +178,7 @@ class VideoToolboxHardwareCapabilityTestCase(unittest.TestCase):
             stdout="Hardware acceleration methods:\nvideotoolbox\n",
             stderr="\nvulkan\n",
         )
-        with patch("core.encoder_caps.subprocess.run", return_value=completed) as run:
+        with patch("core.ffmpeg.encoders.subprocess.run", return_value=completed) as run:
             self.assertEqual(list_available_hwaccels(Path("ffmpeg")), {"videotoolbox", "vulkan"})
         self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
 
@@ -204,8 +204,8 @@ class VideoToolboxHardwareCapabilityTestCase(unittest.TestCase):
                 "codecs": {"hevc": [], "av1": []},
             }
             with (
-                patch("core.encoder_capability_cache._ffmpeg_mtime_ns", return_value=1),
-                patch("core.encoder_capability_cache._ffmpeg_version_line", return_value="test"),
+                patch("core.ffmpeg.capabilities._ffmpeg_mtime_ns", return_value=1),
+                patch("core.ffmpeg.capabilities._ffmpeg_version_line", return_value="test"),
             ):
                 self.assertTrue(is_encoder_capability_cache_valid(base, ffmpeg))
                 self.assertFalse(is_encoder_capability_cache_valid({**base, "hwaccels": None}, ffmpeg))
@@ -217,10 +217,10 @@ class VideoToolboxHardwareCapabilityTestCase(unittest.TestCase):
 
     def test_video_toolbox_detection_requires_a_passing_smoke_test(self) -> None:
         with (
-            patch("core.encoder_capability_cache._ffmpeg_mtime_ns", return_value=1),
-            patch("core.encoder_capability_cache._ffmpeg_version_line", return_value="test"),
+            patch("core.ffmpeg.capabilities._ffmpeg_mtime_ns", return_value=1),
+            patch("core.ffmpeg.capabilities._ffmpeg_version_line", return_value="test"),
             patch(
-                "core.encoder_capability_cache.smoke_test_encoder",
+                "core.ffmpeg.capabilities.smoke_test_encoder",
                 side_effect=lambda _path, encoder: encoder in {"hevc_videotoolbox", "libx265", "libsvtav1"},
             ),
         ):
@@ -242,9 +242,9 @@ class VideoToolboxHardwareCapabilityTestCase(unittest.TestCase):
 
     def test_video_toolbox_is_omitted_when_its_smoke_test_fails(self) -> None:
         with (
-            patch("core.encoder_capability_cache._ffmpeg_mtime_ns", return_value=1),
-            patch("core.encoder_capability_cache._ffmpeg_version_line", return_value="test"),
-            patch("core.encoder_capability_cache.smoke_test_encoder", return_value=False),
+            patch("core.ffmpeg.capabilities._ffmpeg_mtime_ns", return_value=1),
+            patch("core.ffmpeg.capabilities._ffmpeg_version_line", return_value="test"),
+            patch("core.ffmpeg.capabilities.smoke_test_encoder", return_value=False),
         ):
             capabilities = detect_encoder_capabilities(
                 Path("ffmpeg"),
@@ -261,7 +261,7 @@ class VideoToolboxHardwareCapabilityTestCase(unittest.TestCase):
             captured["kwargs"] = kwargs
             return type("Proc", (), {"returncode": 0})()
 
-        with patch("core.encoder_capability_cache.subprocess.run", side_effect=fake_run):
+        with patch("core.ffmpeg.capabilities.subprocess.run", side_effect=fake_run):
             self.assertTrue(smoke_test_encoder(Path("ffmpeg"), "hevc_videotoolbox"))
         cmd = captured["cmd"]
         self.assertIn("-allow_sw", cmd)

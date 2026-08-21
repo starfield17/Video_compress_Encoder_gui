@@ -6,8 +6,8 @@ import subprocess
 from pathlib import Path
 from typing import Iterable, Optional
 
-from core.app_paths import app_root, bundle_root
-from core.subprocess_utils import noninteractive_run_kwargs
+from core.config.paths import app_root, bundle_root
+from core.ffmpeg.subprocess import noninteractive_run_kwargs
 
 
 PROJECT_FFMPEG_DIRNAME = "FFmpeg"

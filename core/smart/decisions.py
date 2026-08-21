@@ -5,7 +5,7 @@ import os
 from dataclasses import replace
 from pathlib import Path
 
-from core.external_subtitles import copy_external_subtitles
+from core.media.subtitles import copy_external_subtitles
 from core.models import (
     AudioMode,
     ConstraintFailureKind,
@@ -18,8 +18,8 @@ from core.models import (
     QualitySearchResult,
     SizeBlockedPolicy,
 )
-from core.smart_bitrate import reselect_from_candidates
-from core.smart_cache import quality_configuration_fingerprint
+from .bitrate import reselect_from_candidates
+from .cache import quality_configuration_fingerprint
 
 
 def build_decision_options(result: QualitySearchResult) -> list[DecisionOption]:

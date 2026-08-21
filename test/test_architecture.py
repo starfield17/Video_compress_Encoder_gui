@@ -8,6 +8,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 APP_PACKAGES = ("core", "cli", "gui")
 QT_ROOTS = {"PySide2", "PySide6", "PyQt5", "PyQt6", "qtpy", "Qt"}
+CORE_ROOT_MODULES = {"core", "core.i18n", "core.models", "core.progress_events", "core.smart_quality"}
+CORE_PACKAGES = ("config", "media", "ffmpeg", "smart", "encoding")
+ALLOWED_CORE_PACKAGE_DEPENDENCIES = {
+    "config": set(),
+    "media": set(),
+    "ffmpeg": {"config", "media"},
+    "smart": {"ffmpeg", "media"},
+    "encoding": {"config", "ffmpeg", "media", "smart"},
+}
 
 
 def _module_name(path: Path) -> str:
@@ -22,7 +31,7 @@ def _module_name(path: Path) -> str:
 def _app_modules() -> dict[str, Path]:
     paths = [ROOT / "main.py"]
     for package in APP_PACKAGES:
-        paths.extend(sorted((ROOT / package).glob("*.py")))
+        paths.extend(sorted((ROOT / package).rglob("*.py")))
     return {_module_name(path): path for path in paths if path.is_file()}
 
 
@@ -115,6 +124,27 @@ def _cycles(graph: dict[str, set[str]]) -> list[list[str]]:
 
 
 class ArchitectureTestCase(unittest.TestCase):
+    def test_core_root_contains_only_public_contracts_and_capability_packages(self) -> None:
+        root_entries = {
+            path.name
+            for path in (ROOT / "core").iterdir()
+            if path.name != "AGENTS.md" and path.name != "__pycache__"
+        }
+        expected = {
+            "__init__.py",
+            "i18n.py",
+            "models.py",
+            "progress_events.py",
+            "smart_quality.py",
+            *CORE_PACKAGES,
+        }
+        self.assertEqual(
+            root_entries,
+            expected,
+            "core root is a small public contract surface; place implementation "
+            "inside its owning capability package",
+        )
+
     def test_core_has_no_ui_or_entrypoint_dependencies(self) -> None:
         violations: list[str] = []
         modules = _app_modules()
@@ -200,12 +230,12 @@ class ArchitectureTestCase(unittest.TestCase):
     def test_smart_sampling_dependency_direction(self) -> None:
         graph = _dependency_graph()
         expected = {
-            "core.content_complexity": set(),
-            "core.sample_planner": {"core.models"},
-            "core.smart_sampling": {
-                "core.content_complexity",
+            "core.smart.sampling.complexity": set(),
+            "core.smart.sampling.planner": {"core.models"},
+            "core.smart.sampling.scout": {
                 "core.models",
-                "core.sample_planner",
+                "core.smart.sampling.complexity",
+                "core.smart.sampling.planner",
             },
         }
         for module, allowed_core_dependencies in expected.items():
@@ -223,14 +253,14 @@ class ArchitectureTestCase(unittest.TestCase):
     def test_smart_quality_module_boundaries(self) -> None:
         graph = _dependency_graph()
         focused_modules = {
-            "core.smart_bitrate",
-            "core.smart_cache",
-            "core.smart_measurement",
+            "core.smart.bitrate",
+            "core.smart.cache",
+            "core.smart.measurement",
         }
         forbidden_dependencies = {
             "core.smart_quality",
-            "core.smart_workflow",
-            "core.constraint_resolution",
+            "core.smart.workflow",
+            "core.smart.decisions",
         }
         violations = {
             module: sorted(graph[module] & forbidden_dependencies)
@@ -243,17 +273,57 @@ class ArchitectureTestCase(unittest.TestCase):
             f"into orchestration or decisions: {violations}",
         )
         self.assertFalse(
-            graph["core.smart_workflow"] & {"core.smart_quality", "core.constraint_resolution"},
+            graph["core.smart.workflow"] & {"core.smart_quality", "core.smart.decisions"},
             "Smart workflow must orchestrate focused modules without importing the "
             "compatibility facade or queue decision policy",
+        )
+
+    def test_core_capability_dependency_direction(self) -> None:
+        graph = _dependency_graph()
+        violations: list[str] = []
+        for source, dependencies in graph.items():
+            source_parts = source.split(".")
+            if len(source_parts) < 2 or source_parts[0] != "core" or source_parts[1] not in CORE_PACKAGES:
+                continue
+            source_package = source_parts[1]
+            allowed = ALLOWED_CORE_PACKAGE_DEPENDENCIES[source_package]
+            for dependency in dependencies:
+                dependency_parts = dependency.split(".")
+                if len(dependency_parts) < 2 or dependency_parts[0] != "core":
+                    continue
+                dependency_package = dependency_parts[1]
+                if dependency_package in CORE_PACKAGES and dependency_package != source_package and dependency_package not in allowed:
+                    violations.append(f"{source} imports {dependency}")
+        self.assertFalse(
+            violations,
+            "core capability packages must follow config/media -> ffmpeg -> smart -> "
+            "encoding:\n" + "\n".join(sorted(violations)),
+        )
+
+    def test_cli_and_gui_use_core_public_package_contracts(self) -> None:
+        modules = _app_modules()
+        allowed = CORE_ROOT_MODULES | {f"core.{package}" for package in CORE_PACKAGES}
+        violations: list[str] = []
+        for source, path in modules.items():
+            if not source.startswith(("cli.", "gui.")):
+                continue
+            for imported in _imports(source, path):
+                if not imported.startswith("core.") or imported not in modules:
+                    continue
+                if imported not in allowed:
+                    violations.append(f"{path.relative_to(ROOT)} imports {imported!r}")
+        self.assertFalse(
+            violations,
+            "CLI and GUI must consume core package contracts instead of package "
+            "implementation modules:\n" + "\n".join(sorted(violations)),
         )
 
     def test_queue_model_has_no_domain_side_effect_dependencies(self) -> None:
         path = _app_modules()["gui.queue_model"]
         forbidden = (
-            "core.analysis_receipts",
-            "core.constraint_resolution",
-            "core.external_subtitles",
+            "core.smart.receipts",
+            "core.smart.decisions",
+            "core.media.subtitles",
         )
         violations = [
             imported

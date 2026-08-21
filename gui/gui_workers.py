@@ -7,9 +7,8 @@ from typing import Iterable
 
 from PySide6.QtCore import QThread, Signal
 
-from core.discover_ffmpeg import find_binary
-from core.encoder_capability_cache import ensure_encoder_capabilities
-from core.exec_encode import execute_plan, execute_preview, execute_smart_preview
+from core.encoding import build_encode_plan, execute_plan, execute_preview, execute_smart_preview
+from core.ffmpeg import ensure_encoder_capabilities, find_binary
 from core.models import (
     CompressionMode,
     EncodeOptions,
@@ -18,11 +17,9 @@ from core.models import (
     VideoFileItem,
     VmafBackend,
 )
-from core.plan_encode import build_encode_plan
-from core.preview_sample import build_preview_job
+from core.media import build_preview_job, collect_video_files
 from core.progress_events import ProgressEvent
-from core.scan_videos import collect_video_files
-from core.vmaf_runtime import VMAF_PRODUCTION_MODELS, probe_vmaf_runtime
+from core.smart import VMAF_PRODUCTION_MODELS, probe_vmaf_runtime
 
 
 def _safe_console_print(message: str) -> None:

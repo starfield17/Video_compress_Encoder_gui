@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import core.app_paths as app_paths
+import core.config.paths as app_paths
 from cli import cli_entry
-from core.app_paths import source_root
+from core.config.paths import source_root
 
 
 class AppPathsCompiledEnvironmentTestCase(unittest.TestCase):

@@ -5,9 +5,9 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from core.exec_encode import _start_command_process
-from core.probe_media import _run_command
-from core.subprocess_utils import (
+from core.encoding.process import _start_command_process
+from core.ffmpeg.probe import _run_command
+from core.ffmpeg.subprocess import (
     hidden_popen_kwargs,
     hidden_process_creationflags,
     noninteractive_run_kwargs,
@@ -17,7 +17,7 @@ from gui.gui_workers import _safe_console_print
 
 class SubprocessPolicyTestCase(unittest.TestCase):
     def test_non_windows_run_kwargs_use_devnull_without_creation_flag(self) -> None:
-        with patch("core.subprocess_utils.hidden_process_creationflags", return_value=0):
+        with patch("core.ffmpeg.subprocess.hidden_process_creationflags", return_value=0):
             kwargs = noninteractive_run_kwargs()
 
         self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
@@ -25,7 +25,7 @@ class SubprocessPolicyTestCase(unittest.TestCase):
 
     def test_windows_run_kwargs_use_devnull_and_create_no_window(self) -> None:
         creationflags = 0x08000000
-        with patch("core.subprocess_utils.hidden_process_creationflags", return_value=creationflags):
+        with patch("core.ffmpeg.subprocess.hidden_process_creationflags", return_value=creationflags):
             kwargs = noninteractive_run_kwargs()
 
         self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
@@ -34,18 +34,18 @@ class SubprocessPolicyTestCase(unittest.TestCase):
     def test_hidden_process_creationflags_reads_windows_constant(self) -> None:
         creationflags = 0x08000000
         with (
-            patch("core.subprocess_utils.os.name", "nt"),
+            patch("core.ffmpeg.subprocess.os.name", "nt"),
             patch.object(subprocess, "CREATE_NO_WINDOW", creationflags, create=True),
         ):
             self.assertEqual(hidden_process_creationflags(), creationflags)
 
     def test_non_windows_popen_kwargs_are_empty(self) -> None:
-        with patch("core.subprocess_utils.hidden_process_creationflags", return_value=0):
+        with patch("core.ffmpeg.subprocess.hidden_process_creationflags", return_value=0):
             self.assertEqual(hidden_popen_kwargs(), {})
 
     def test_windows_popen_kwargs_contain_creation_flag(self) -> None:
         creationflags = 0x08000000
-        with patch("core.subprocess_utils.hidden_process_creationflags", return_value=creationflags):
+        with patch("core.ffmpeg.subprocess.hidden_process_creationflags", return_value=creationflags):
             self.assertEqual(hidden_popen_kwargs(), {"creationflags": creationflags})
 
 
@@ -57,7 +57,7 @@ class SubprocessCallSiteTestCase(unittest.TestCase):
             stdout="{}",
             stderr="",
         )
-        with patch("core.probe_media.subprocess.run", return_value=completed) as run:
+        with patch("core.ffmpeg.probe.subprocess.run", return_value=completed) as run:
             self.assertIs(_run_command(["ffprobe"]), completed)
 
         self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
@@ -66,8 +66,8 @@ class SubprocessCallSiteTestCase(unittest.TestCase):
         creationflags = 0x08000000
         completed = subprocess.CompletedProcess(["ffprobe"], 0, stdout="{}", stderr="")
         with (
-            patch("core.subprocess_utils.hidden_process_creationflags", return_value=creationflags),
-            patch("core.probe_media.subprocess.run", return_value=completed) as run,
+            patch("core.ffmpeg.subprocess.hidden_process_creationflags", return_value=creationflags),
+            patch("core.ffmpeg.probe.subprocess.run", return_value=completed) as run,
         ):
             _run_command(["ffprobe"])
 
@@ -76,8 +76,8 @@ class SubprocessCallSiteTestCase(unittest.TestCase):
     def test_encoding_process_keeps_pipe_stdin_and_forwards_windows_flag(self) -> None:
         creationflags = 0x08000000
         with (
-            patch("core.exec_encode.hidden_popen_kwargs", return_value={"creationflags": creationflags}),
-            patch("core.exec_encode.subprocess.Popen") as popen,
+            patch("core.encoding.process.hidden_popen_kwargs", return_value={"creationflags": creationflags}),
+            patch("core.encoding.process.subprocess.Popen") as popen,
         ):
             _start_command_process(["ffmpeg"])
 

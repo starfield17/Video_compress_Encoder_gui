@@ -7,8 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from core.analysis_receipts import ANALYSIS_RECEIPT_SCHEMA_VERSION, load_analysis_receipt
-from core.analysis_runtime import (
+from core.smart.receipts import ANALYSIS_RECEIPT_SCHEMA_VERSION, load_analysis_receipt
+from core.smart.runtime import (
     COARSE_MAX_CANDIDATES,
     EXACT_MAX_CANDIDATES,
     SOURCE_DECODE_SOFTWARE,
@@ -29,7 +29,7 @@ from core.analysis_runtime import (
     software_source_plan,
     source_decode_args,
 )
-from core.build_ffmpeg_cmd import build_video_args
+from core.ffmpeg.commands import build_video_args
 from core.models import (
     AnalysisReceipt,
     BackendChoice,
@@ -46,17 +46,17 @@ from core.smart_quality import (
     SMART_ANALYSIS_ALGORITHM_VERSION,
     SMART_ANALYSIS_SEMAPHORE,
     SMART_SAMPLE_SCHEME_VERSION,
-    _build_loopback_score_command,
-    _build_reference,
-    _score_candidate,
     analyze_quality,
     measurement_configuration_fingerprint,
     search_bitrate_candidates,
 )
-from core.sample_planner import PlannedWindow, SamplePlan, SamplePlanningError
-from core.smart_sampling import SamplingResult
-from core.content_complexity import ComplexityProbeError
-from core.vmaf_runtime import (
+from core.smart.measurement import build_loopback_score_command as _build_loopback_score_command
+from core.smart.measurement import build_reference as _build_reference
+from core.smart.measurement import score_candidate as _score_candidate
+from core.smart.sampling.planner import PlannedWindow, SamplePlan, SamplePlanningError
+from core.smart.sampling.scout import SamplingResult
+from core.smart.sampling.complexity import ComplexityProbeError
+from core.smart.vmaf import (
     COARSE_VMAF_SUBSAMPLE,
     EXACT_VMAF_SUBSAMPLE,
     VMAF_STANDARD_MODEL,
@@ -525,7 +525,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                 cpu,
             )
             item.media_info.bit_depth = 8
-            with patch("core.smart_quality.SMART_SAMPLE_SCHEME_VERSION", 99):
+            with patch("core.smart.cache.SMART_SAMPLE_SCHEME_VERSION", 99):
                 self.assertNotEqual(
                     measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CPU),
                     cpu,
@@ -584,15 +584,15 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
 
             with (
                 patch(
-                    "core.smart_quality.select_vmaf_runtime",
+                    "core.smart.workflow.select_vmaf_runtime",
                     return_value=VmafRuntimeSupport(
                         VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
                     ),
                 ),
-                patch("core.smart_quality.detect_analysis_capabilities", return_value=_capabilities()),
-                patch("core.smart_quality.discover_sample_plan", return_value=_three_window_sampling()),
-                patch("core.smart_quality._run_logged"),
-                patch("core.smart_quality._score_candidate", side_effect=score),
+                patch("core.smart.workflow.detect_analysis_capabilities", return_value=_capabilities()),
+                patch("core.smart.workflow.discover_sample_plan", return_value=_three_window_sampling()),
+                patch("core.smart.workflow._run_logged"),
+                patch("core.smart.workflow._score_candidate", side_effect=score),
             ):
                 result = analyze_quality(ffmpeg, item, root, root / "log.txt")
 
@@ -626,20 +626,20 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                 with self.subTest(failure=type(failure).__name__):
                     with (
                         patch(
-                            "core.smart_quality.select_vmaf_runtime",
+                            "core.smart.workflow.select_vmaf_runtime",
                             return_value=VmafRuntimeSupport(
                                 VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
                             ),
                         ),
                         patch(
-                            "core.smart_quality.detect_analysis_capabilities",
+                            "core.smart.workflow.detect_analysis_capabilities",
                             return_value=_capabilities(),
                         ),
                         patch(
-                            "core.smart_quality.discover_sample_plan",
+                            "core.smart.workflow.discover_sample_plan",
                             side_effect=failure,
                         ),
-                        patch("core.smart_quality._score_candidate") as score,
+                        patch("core.smart.workflow._score_candidate") as score,
                     ):
                         result = analyze_quality(
                             ffmpeg, item, root, root / "log.txt"
@@ -676,16 +676,16 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             progress: list[dict[str, object]] = []
             with (
                 patch(
-                    "core.smart_quality.select_vmaf_runtime",
+                    "core.smart.workflow.select_vmaf_runtime",
                     return_value=VmafRuntimeSupport(
                         VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
                     ),
                 ),
-                patch("core.smart_quality.detect_analysis_capabilities", return_value=_capabilities()),
-                patch("core.smart_quality.discover_sample_plan", return_value=_sampling_with_holdout()),
-                patch("core.smart_quality._run_logged"),
-                patch("core.smart_quality._score_candidate", side_effect=score),
-                patch("core.smart_quality.search_bitrate_candidates", side_effect=search),
+                patch("core.smart.workflow.detect_analysis_capabilities", return_value=_capabilities()),
+                patch("core.smart.workflow.discover_sample_plan", return_value=_sampling_with_holdout()),
+                patch("core.smart.workflow._run_logged"),
+                patch("core.smart.workflow._score_candidate", side_effect=score),
+                patch("core.smart.workflow.search_bitrate_candidates", side_effect=search),
             ):
                 result = analyze_quality(
                     ffmpeg,
@@ -725,15 +725,15 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
 
             with (
                 patch(
-                    "core.smart_quality.select_vmaf_runtime",
+                    "core.smart.workflow.select_vmaf_runtime",
                     return_value=VmafRuntimeSupport(
                         VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
                     ),
                 ),
-                patch("core.smart_quality.detect_analysis_capabilities", return_value=_capabilities()),
-                patch("core.smart_quality.discover_sample_plan", return_value=_sampling_with_holdout()),
-                patch("core.smart_quality._run_logged"),
-                patch("core.smart_quality._score_candidate", side_effect=score),
+                patch("core.smart.workflow.detect_analysis_capabilities", return_value=_capabilities()),
+                patch("core.smart.workflow.discover_sample_plan", return_value=_sampling_with_holdout()),
+                patch("core.smart.workflow._run_logged"),
+                patch("core.smart.workflow._score_candidate", side_effect=score),
             ):
                 result = analyze_quality(ffmpeg, item, root, root / "log.txt")
             self.assertEqual(result.status, QualitySearchStatus.FAILED)
@@ -786,17 +786,17 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             loopback_caps = _capabilities(loopback_decoder=True)
             with (
                 patch(
-                    "core.smart_quality.select_vmaf_runtime",
+                    "core.smart.workflow.select_vmaf_runtime",
                     return_value=VmafRuntimeSupport(
                         VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
                     ),
                 ),
-                patch("core.smart_quality.detect_analysis_capabilities", return_value=loopback_caps),
-                patch("core.smart_quality.discover_sample_plan", return_value=_three_window_sampling()),
-                patch("core.smart_quality.build_analysis_execution_plan") as planner,
-                patch("core.smart_quality._run_logged"),
-                patch("core.smart_quality._score_candidate_loopback", side_effect=fake_loopback),
-                patch("core.smart_quality._score_candidate", side_effect=fake_score),
+                patch("core.smart.workflow.detect_analysis_capabilities", return_value=loopback_caps),
+                patch("core.smart.workflow.discover_sample_plan", return_value=_three_window_sampling()),
+                patch("core.smart.workflow.build_analysis_execution_plan") as planner,
+                patch("core.smart.workflow._run_logged"),
+                patch("core.smart.workflow._score_candidate_loopback", side_effect=fake_loopback),
+                patch("core.smart.workflow._score_candidate", side_effect=fake_score),
             ):
                 def plan_for(*, tier, **kwargs):
                     return build_analysis_execution_plan(
@@ -847,7 +847,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
         self.assertIsInstance(SmartCommandError(1, ["ffmpeg"], "reference extraction", "vt fail"), SmartCommandError)
 
     def test_concurrency_limit_stays_resource_bounded(self) -> None:
-        from core.analysis_concurrency import analysis_concurrency_limit
+        from core.smart.concurrency import analysis_concurrency_limit
 
         self.assertEqual(analysis_concurrency_limit(cpu_count=4), 1)
         self.assertEqual(analysis_concurrency_limit(cpu_count=8), 2)
@@ -901,7 +901,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
 
             log_path = root / "smart.log"
             with log_path.open("w", encoding="utf-8") as log_file, patch(
-                "core.smart_quality._run_logged", side_effect=fake_run
+                "core.smart.measurement.run_logged", side_effect=fake_run
             ):
                 result = _score_candidate(
                     Path("ffmpeg"),

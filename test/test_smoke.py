@@ -15,7 +15,7 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QAbstractButton, QApplication, QMessageBox, QScrollArea
 from PySide6.QtWidgets import QComboBox, QGroupBox, QHeaderView, QLabel, QLineEdit
 
-from core.app_paths import app_root, config_dir
+from core.config.paths import app_root, config_dir
 from core.i18n import get_translator
 from core.models import (
     BackendChoice,
@@ -26,7 +26,7 @@ from core.models import (
     EncoderInfo,
     MediaInfo,
 )
-from core.preset_store import app_config_path
+from core.config.store import app_config_path
 from gui.gui_mainwindow import MainWindow
 from gui.queue_manager import QueueManager
 from gui.queue_model import QueueColumn, QueueTableModel
@@ -139,6 +139,8 @@ class SmokeTestCase(unittest.TestCase):
     def test_build_context_reads_selected_paths_and_options(self) -> None:
         window = MainWindow(self.repo_root, language="en")
         try:
+            window.app_config["ffmpeg_path"] = ""
+            window.app_config["ffprobe_path"] = ""
             with tempfile.TemporaryDirectory() as temp_dir:
                 source = Path(temp_dir) / "source.mp4"
                 source.write_bytes(b"source")

@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from core.ffmpeg.subprocess import noninteractive_run_kwargs
+from core.media.metadata import infer_bit_depth_from_pix_fmt
 from core.models import MediaInfo, VmafBackend, VmafRuntimeSupport
-from core.subprocess_utils import noninteractive_run_kwargs
 
 
 PTS_RESET_FILTER = "settb=AVTB,setpts=PTS-STARTPTS"
@@ -93,37 +94,10 @@ def select_vmaf_model(media_info: MediaInfo) -> VmafModelSpec:
     return VMAF_STANDARD_HFR_MODEL if is_hfr else VMAF_STANDARD_MODEL
 
 
-_BIT_DEPTH_SUFFIX_RE = re.compile(r"(\d{1,2})(?:le|be)?$")
 _VMAF_SCORE_RE = re.compile(
     r"VMAF score:\s*([+-]?(?:nan|inf(?:inity)?|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?))",
     re.IGNORECASE,
 )
-
-
-def infer_bit_depth_from_pix_fmt(pix_fmt: str | None) -> int | None:
-    if not pix_fmt:
-        return None
-    normalized = pix_fmt.strip().lower()
-    if normalized in {
-        "yuv420p",
-        "yuv422p",
-        "yuv444p",
-        "yuvj420p",
-        "yuvj422p",
-        "yuvj444p",
-        "nv12",
-        "nv21",
-        "rgb24",
-        "bgr24",
-    }:
-        return 8
-    if normalized in {"p010", "p010le", "p010be", "p210", "p210le", "p210be"}:
-        return 10
-    match = _BIT_DEPTH_SUFFIX_RE.search(normalized)
-    if match:
-        value = int(match.group(1))
-        return value if value in {9, 10, 12, 14, 16} else None
-    return None
 
 
 def candidate_encode_metadata(media_info: MediaInfo, pix_fmt: str | None) -> VmafEncodeMetadata:

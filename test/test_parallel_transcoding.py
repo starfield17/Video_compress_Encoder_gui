@@ -26,8 +26,8 @@ from core.models import (
     EncoderInfo,
     MediaInfo,
 )
-from core.parallel_queue_exec import execute_plan_parallel
-from core.preset_store import encode_options_to_preset_data, preset_data_to_encode_options
+from core.encoding import execute_plan_parallel
+from core.config.store import encode_options_to_preset_data, preset_data_to_encode_options
 from gui.gui_mainwindow import MainWindow
 from gui.queue_state import create_queue_records
 from gui.queue_model import QueueColumn, QueueTableModel
@@ -157,16 +157,16 @@ class ParallelSchedulerTestCase(unittest.TestCase):
 
             with (
                 patch(
-                    "core.parallel_queue_exec.ensure_encoder_capabilities",
+                    "core.encoding.parallel.ensure_encoder_capabilities",
                     return_value=_capabilities(
                         [(BackendChoice.NVENC, "hevc_nvenc"), (BackendChoice.QSV, "hevc_qsv")]
                     ),
                 ),
                 patch(
-                    "core.parallel_queue_exec.resolve_encoder",
+                    "core.encoding.parallel.resolve_encoder",
                     side_effect=lambda codec, backend, available, ffmpeg_path=None, runtime_capabilities=None: _encoder(backend),
                 ),
-                patch("core.parallel_queue_exec.execute_plan_item", side_effect=fake_execute),
+                patch("core.encoding.parallel.execute_plan_item", side_effect=fake_execute),
             ):
                 results = execute_plan_parallel(
                     plan,
@@ -196,16 +196,16 @@ class ParallelSchedulerTestCase(unittest.TestCase):
 
             with (
                 patch(
-                    "core.parallel_queue_exec.ensure_encoder_capabilities",
+                    "core.encoding.parallel.ensure_encoder_capabilities",
                     return_value=_capabilities(
                         [(BackendChoice.NVENC, "hevc_nvenc"), (BackendChoice.QSV, "hevc_qsv")]
                     ),
                 ),
                 patch(
-                    "core.parallel_queue_exec.resolve_encoder",
+                    "core.encoding.parallel.resolve_encoder",
                     side_effect=lambda codec, backend, available, ffmpeg_path=None, runtime_capabilities=None: _encoder(backend),
                 ),
-                patch("core.parallel_queue_exec.execute_plan_item", side_effect=fake_execute),
+                patch("core.encoding.parallel.execute_plan_item", side_effect=fake_execute),
             ):
                 with self.assertRaisesRegex(RuntimeError, "boom"):
                     execute_plan_parallel(

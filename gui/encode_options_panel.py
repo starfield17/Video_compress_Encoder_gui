@@ -16,8 +16,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.analysis_profiles import analysis_profiles_from_config, parse_analysis_profile_name
-from core.encoder_caps import (
+from core.config import smart_policies_from_config
+from core.ffmpeg import (
     ENCODER_CANDIDATES,
     available_backends_for_codec,
     preset_choices_from_capabilities,
@@ -35,8 +35,7 @@ from core.models import (
     PreviewOptions,
     PreviewSampleMode,
 )
-from core.preset_store import smart_policies_from_config
-from core.smart_quality import resolve_max_output_ratio
+from core.smart import analysis_profiles_from_config, parse_analysis_profile_name, resolve_max_output_ratio
 
 
 EXPLICIT_BACKEND_ORDER: tuple[BackendChoice, ...] = (

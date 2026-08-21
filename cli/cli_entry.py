@@ -8,14 +8,32 @@ from pathlib import Path
 from typing import TypedDict
 
 from cli.cli_interactive import print_encode_results, print_plan, print_preview_result
-from core.app_paths import app_root, bundle_root
-from core.app_paths import config_dir as app_config_dir
-from core.app_paths import ensure_runtime_layout, workdir_dir
-from core.discover_ffmpeg import discover_ffmpeg_tools
-from core.encoder_caps import list_available_encoders, preset_choices_for_encoder, resolve_encoder
-from core.exec_encode import execute_plan, execute_preview, execute_smart_preview
+from core.config import (
+    app_root,
+    bundle_root,
+    config_dir as app_config_dir,
+    delete_preset,
+    encode_options_to_preset_data,
+    ensure_runtime_layout,
+    list_presets,
+    load_app_config,
+    load_preset,
+    parse_quality_unreachable_policy,
+    parse_size_blocked_policy,
+    parse_skipped_output_policy,
+    save_preset,
+    workdir_dir,
+)
+from core.encoding import (
+    build_encode_plan,
+    execute_plan,
+    execute_plan_parallel,
+    execute_preview,
+    execute_smart_preview,
+)
+from core.ffmpeg import discover_ffmpeg_tools, list_available_encoders, preset_choices_for_encoder, resolve_encoder
 from core.i18n import TranslationCatalog
-from core.analysis_profiles import bind_analysis_profile, parse_analysis_profile_name
+from core.media import build_preview_job, publish_skipped_sources
 from core.models import (
     AnalysisProfileName,
     AudioMode,
@@ -32,22 +50,12 @@ from core.models import (
     PreviewOptions,
     PreviewSampleMode,
 )
-from core.parallel_queue_exec import execute_plan_parallel
-from core.plan_encode import build_encode_plan
-from core.preset_store import (
-    delete_preset,
-    encode_options_to_preset_data,
-    list_presets,
-    load_app_config,
-    load_preset,
-    parse_quality_unreachable_policy,
-    parse_size_blocked_policy,
-    parse_skipped_output_policy,
-    save_preset,
+from core.smart import (
+    bind_analysis_profile,
+    constraint_policy_from_size_blocked,
+    parse_analysis_profile_name,
+    size_blocked_from_constraint_policy,
 )
-from core.smart_quality import constraint_policy_from_size_blocked, size_blocked_from_constraint_policy
-from core.skipped_outputs import publish_skipped_sources
-from core.preview_sample import build_preview_job
 
 
 class _BoolActionKwargs(TypedDict):

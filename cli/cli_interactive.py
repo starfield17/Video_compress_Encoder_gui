@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from core.bitrate_policy import human_kbps
 from core.i18n import Translator
+from core.media import human_kbps
 from core.models import CompressionMode, EncodePlan, EncodeResult, PreviewResult, SmartPreviewResult
-from core.smart_quality import build_decision_options
+from core.smart import build_decision_options
 
 
 def _human_size(size_bytes: int) -> str:

@@ -19,7 +19,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from cli.cli_entry import run_cli
-from core.exec_encode import execute_plan_item
+from core.encoding import execute_plan_item
 from core.models import (
     AudioMode,
     BackendChoice,
@@ -39,14 +39,12 @@ from core.models import (
     VmafBackend,
     VmafRuntimeSupport,
 )
-from core.preset_store import encode_options_to_preset_data, preset_data_to_encode_options
-from core.parallel_queue_exec import execute_plan_parallel
-from core.exec_encode import execute_plan
+from core.config.store import encode_options_to_preset_data, preset_data_to_encode_options
+from core.encoding import execute_plan_parallel
+from core.encoding import execute_plan
 from core.smart_quality import (
     SMART_ERROR_TAIL_CHARS,
     SmartCommandError,
-    _run_logged,
-    _score_candidate,
     analyze_quality,
     calculate_smart_bitrate_budget,
     choose_smart_sample_windows,
@@ -56,6 +54,8 @@ from core.smart_quality import (
     resolve_max_output_ratio,
     search_bitrate_candidates,
 )
+from core.smart.measurement import run_logged as _run_logged
+from core.smart.measurement import score_candidate as _score_candidate
 from gui.gui_mainwindow import MainWindow
 from gui.queue_state import QueueItemStatus, create_queue_records
 
@@ -244,7 +244,7 @@ class SmartSamplingAndBudgetTestCase(unittest.TestCase):
             ffmpeg.write_bytes(b"binary")
             item = _item(source, root / "out.mp4", EncodeOptions())
             with patch(
-                "core.smart_quality.select_vmaf_runtime",
+                "core.smart.workflow.select_vmaf_runtime",
                 return_value=VmafRuntimeSupport(
                     VmafBackend.CPU, "vmaf_v1.0.16_3d0h", False, "missing libvmaf"
                 ),
@@ -262,7 +262,7 @@ class SmartSamplingAndBudgetTestCase(unittest.TestCase):
             ffmpeg.write_bytes(b"binary")
             item = _item(source, root / "out.mp4", EncodeOptions())
             with patch(
-                "core.smart_quality.select_vmaf_runtime",
+                "core.smart.workflow.select_vmaf_runtime",
                 return_value=VmafRuntimeSupport(
                     VmafBackend.CPU,
                     "vmaf_v1.0.16_3d0h",
@@ -284,7 +284,7 @@ class SmartSamplingAndBudgetTestCase(unittest.TestCase):
             item = _item(source, root / "out.mp4", EncodeOptions())
             item.media_info.color_transfer = "smpte2084"
             with patch(
-                "core.smart_quality.select_vmaf_runtime",
+                "core.smart.workflow.select_vmaf_runtime",
                 return_value=VmafRuntimeSupport(VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True),
             ):
                 result = analyze_quality(ffmpeg, item, root, root / "log.txt")
@@ -460,7 +460,7 @@ class SmartSearchTestCase(unittest.TestCase):
             tested.append(bitrate)
             return QualityCandidateResult(video_bitrate_bps=bitrate, min_vmaf=94.0)
 
-        from core.analysis_runtime import COARSE_MAX_CANDIDATES, search_tolerance_bps
+        from core.smart.runtime import COARSE_MAX_CANDIDATES, search_tolerance_bps
 
         search_bitrate_candidates(
             evaluate=evaluate,
@@ -490,10 +490,10 @@ class SmartCommandAndMeasurementTestCase(unittest.TestCase):
             log_path = root / "smart.log"
             with (
                 patch(
-                    "core.smart_quality.hidden_popen_kwargs",
+                    "core.smart.measurement.hidden_popen_kwargs",
                     return_value={"creationflags": 0x08000000},
                 ),
-                patch("core.smart_quality.subprocess.Popen", return_value=SuccessfulProcess()) as popen,
+                patch("core.smart.measurement.subprocess.Popen", return_value=SuccessfulProcess()) as popen,
                 log_path.open("w", encoding="utf-8") as log_file,
             ):
                 _run_logged(
@@ -523,7 +523,7 @@ class SmartCommandAndMeasurementTestCase(unittest.TestCase):
         os_error = "cannot launch ffmpeg: " + ("x" * (SMART_ERROR_TAIL_CHARS + 100))
         log_file = FlushTrackingLog()
         with (
-            patch("core.smart_quality.subprocess.Popen", side_effect=OSError(os_error)),
+            patch("core.smart.measurement.subprocess.Popen", side_effect=OSError(os_error)),
             self.assertRaises(RuntimeError) as raised,
         ):
             _run_logged(
@@ -556,7 +556,7 @@ class SmartCommandAndMeasurementTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             log_path = Path(temp_dir) / "smart.log"
             with (
-                patch("core.smart_quality.subprocess.Popen", return_value=FailedProcess()),
+                patch("core.smart.measurement.subprocess.Popen", return_value=FailedProcess()),
                 log_path.open("w", encoding="utf-8") as log_file,
                 self.assertRaises(SmartCommandError) as raised,
             ):
@@ -604,7 +604,7 @@ class SmartCommandAndMeasurementTestCase(unittest.TestCase):
                     )
 
             with (
-                patch("core.smart_quality._run_logged", side_effect=fake_run),
+                patch("core.smart.measurement.run_logged", side_effect=fake_run),
                 log_path.open("a", encoding="utf-8") as smart_log,
             ):
                 result = _score_candidate(
@@ -661,7 +661,7 @@ class SmartExecutionSafetyTestCase(unittest.TestCase):
             activity_messages: list[str] = []
             long_error = "Smart reference extraction failed: " + ("x" * SMART_ERROR_TAIL_CHARS)
 
-            with patch("core.exec_encode.analyze_quality", side_effect=RuntimeError(long_error)):
+            with patch("core.encoding.analysis.analyze_quality", side_effect=RuntimeError(long_error)):
                 result = execute_plan_item(
                     Path("ffmpeg"),
                     item,
@@ -686,8 +686,8 @@ class SmartExecutionSafetyTestCase(unittest.TestCase):
             mismatched.backend = BackendChoice.NVENC
 
             with (
-                patch("core.exec_encode.analyze_quality", return_value=mismatched),
-                patch("core.exec_encode._run_logged_command") as run_command,
+                patch("core.encoding.analysis.analyze_quality", return_value=mismatched),
+                patch("core.encoding.executor._run_logged_command") as run_command,
             ):
                 result = execute_plan_item(Path("ffmpeg"), item, root)
 
@@ -709,8 +709,8 @@ class SmartExecutionSafetyTestCase(unittest.TestCase):
                 Path(cmd[-1]).write_bytes(b"x" * 800)
 
             with (
-                patch("core.exec_encode.analyze_quality", return_value=self._quality_result()),
-                patch("core.exec_encode._run_logged_command", side_effect=fake_run),
+                patch("core.encoding.analysis.analyze_quality", return_value=self._quality_result()),
+                patch("core.encoding.executor._run_logged_command", side_effect=fake_run),
             ):
                 result = execute_plan_item(Path("ffmpeg"), item, root)
 
@@ -741,8 +741,8 @@ class SmartExecutionSafetyTestCase(unittest.TestCase):
                 Path(cmd[-1]).write_bytes(b"x" * 600)
 
             with (
-                patch("core.exec_encode.analyze_quality", return_value=self._quality_result()),
-                patch("core.exec_encode._run_logged_command", side_effect=fake_run),
+                patch("core.encoding.analysis.analyze_quality", return_value=self._quality_result()),
+                patch("core.encoding.executor._run_logged_command", side_effect=fake_run),
             ):
                 result = execute_plan_item(Path("ffmpeg"), item, root)
 
@@ -767,7 +767,9 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
         )
 
     def test_facade_default_path_does_not_rebind_workflow_globals(self) -> None:
-        from core import smart_measurement, smart_quality, smart_workflow
+        from core import smart_quality
+        from core.smart import measurement as smart_measurement
+        from core.smart import workflow as smart_workflow
 
         observed_score_hook: list[object] = []
         expected = self._quality_result()
@@ -849,13 +851,13 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
                 Path(cmd[-1]).write_bytes(b"x" * 600)
 
             with (
-                patch("core.parallel_queue_exec.ensure_encoder_capabilities", return_value={"codecs": {}}),
+                patch("core.encoding.parallel.ensure_encoder_capabilities", return_value={"codecs": {}}),
                 patch(
-                    "core.parallel_queue_exec.resolve_encoder",
+                    "core.encoding.parallel.resolve_encoder",
                     side_effect=lambda _codec, backend, *_args, **_kwargs: encoders[backend],
                 ),
-                patch("core.exec_encode.analyze_quality", side_effect=fake_analysis),
-                patch("core.exec_encode._run_logged_command", side_effect=fake_run),
+                patch("core.encoding.analysis.analyze_quality", side_effect=fake_analysis),
+                patch("core.encoding.executor._run_logged_command", side_effect=fake_run),
             ):
                 results = execute_plan_parallel(
                     plan,
@@ -896,8 +898,8 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
                 Path(cmd[-1]).write_bytes(b"x" * 600)
 
             with (
-                patch("core.exec_encode.analyze_quality", side_effect=fake_analysis),
-                patch("core.exec_encode._run_logged_command", side_effect=fake_run),
+                patch("core.encoding.analysis.analyze_quality", side_effect=fake_analysis),
+                patch("core.encoding.executor._run_logged_command", side_effect=fake_run),
             ):
                 results = execute_plan(plan, root)
 
@@ -924,8 +926,8 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
                 Path(cmd[-1]).write_bytes(b"x" * 600)
 
             with (
-                patch("core.exec_encode.analyze_quality", return_value=self._quality_result()),
-                patch("core.exec_encode._run_logged_command", side_effect=fake_run),
+                patch("core.encoding.analysis.analyze_quality", return_value=self._quality_result()),
+                patch("core.encoding.executor._run_logged_command", side_effect=fake_run),
             ):
                 result = execute_plan_item(Path("ffmpeg"), item, root)
 
@@ -986,7 +988,7 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
             cached.fingerprint = quality_configuration_fingerprint(ffmpeg, item)
             item.quality_search_result = cached
             with patch(
-                "core.smart_quality.select_vmaf_runtime",
+                "core.smart.workflow.select_vmaf_runtime",
                 return_value=VmafRuntimeSupport(VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True),
             ) as detect:
                 result = analyze_quality(ffmpeg, item, root, root / "log.txt")
@@ -1005,8 +1007,8 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
                 raise OperationCancelledError("cancel")
 
             with (
-                patch("core.exec_encode.analyze_quality", return_value=self._quality_result()),
-                patch("core.exec_encode._run_logged_command", side_effect=fake_run),
+                patch("core.encoding.analysis.analyze_quality", return_value=self._quality_result()),
+                patch("core.encoding.executor._run_logged_command", side_effect=fake_run),
                 self.assertRaises(OperationCancelledError),
             ):
                 execute_plan_item(Path("ffmpeg"), item, root)

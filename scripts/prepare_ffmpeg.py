@@ -20,14 +20,14 @@ REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from core.analysis_runtime import (  # noqa: E402
+from core.smart.runtime import (  # noqa: E402
     detect_analysis_capabilities,
     format_analysis_capability_report,
     parse_filter_names,
 )
-from core.content_complexity import parse_scout_metadata  # noqa: E402
+from core.smart.sampling.complexity import parse_scout_metadata  # noqa: E402
 from core.models import VmafBackend  # noqa: E402
-from core.vmaf_runtime import (  # noqa: E402
+from core.smart.vmaf import (  # noqa: E402
     VMAF_PRODUCTION_MODELS,
     VMAF_STANDARD_MODEL,
     build_vmaf_probe_command,

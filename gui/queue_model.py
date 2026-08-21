@@ -6,8 +6,8 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QStyle
 
-from core.bitrate_policy import human_kbps
 from core.i18n import Translator
+from core.media import human_kbps
 from core.models import DecisionOption
 from core.progress_events import ProgressEvent
 from gui.queue_actions import (

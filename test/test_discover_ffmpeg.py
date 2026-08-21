@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import core.discover_ffmpeg as discover_ffmpeg
+import core.ffmpeg.discovery as discover_ffmpeg
 
 
 def _touch_binary(path: Path) -> Path:
@@ -46,7 +46,7 @@ class DiscoverFfmpegTestCase(unittest.TestCase):
             with (
                 patch.object(discover_ffmpeg, "app_root", return_value=project_root),
                 patch.object(discover_ffmpeg, "bundle_root", return_value=project_root),
-                patch("core.discover_ffmpeg.shutil.which", return_value=str(temp_root / "path_ffmpeg")),
+                patch("core.ffmpeg.discovery.shutil.which", return_value=str(temp_root / "path_ffmpeg")),
             ):
                 resolved = discover_ffmpeg.find_binary(None, "ffmpeg")
 
@@ -61,7 +61,7 @@ class DiscoverFfmpegTestCase(unittest.TestCase):
             with (
                 patch.object(discover_ffmpeg, "app_root", return_value=project_root),
                 patch.object(discover_ffmpeg, "bundle_root", return_value=project_root),
-                patch("core.discover_ffmpeg.shutil.which", return_value=None),
+                patch("core.ffmpeg.discovery.shutil.which", return_value=None),
             ):
                 resolved = discover_ffmpeg.find_binary(None, "ffprobe")
 
@@ -77,7 +77,7 @@ class DiscoverFfmpegTestCase(unittest.TestCase):
             with (
                 patch.object(discover_ffmpeg, "app_root", return_value=runtime_root),
                 patch.object(discover_ffmpeg, "bundle_root", return_value=bundle_root),
-                patch("core.discover_ffmpeg.shutil.which", return_value=None),
+                patch("core.ffmpeg.discovery.shutil.which", return_value=None),
             ):
                 resolved = discover_ffmpeg.find_binary(None, "ffmpeg")
 
@@ -92,7 +92,7 @@ class DiscoverFfmpegTestCase(unittest.TestCase):
             with (
                 patch.object(discover_ffmpeg, "app_root", return_value=project_root),
                 patch.object(discover_ffmpeg, "bundle_root", return_value=project_root),
-                patch("core.discover_ffmpeg.shutil.which", return_value=str(path_binary)),
+                patch("core.ffmpeg.discovery.shutil.which", return_value=str(path_binary)),
             ):
                 resolved = discover_ffmpeg.find_binary(None, "ffmpeg")
 
@@ -110,7 +110,7 @@ class DiscoverFfmpegTestCase(unittest.TestCase):
                 patch.object(discover_ffmpeg, "bundle_root", return_value=project_root),
                 patch.object(discover_ffmpeg, "COMMON_HOMEBREW_PREFIXES", (brew_prefix,)),
                 patch.object(discover_ffmpeg, "is_windows", return_value=False),
-                patch("core.discover_ffmpeg.shutil.which", return_value=None),
+                patch("core.ffmpeg.discovery.shutil.which", return_value=None),
             ):
                 resolved = discover_ffmpeg.find_binary(None, "ffprobe")
 
@@ -136,8 +136,8 @@ class DiscoverFfmpegTestCase(unittest.TestCase):
                 patch.object(discover_ffmpeg, "app_root", return_value=project_root),
                 patch.object(discover_ffmpeg, "bundle_root", return_value=project_root),
                 patch.object(discover_ffmpeg, "is_windows", return_value=True),
-                patch("core.discover_ffmpeg.shutil.which", side_effect=which_side_effect),
-                patch("core.discover_ffmpeg.subprocess.run", return_value=proc) as run,
+                patch("core.ffmpeg.discovery.shutil.which", side_effect=which_side_effect),
+                patch("core.ffmpeg.discovery.subprocess.run", return_value=proc) as run,
             ):
                 resolved = discover_ffmpeg.find_binary(None, "ffmpeg")
 
@@ -154,8 +154,8 @@ class DiscoverFfmpegTestCase(unittest.TestCase):
 
             with (
                 patch.object(discover_ffmpeg, "is_windows", return_value=False),
-                patch("core.discover_ffmpeg.shutil.which", return_value=str(brew)),
-                patch("core.discover_ffmpeg.subprocess.run", return_value=proc) as run,
+                patch("core.ffmpeg.discovery.shutil.which", return_value=str(brew)),
+                patch("core.ffmpeg.discovery.subprocess.run", return_value=proc) as run,
             ):
                 resolved = discover_ffmpeg.detect_homebrew_binary("ffprobe")
 
@@ -172,7 +172,7 @@ class DiscoverFfmpegTestCase(unittest.TestCase):
             with (
                 patch.object(discover_ffmpeg, "app_root", return_value=project_root),
                 patch.object(discover_ffmpeg, "bundle_root", return_value=project_root),
-                patch("core.discover_ffmpeg.shutil.which", return_value=None),
+                patch("core.ffmpeg.discovery.shutil.which", return_value=None),
             ):
                 ffmpeg_path, ffprobe_path = discover_ffmpeg.discover_ffmpeg_tools(str(explicit_ffmpeg), None)
 

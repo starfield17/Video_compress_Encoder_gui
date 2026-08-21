@@ -6,9 +6,8 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QThread, Signal
 
-from core.exec_encode import execute_plan
+from core.encoding import execute_plan, execute_plan_parallel, normalize_parallel_backends
 from core.models import EncodePlan, EncodeResult, OperationCancelledError
-from core.parallel_queue_exec import execute_plan_parallel, normalize_parallel_backends
 from core.progress_events import ProgressEvent
 from gui.queue_state import QueueItemRecord, create_queue_records
 from gui.queue_model import QueueTableModel

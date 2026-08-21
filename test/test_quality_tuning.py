@@ -13,9 +13,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from cli.cli_entry import _build_parser, _normalize_auto_backend_preset, run_cli
-from core.bitrate_policy import DEFAULT_RATIO
-from core.build_ffmpeg_cmd import build_video_args
-from core.encoder_caps import default_preset_for_encoder, is_valid_preset, preset_choices_for_encoder
+from core.media.bitrate import DEFAULT_RATIO
+from core.ffmpeg.commands import build_video_args
+from core.ffmpeg.encoders import default_preset_for_encoder, is_valid_preset, preset_choices_for_encoder
 from core.models import (
     BackendChoice,
     CodecChoice,
@@ -25,8 +25,8 @@ from core.models import (
     MediaInfo,
     VideoFileItem,
 )
-from core.plan_encode import build_encode_plan
-from core.preset_store import preset_data_to_encode_options
+from core.encoding import build_encode_plan
+from core.config.store import preset_data_to_encode_options
 from gui.gui_mainwindow import MainWindow
 
 
@@ -123,7 +123,7 @@ class EncoderCapsTestCase(unittest.TestCase):
 
     def test_fallback_preset_lists_match_expected(self) -> None:
         ffmpeg_path = Path("fake_ffmpeg")
-        with patch("core.encoder_caps._cached_runtime_preset_choices", return_value=()):
+        with patch("core.ffmpeg.encoders._cached_runtime_preset_choices", return_value=()):
             self.assertEqual(
                 preset_choices_for_encoder(ffmpeg_path, "libx265"),
                 ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo"],
@@ -142,12 +142,12 @@ class EncoderCapsTestCase(unittest.TestCase):
 
     def test_is_valid_preset_uses_detected_choices(self) -> None:
         ffmpeg_path = Path("fake_ffmpeg")
-        with patch("core.encoder_caps._cached_runtime_preset_choices", return_value=("p5", "p6")):
+        with patch("core.ffmpeg.encoders._cached_runtime_preset_choices", return_value=("p5", "p6")):
             self.assertTrue(is_valid_preset(ffmpeg_path, "hevc_nvenc", "p6"))
             self.assertFalse(is_valid_preset(ffmpeg_path, "hevc_nvenc", "slow"))
 
     def test_runtime_preset_cache_tracks_ffmpeg_file_identity(self) -> None:
-        from core.encoder_caps import _cached_runtime_preset_choices
+        from core.ffmpeg.encoders import _cached_runtime_preset_choices
 
         first_help = "-preset value\n  fast 1\n"
         second_help = "-preset value\n  slow 1\n"
@@ -155,7 +155,7 @@ class EncoderCapsTestCase(unittest.TestCase):
             ffmpeg_path = Path(temp_dir) / "ffmpeg"
             ffmpeg_path.write_bytes(b"first")
             _cached_runtime_preset_choices.cache_clear()
-            with patch("core.encoder_caps._run_encoder_help", side_effect=[first_help, second_help]) as help_probe:
+            with patch("core.ffmpeg.encoders._run_encoder_help", side_effect=[first_help, second_help]) as help_probe:
                 self.assertEqual(preset_choices_for_encoder(ffmpeg_path, "hevc_amf"), ["fast"])
                 ffmpeg_path.write_bytes(b"second-binary")
                 self.assertEqual(preset_choices_for_encoder(ffmpeg_path, "hevc_amf"), ["slow"])
@@ -176,16 +176,16 @@ class PlanningAndCommandTestCase(unittest.TestCase):
             options = EncodeOptions(copy_external_subtitles=False, overwrite=True)
             encoder_info = _encoder_info("hevc_nvenc", BackendChoice.NVENC, "p6")
             with (
-                patch("core.plan_encode.discover_ffmpeg_tools", return_value=(temp_root / "ffmpeg", temp_root / "ffprobe")),
+                patch("core.encoding.planning.discover_ffmpeg_tools", return_value=(temp_root / "ffmpeg", temp_root / "ffprobe")),
                 patch(
-                    "core.plan_encode.ensure_encoder_capabilities",
+                    "core.encoding.planning.ensure_encoder_capabilities",
                     return_value=_capabilities_for(CodecChoice.HEVC, [(BackendChoice.NVENC, "hevc_nvenc")]),
                 ),
-                patch("core.plan_encode.resolve_encoder", return_value=encoder_info),
-                patch("core.plan_encode.preset_choices_for_encoder", return_value=["p5", "p6"]),
-                patch("core.plan_encode.is_valid_preset", return_value=True),
-                patch("core.plan_encode.probe_media_info", return_value=_media(source)),
-                patch("core.plan_encode.validate_plan_item"),
+                patch("core.encoding.planning.resolve_encoder", return_value=encoder_info),
+                patch("core.encoding.planning.preset_choices_for_encoder", return_value=["p5", "p6"]),
+                patch("core.encoding.planning.is_valid_preset", return_value=True),
+                patch("core.encoding.planning.probe_media_info", return_value=_media(source)),
+                patch("core.encoding.planning.validate_plan_item"),
             ):
                 plan = build_encode_plan(
                     input_path=None,
@@ -204,16 +204,16 @@ class PlanningAndCommandTestCase(unittest.TestCase):
             options = EncodeOptions(copy_external_subtitles=False, overwrite=True)
             encoder_info = _encoder_info("hevc_nvenc", BackendChoice.NVENC, "p6")
             with (
-                patch("core.plan_encode.discover_ffmpeg_tools", return_value=(temp_root / "ffmpeg", temp_root / "ffprobe")),
+                patch("core.encoding.planning.discover_ffmpeg_tools", return_value=(temp_root / "ffmpeg", temp_root / "ffprobe")),
                 patch(
-                    "core.plan_encode.ensure_encoder_capabilities",
+                    "core.encoding.planning.ensure_encoder_capabilities",
                     return_value=_capabilities_for(CodecChoice.HEVC, [(BackendChoice.NVENC, "hevc_nvenc")]),
                 ),
-                patch("core.plan_encode.resolve_encoder", return_value=encoder_info),
-                patch("core.plan_encode.preset_choices_for_encoder", return_value=["p5"]),
-                patch("core.plan_encode.is_valid_preset", return_value=False),
-                patch("core.plan_encode.probe_media_info", return_value=_media(source)),
-                patch("core.plan_encode.validate_plan_item"),
+                patch("core.encoding.planning.resolve_encoder", return_value=encoder_info),
+                patch("core.encoding.planning.preset_choices_for_encoder", return_value=["p5"]),
+                patch("core.encoding.planning.is_valid_preset", return_value=False),
+                patch("core.encoding.planning.probe_media_info", return_value=_media(source)),
+                patch("core.encoding.planning.validate_plan_item"),
             ):
                 plan = build_encode_plan(
                     input_path=None,

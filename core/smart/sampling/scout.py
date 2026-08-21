@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
-from core.content_complexity import (
+from .complexity import (
     ComplexityProbeError,
     build_scene_guard_command,
     build_scout_command,
@@ -14,7 +14,7 @@ from core.content_complexity import (
     parse_scout_metadata,
 )
 from core.models import AnalysisProfileSettings
-from core.sample_planner import (
+from .planner import (
     PlannedWindow,
     SamplePlan,
     ScoutObservation,

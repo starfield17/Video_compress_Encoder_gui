@@ -4,11 +4,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Iterable, cast
 
-from core.app_paths import config_dir as app_config_dir
-from core.bitrate_policy import choose_ratio, compute_target_video_bitrate
-from core.discover_ffmpeg import discover_ffmpeg_tools
-from core.encoder_capability_cache import ensure_encoder_capabilities
-from core.encoder_caps import is_valid_preset, preset_choices_for_encoder, resolve_encoder
+from core.config.paths import config_dir as app_config_dir
+from core.ffmpeg.capabilities import ensure_encoder_capabilities
+from core.ffmpeg.discovery import discover_ffmpeg_tools
+from core.ffmpeg.encoders import is_valid_preset, preset_choices_for_encoder, resolve_encoder
+from core.media.bitrate import choose_ratio, compute_target_video_bitrate
 from core.models import (
     CompressionMode,
     DecodeAcceleration,
@@ -19,12 +19,12 @@ from core.models import (
     OperationCancelledError,
     VideoFileItem,
 )
-from core.external_subtitles import discover_external_subtitles
-from core.path_utils import build_output_path, choose_output_root
-from core.probe_media import probe_media_info
+from core.ffmpeg.probe import probe_media_info
+from core.media.discovery import collect_video_files
+from core.media.paths import build_output_path, choose_output_root
+from core.media.subtitles import discover_external_subtitles
+from core.media.validation import validate_plan_item, validate_workdir
 from core.progress_events import ProgressCallback, ProgressEvent
-from core.safety_checks import validate_plan_item, validate_workdir
-from core.scan_videos import collect_video_files
 
 
 def _emit(progress_callback: Callable[[str], None] | None, message: str) -> None:

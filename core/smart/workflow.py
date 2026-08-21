@@ -15,9 +15,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable, TextIO, cast
 
-from core.analysis_concurrency import analysis_concurrency_limit
-from core.analysis_receipts import load_analysis_receipt, save_analysis_receipt
-from core.analysis_runtime import (
+from .concurrency import analysis_concurrency_limit
+from .receipts import load_analysis_receipt, save_analysis_receipt
+from .runtime import (
     SOURCE_DECODE_SOFTWARE,
     AnalysisDecodePolicy,
     AnalysisExecutionPlan,
@@ -29,7 +29,6 @@ from core.analysis_runtime import (
     search_tolerance_bps,
     software_source_plan,
 )
-from core.content_complexity import ComplexityProbeError
 from core.models import (
     AnalysisProfileSettings,
     AnalysisReceipt,
@@ -43,7 +42,8 @@ from core.models import (
     VmafBackend,
     VmafRuntimeSupport,
 )
-from core.sample_planner import (
+from .sampling.complexity import ComplexityProbeError
+from .sampling.planner import (
     PlannedWindow,
     SamplePlan,
     SamplePlanningError,
@@ -54,19 +54,19 @@ from core.sample_planner import (
     should_analyze_whole_video,
 )
 from core.progress_events import ProgressCallback, ProgressEvent
-from core.smart_bitrate import (
+from .bitrate import (
     calculate_smart_bitrate_budget,
     refresh_candidate_predictions as _refresh_candidate_predictions,
     reselect_from_candidates,
     search_bitrate_candidates,
 )
-from core.smart_cache import (
+from .cache import (
     SMART_SAMPLE_SCHEME_VERSION,
     analysis_receipt as _analysis_receipt,
     measurement_configuration_fingerprint,
     quality_configuration_fingerprint,
 )
-from core.smart_measurement import (
+from .measurement import (
     SampleWindow,
     SmartCommandError,
     build_reference as _build_reference,
@@ -75,8 +75,8 @@ from core.smart_measurement import (
     score_candidate as _score_candidate,
     score_candidate_loopback as _score_candidate_loopback,
 )
-from core.smart_sampling import discover_sample_plan
-from core.vmaf_runtime import (
+from .sampling.scout import discover_sample_plan
+from .vmaf import (
     VMAF_MEASUREMENT_BIT_DEPTH,
     VMAF_MEASUREMENT_PIX_FMT,
     candidate_encode_metadata,

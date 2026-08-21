@@ -12,14 +12,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from core.analysis_receipts import (
+from core.smart.receipts import (
     ANALYSIS_RECEIPT_SCHEMA_VERSION,
     analysis_receipt_path,
     load_analysis_receipt,
     save_analysis_receipt,
 )
-from core.constraint_resolution import prepare_size_miss_retry
-from core.exec_encode import analyze_plan_item, item_needs_smart_analysis
+from core.smart.decisions import prepare_size_miss_retry
+from core.encoding import analyze_plan_item, item_needs_smart_analysis
 from core.models import (
     AnalysisReceipt,
     BackendChoice,
@@ -39,7 +39,7 @@ from core.models import (
     VmafBackend,
     VmafRuntimeSupport,
 )
-from core.preset_store import _default_app_config, smart_policies_from_config
+from core.config.store import _default_app_config, smart_policies_from_config
 from core.smart_quality import (
     apply_decision_to_options,
     analyze_quality,
@@ -48,8 +48,8 @@ from core.smart_quality import (
     quality_configuration_fingerprint,
     reselect_from_candidates,
 )
-from core.sample_planner import PlannedWindow, SamplePlan
-from core.smart_sampling import SamplingResult
+from core.smart.sampling.planner import PlannedWindow, SamplePlan
+from core.smart.sampling.scout import SamplingResult
 from core.i18n import get_translator
 from gui.queue_model import QueueTableModel
 from gui.queue_manager import QueueManager
@@ -190,7 +190,7 @@ class ConstraintDecisionTestCase(unittest.TestCase):
             item = _item(root)
             item.options.size_blocked_policy = SizeBlockedPolicy.RELAX_SIZE
             blocked = reselect_from_candidates(_candidates(), item)
-            with patch("core.exec_encode.analyze_quality", return_value=blocked):
+            with patch("core.encoding.analysis.analyze_quality", return_value=blocked):
                 terminal = analyze_plan_item(root / "ffmpeg", item, root)
             self.assertIsNone(terminal)
             self.assertEqual(item.quality_search_result.status, QualitySearchStatus.FOUND)
@@ -202,7 +202,7 @@ class ConstraintDecisionTestCase(unittest.TestCase):
             item = _item(root)
             item.options.size_blocked_policy = SizeBlockedPolicy.ASK
             blocked = reselect_from_candidates(_candidates(), item)
-            with patch("core.exec_encode.analyze_quality", return_value=blocked):
+            with patch("core.encoding.analysis.analyze_quality", return_value=blocked):
                 terminal = analyze_plan_item(root / "ffmpeg", item, root)
             self.assertIsNotNone(terminal)
             assert terminal is not None
@@ -220,7 +220,7 @@ class ConstraintDecisionTestCase(unittest.TestCase):
                 backend=item.encoder_info.backend,
                 reason="libvmaf unavailable",
             )
-            with patch("core.exec_encode.analyze_quality", return_value=unsupported):
+            with patch("core.encoding.analysis.analyze_quality", return_value=unsupported):
                 terminal = analyze_plan_item(root / "ffmpeg", item, root)
 
             self.assertIsNotNone(terminal)
@@ -239,7 +239,7 @@ class ConstraintDecisionTestCase(unittest.TestCase):
                 item,
             )
             self.assertEqual(unreachable.failure_kind, ConstraintFailureKind.QUALITY_UNREACHABLE)
-            with patch("core.exec_encode.analyze_quality", return_value=unreachable):
+            with patch("core.encoding.analysis.analyze_quality", return_value=unreachable):
                 terminal = analyze_plan_item(root / "ffmpeg", item, root)
             self.assertIsNotNone(terminal)
             assert terminal is not None
@@ -255,7 +255,7 @@ class ConstraintDecisionTestCase(unittest.TestCase):
                 [QualityCandidateResult(video_bitrate_bps=1_000_000, min_vmaf=90.0)],
                 item,
             )
-            with patch("core.exec_encode.analyze_quality", return_value=unreachable):
+            with patch("core.encoding.analysis.analyze_quality", return_value=unreachable):
                 terminal = analyze_plan_item(root / "ffmpeg", item, root)
             self.assertIsNotNone(terminal)
             assert terminal is not None
@@ -547,14 +547,14 @@ class AnalysisReceiptTestCase(unittest.TestCase):
 
             with (
                 patch(
-                    "core.smart_quality.select_vmaf_runtime",
+                    "core.smart.workflow.select_vmaf_runtime",
                     return_value=VmafRuntimeSupport(
                         VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
                     ),
                 ),
-                patch("core.smart_quality.discover_sample_plan", return_value=_three_window_sampling()),
-                patch("core.smart_quality._run_logged"),
-                patch("core.smart_quality._score_candidate", side_effect=score) as first_score,
+                patch("core.smart.workflow.discover_sample_plan", return_value=_three_window_sampling()),
+                patch("core.smart.workflow._run_logged"),
+                patch("core.smart.workflow._score_candidate", side_effect=score) as first_score,
             ):
                 progress_events: list[dict[str, object]] = []
                 first = analyze_quality(
@@ -589,13 +589,13 @@ class AnalysisReceiptTestCase(unittest.TestCase):
             )
             with (
                 patch(
-                    "core.smart_quality.select_vmaf_runtime",
+                    "core.smart.workflow.select_vmaf_runtime",
                     return_value=VmafRuntimeSupport(
                         VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
                     ),
                 ),
-                patch("core.smart_quality._run_logged"),
-                patch("core.smart_quality._score_candidate", side_effect=score) as second_score,
+                patch("core.smart.workflow._run_logged"),
+                patch("core.smart.workflow._score_candidate", side_effect=score) as second_score,
             ):
                 second = analyze_quality(ffmpeg, changed_policy, root, root / "analysis-2.log")
 

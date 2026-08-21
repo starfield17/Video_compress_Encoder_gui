@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from core.models import MediaInfo
-from core.subprocess_utils import noninteractive_run_kwargs
-from core.vmaf_runtime import infer_bit_depth_from_pix_fmt
+from core.ffmpeg.subprocess import noninteractive_run_kwargs
+from core.media.metadata import infer_bit_depth_from_pix_fmt
 
 
 def _run_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:

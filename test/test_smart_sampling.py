@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from core.sample_planner import PlannedWindow, SamplePlan
-from core.smart_sampling import _align_plan
+from core.smart.sampling.planner import PlannedWindow, SamplePlan
+from core.smart.sampling.scout import _align_plan
 
 
 class SmartSamplingAlignmentTest(unittest.TestCase):
@@ -22,9 +22,9 @@ class SmartSamplingAlignmentTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             with (
-                patch("core.smart_sampling._read_metadata", return_value="metadata"),
+                patch("core.smart.sampling.scout._read_metadata", return_value="metadata"),
                 patch(
-                    "core.smart_sampling.parse_scene_guard_metadata",
+                    "core.smart.sampling.scout.parse_scene_guard_metadata",
                     side_effect=[(1.0,), ()],
                 ),
             ):

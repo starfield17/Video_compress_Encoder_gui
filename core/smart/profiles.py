@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 
 from core.models import AnalysisProfileName, AnalysisProfileSettings, EncodeOptions
-from core.vmaf_runtime import validate_vmaf_subsample
+from .vmaf import validate_vmaf_subsample
 
 
 FACTORY_ANALYSIS_PROFILES: dict[AnalysisProfileName, AnalysisProfileSettings] = {

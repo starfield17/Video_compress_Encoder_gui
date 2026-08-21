@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from core.path_utils import ensure_dir
+from core.media.paths import ensure_dir
 
 
 SIDECAR_SUBTITLE_EXTENSIONS = {

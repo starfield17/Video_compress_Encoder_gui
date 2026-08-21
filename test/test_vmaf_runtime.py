@@ -8,8 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.models import MediaInfo, VmafBackend
-from core.probe_media import probe_media_info
-from core.vmaf_runtime import (
+from core.ffmpeg.probe import probe_media_info
+from core.smart.vmaf import (
     COARSE_VMAF_SUBSAMPLE,
     EXACT_VMAF_SUBSAMPLE,
     PTS_RESET_FILTER,
@@ -66,12 +66,12 @@ class VmafRuntimeTestCase(unittest.TestCase):
             validate_vmaf_subsample(0)
 
     def test_thread_budget_is_at_least_one_and_respects_active_jobs(self) -> None:
-        with patch("core.vmaf_runtime.os.cpu_count", return_value=16):
+        with patch("core.smart.vmaf.os.cpu_count", return_value=16):
             self.assertEqual(vmaf_thread_budget(1), 8)
             self.assertEqual(vmaf_thread_budget(2), 7)
-        with patch("core.vmaf_runtime.os.cpu_count", return_value=4):
+        with patch("core.smart.vmaf.os.cpu_count", return_value=4):
             self.assertEqual(vmaf_thread_budget(1), 3)
-        with patch("core.vmaf_runtime.os.cpu_count", return_value=None):
+        with patch("core.smart.vmaf.os.cpu_count", return_value=None):
             self.assertGreaterEqual(vmaf_thread_budget(1), 1)
 
     def test_model_selection_covers_resolution_hfr_boundary_and_unknown_fps(self) -> None:
@@ -112,10 +112,10 @@ class VmafRuntimeTestCase(unittest.TestCase):
                 }
             ],
         }
-        with patch("core.probe_media.ffprobe_json", return_value=base):
+        with patch("core.ffmpeg.probe.ffprobe_json", return_value=base):
             self.assertEqual(probe_media_info(Path("ffprobe"), Path("source.mkv")).bit_depth, 12)
         del base["streams"][0]["bits_per_raw_sample"]
-        with patch("core.probe_media.ffprobe_json", return_value=base):
+        with patch("core.ffmpeg.probe.ffprobe_json", return_value=base):
             self.assertEqual(probe_media_info(Path("ffprobe"), Path("source.mkv")).bit_depth, 10)
 
     def test_cambi_model_config_has_one_precisely_escaped_nested_dictionary(self) -> None:
@@ -220,7 +220,7 @@ class VmafRuntimeTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             ffmpeg = Path(temp_dir) / "ffmpeg"
             ffmpeg.write_bytes(b"one")
-            with patch("core.vmaf_runtime._run_capture", return_value=success) as run:
+            with patch("core.smart.vmaf._run_capture", return_value=success) as run:
                 self.assertTrue(probe_vmaf_runtime(ffmpeg, VMAF_STANDARD_MODEL, VmafBackend.CPU).runnable)
                 self.assertTrue(probe_vmaf_runtime(ffmpeg, VMAF_STANDARD_MODEL, VmafBackend.CPU).runnable)
                 self.assertTrue(probe_vmaf_runtime(ffmpeg, VMAF_4K_MODEL, VmafBackend.CPU).runnable)
@@ -234,7 +234,7 @@ class VmafRuntimeTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             ffmpeg = Path(temp_dir) / "ffmpeg"
             ffmpeg.write_bytes(b"binary")
-            with patch("core.vmaf_runtime._run_capture", return_value=success):
+            with patch("core.smart.vmaf._run_capture", return_value=success):
                 support = select_vmaf_runtime(
                     ffmpeg,
                     VMAF_STANDARD_MODEL,
@@ -248,7 +248,7 @@ class VmafRuntimeTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             ffmpeg = Path(temp_dir) / "ffmpeg"
             ffmpeg.write_bytes(b"binary")
-            with patch("core.vmaf_runtime._run_capture", return_value=success):
+            with patch("core.smart.vmaf._run_capture", return_value=success):
                 support = probe_vmaf_runtime(ffmpeg, VMAF_STANDARD_MODEL, VmafBackend.CPU)
         self.assertTrue(support.runnable)
 
@@ -257,7 +257,7 @@ class VmafRuntimeTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             ffmpeg = Path(temp_dir) / "ffmpeg"
             ffmpeg.write_bytes(b"binary")
-            with patch("core.vmaf_runtime._run_capture", return_value=result):
+            with patch("core.smart.vmaf._run_capture", return_value=result):
                 support = probe_vmaf_runtime(ffmpeg, VMAF_STANDARD_MODEL, VmafBackend.CPU)
         self.assertFalse(support.runnable)
         self.assertIn("invalid score", support.error_message or "")

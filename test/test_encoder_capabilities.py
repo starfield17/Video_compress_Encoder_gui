@@ -6,14 +6,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from core.encoder_capability_cache import (
+from core.ffmpeg.capabilities import (
     ENCODER_CAPABILITIES_SCHEMA_VERSION,
     _ffmpeg_version_line,
     detect_encoder_capabilities,
     is_encoder_capability_cache_valid,
     smoke_test_encoder,
 )
-from core.encoder_caps import (
+from core.ffmpeg.encoders import (
     _run_encoder_help,
     list_available_encoders,
     resolve_encoder,
@@ -92,8 +92,8 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
             ffmpeg_path = Path(temp_dir) / "ffmpeg"
 
             with (
-                patch("core.encoder_capability_cache._ffmpeg_mtime_ns", return_value=123),
-                patch("core.encoder_capability_cache._ffmpeg_version_line", return_value="ffmpeg version test"),
+                patch("core.ffmpeg.capabilities._ffmpeg_mtime_ns", return_value=123),
+                patch("core.ffmpeg.capabilities._ffmpeg_version_line", return_value="ffmpeg version test"),
             ):
                 self.assertFalse(
                     is_encoder_capability_cache_valid(
@@ -111,8 +111,8 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
             other_ffmpeg_path = Path(temp_dir) / "other-ffmpeg"
 
             with (
-                patch("core.encoder_capability_cache._ffmpeg_mtime_ns", return_value=123),
-                patch("core.encoder_capability_cache._ffmpeg_version_line", return_value="ffmpeg version test"),
+                patch("core.ffmpeg.capabilities._ffmpeg_mtime_ns", return_value=123),
+                patch("core.ffmpeg.capabilities._ffmpeg_version_line", return_value="ffmpeg version test"),
             ):
                 self.assertTrue(
                     is_encoder_capability_cache_valid(
@@ -149,10 +149,10 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
             return encoder_name in {"hevc_qsv", "libx265", "libsvtav1"}
 
         with (
-            patch("core.encoder_capability_cache._ffmpeg_mtime_ns", return_value=123),
-            patch("core.encoder_capability_cache._ffmpeg_version_line", return_value="ffmpeg version test"),
-            patch("core.encoder_capability_cache.smoke_test_encoder", side_effect=fake_smoke_test),
-            patch("core.encoder_capability_cache.preset_choices_for_encoder", return_value=["test-preset"]),
+            patch("core.ffmpeg.capabilities._ffmpeg_mtime_ns", return_value=123),
+            patch("core.ffmpeg.capabilities._ffmpeg_version_line", return_value="ffmpeg version test"),
+            patch("core.ffmpeg.capabilities.smoke_test_encoder", side_effect=fake_smoke_test),
+            patch("core.ffmpeg.capabilities.preset_choices_for_encoder", return_value=["test-preset"]),
         ):
             capabilities = detect_encoder_capabilities(
                 Path("ffmpeg"),
@@ -180,7 +180,7 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
             captured["kwargs"] = _kwargs
             return type("Proc", (), {"returncode": 0})()
 
-        with patch("core.encoder_capability_cache.subprocess.run", side_effect=fake_run):
+        with patch("core.ffmpeg.capabilities.subprocess.run", side_effect=fake_run):
             self.assertTrue(smoke_test_encoder(Path("ffmpeg"), "hevc_nvenc"))
 
         self.assertIn("testsrc2=size=256x256:rate=1", captured["cmd"])
@@ -193,7 +193,7 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
             stdout="ffmpeg version test\n",
             stderr="",
         )
-        with patch("core.encoder_capability_cache.subprocess.run", return_value=completed) as run:
+        with patch("core.ffmpeg.capabilities.subprocess.run", return_value=completed) as run:
             self.assertEqual(_ffmpeg_version_line(Path("ffmpeg")), "ffmpeg version test")
 
         self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
@@ -207,8 +207,8 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
             stderr="",
         )
         with (
-            patch("core.subprocess_utils.hidden_process_creationflags", return_value=creationflags),
-            patch("core.encoder_capability_cache.subprocess.run", return_value=completed) as run,
+            patch("core.ffmpeg.subprocess.hidden_process_creationflags", return_value=creationflags),
+            patch("core.ffmpeg.capabilities.subprocess.run", return_value=completed) as run,
         ):
             _ffmpeg_version_line(Path("ffmpeg"))
 
@@ -218,8 +218,8 @@ class EncoderCapabilityCacheTestCase(unittest.TestCase):
         creationflags = 0x08000000
         completed = type("Proc", (), {"returncode": 0})()
         with (
-            patch("core.subprocess_utils.hidden_process_creationflags", return_value=creationflags),
-            patch("core.encoder_capability_cache.subprocess.run", return_value=completed) as run,
+            patch("core.ffmpeg.subprocess.hidden_process_creationflags", return_value=creationflags),
+            patch("core.ffmpeg.capabilities.subprocess.run", return_value=completed) as run,
         ):
             self.assertTrue(smoke_test_encoder(Path("ffmpeg"), "hevc_nvenc"))
 
@@ -234,7 +234,7 @@ class EncoderSubprocessTestCase(unittest.TestCase):
             stdout=" V..... h264_nvenc       NVIDIA encoder\n",
             stderr="",
         )
-        with patch("core.encoder_caps.subprocess.run", return_value=completed) as run:
+        with patch("core.ffmpeg.encoders.subprocess.run", return_value=completed) as run:
             self.assertEqual(list_available_encoders(Path("ffmpeg")), {"h264_nvenc"})
 
         self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
@@ -246,7 +246,7 @@ class EncoderSubprocessTestCase(unittest.TestCase):
             stdout="encoder help",
             stderr="",
         )
-        with patch("core.encoder_caps.subprocess.run", return_value=completed) as run:
+        with patch("core.ffmpeg.encoders.subprocess.run", return_value=completed) as run:
             self.assertEqual(_run_encoder_help(Path("ffmpeg"), "libx265"), "encoder help")
 
         self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
@@ -266,8 +266,8 @@ class EncoderSubprocessTestCase(unittest.TestCase):
             stderr="",
         )
         with (
-            patch("core.subprocess_utils.hidden_process_creationflags", return_value=creationflags),
-            patch("core.encoder_caps.subprocess.run", side_effect=[listing, help_output]) as run,
+            patch("core.ffmpeg.subprocess.hidden_process_creationflags", return_value=creationflags),
+            patch("core.ffmpeg.encoders.subprocess.run", side_effect=[listing, help_output]) as run,
         ):
             list_available_encoders(Path("ffmpeg"))
             _run_encoder_help(Path("ffmpeg"), "libx265")

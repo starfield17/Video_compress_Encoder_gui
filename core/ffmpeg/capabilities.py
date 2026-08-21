@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from core.encoder_caps import (
+from core.ffmpeg.encoders import (
     ENCODER_CANDIDATES,
     iter_codec_candidates,
     list_available_encoders,
@@ -14,8 +14,8 @@ from core.encoder_caps import (
     preset_choices_for_encoder,
 )
 from core.models import BackendChoice, CodecChoice
-from core.preset_store import load_app_config, update_app_config
-from core.subprocess_utils import noninteractive_run_kwargs
+from core.config.store import load_app_config, update_app_config
+from core.ffmpeg.subprocess import noninteractive_run_kwargs
 
 
 # Preset choices are part of each usable encoder entry.  Bump the schema so

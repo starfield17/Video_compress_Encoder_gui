@@ -7,10 +7,10 @@ testable without constructing a Qt model or view.
 
 from __future__ import annotations
 
-from core.analysis_receipts import delete_analysis_receipt
-from core.constraint_resolution import (
+from core.smart import (
     accept_rejected_output,
     build_decision_options,
+    delete_analysis_receipt,
     discard_rejected_output,
     prepare_size_miss_retry,
     reselect_after_quality_decision,

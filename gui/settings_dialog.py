@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.analysis_profiles import parse_analysis_profile_name
+from core.config import smart_policies_from_config
 from core.i18n import LanguageInfo, Translator
 from core.models import (
     AnalysisProfileName,
@@ -26,7 +26,7 @@ from core.models import (
     SizeBlockedPolicy,
     SkippedOutputPolicy,
 )
-from core.preset_store import smart_policies_from_config
+from core.smart import parse_analysis_profile_name
 
 class SettingsDialog(QDialog):
     def __init__(
