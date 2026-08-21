@@ -953,7 +953,7 @@ def analyze_quality(
                     persistable,
                     scout_observations=scout_observations,
                     search_windows=planned_search,
-                    holdout_windows=planned_holdouts,
+                    holdout_windows=remaining_holdouts,
                     refinement_rounds=refinement_records,
                     search_min_vmaf=search_min_vmaf,
                     holdout_min_vmaf=holdout_min_vmaf,

@@ -9,6 +9,7 @@ from core.smart.sampling.planner import (
     ScoutObservation,
     align_window_to_scene_cuts,
     build_sample_plan,
+    holdout_window_count,
     plan_scout_windows,
     rank_scout_observations,
     search_window_count,
@@ -31,6 +32,18 @@ class SamplePlannerTest(unittest.TestCase):
         self.assertEqual(search_window_count(10 * 60, settings), 5)
         self.assertEqual(search_window_count(60 * 60, settings), 6)
         self.assertEqual(search_window_count(180 * 60, settings), 6)
+
+    def test_precise_uses_over_180_minute_bucket_only_above_boundary(self) -> None:
+        settings = FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.PRECISE]
+        expected = (
+            (180 * 60 - 0.001, 8, 3),
+            (180 * 60, 8, 3),
+            (180 * 60 + 0.001, 10, 4),
+        )
+        for duration, search_count, holdout_count in expected:
+            with self.subTest(duration=duration):
+                self.assertEqual(search_window_count(duration, settings), search_count)
+                self.assertEqual(holdout_window_count(duration, settings), holdout_count)
 
     def test_scouts_are_uniform_and_non_overlapping(self) -> None:
         settings = FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.BALANCE]

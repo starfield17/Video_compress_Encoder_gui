@@ -16,6 +16,7 @@ from core.models import AnalysisReceipt, QualityCandidateResult
 ANALYSIS_RECEIPT_SCHEMA_VERSION = 4
 _FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 _RECEIPT_LOCK = threading.RLock()
+_WINDOW_EPSILON_SEC = 1e-9
 
 
 def analysis_receipts_dir(workdir: Path) -> Path:
@@ -140,6 +141,22 @@ def _optional_score(data: object, field_name: str) -> float | None:
     return value
 
 
+def _window_coordinates(windows: list[dict[str, object]]) -> list[tuple[float, float]]:
+    return [
+        (float(str(window["start_sec"])), float(str(window["duration_sec"])))
+        for window in windows
+    ]
+
+
+def _windows_overlap(left: tuple[float, float], right: tuple[float, float]) -> bool:
+    left_start, left_duration = left
+    right_start, right_duration = right
+    return (
+        left_start < right_start + right_duration - _WINDOW_EPSILON_SEC
+        and right_start < left_start + left_duration - _WINDOW_EPSILON_SEC
+    )
+
+
 def _receipt_from_data(data: object) -> AnalysisReceipt:
     if not isinstance(data, dict):
         raise ValueError("Analysis receipt must be an object.")
@@ -177,6 +194,18 @@ def _receipt_from_data(data: object) -> AnalysisReceipt:
     search_fingerprint = str(data.get("search_fingerprint", ""))
     if search_fingerprint and _FINGERPRINT_RE.fullmatch(search_fingerprint) is None:
         raise ValueError("Analysis receipt contains an invalid search fingerprint.")
+    search_windows = _planned_windows(data.get("search_windows", []), "search_windows")
+    holdout_windows = _planned_windows(data.get("holdout_windows", []), "holdout_windows")
+    search_coordinates = _window_coordinates(search_windows)
+    holdout_coordinates = _window_coordinates(holdout_windows)
+    if windows != search_coordinates:
+        raise ValueError("Analysis receipt sample and search windows are inconsistent.")
+    if any(
+        _windows_overlap(search, holdout)
+        for search in search_coordinates
+        for holdout in holdout_coordinates
+    ):
+        raise ValueError("Analysis receipt search and holdout windows overlap.")
     measurement_configuration = _identity(
         data.get("measurement_configuration"), "measurement_configuration"
     )
@@ -189,8 +218,8 @@ def _receipt_from_data(data: object) -> AnalysisReceipt:
         sample_scheme_version=int(data.get("sample_scheme_version", 0)),
         sample_windows=windows,
         scout_windows=_scout_windows(data.get("scout_windows", [])),
-        search_windows=_planned_windows(data.get("search_windows", []), "search_windows"),
-        holdout_windows=_planned_windows(data.get("holdout_windows", []), "holdout_windows"),
+        search_windows=search_windows,
+        holdout_windows=holdout_windows,
         refinement_rounds=_object_list(data.get("refinement_rounds", []), "refinement_rounds"),
         search_min_vmaf=_optional_score(data.get("search_min_vmaf"), "search_min_vmaf"),
         holdout_min_vmaf=_optional_score(data.get("holdout_min_vmaf"), "holdout_min_vmaf"),

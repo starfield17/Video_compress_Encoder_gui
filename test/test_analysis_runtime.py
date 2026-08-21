@@ -482,16 +482,16 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             cpu = measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CPU)
             cuda = measurement_configuration_fingerprint(ffmpeg, item, vmaf_backend=VmafBackend.CUDA)
             self.assertNotEqual(cpu, cuda)
-            self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 4)
-            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 6)
+            self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 5)
+            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 7)
             self.assertEqual(ANALYSIS_RECEIPT_SCHEMA_VERSION, 4)
             from core.smart_quality import measurement_configuration_payload
 
             payload = measurement_configuration_payload(ffmpeg, item, vmaf_backend=VmafBackend.CPU)
-            self.assertEqual(payload["sample_scheme_version"], 4)
+            self.assertEqual(payload["sample_scheme_version"], 5)
             self.assertEqual(payload["vmaf_subsample"], 1)
             self.assertEqual(payload["vmaf_backend"], "cpu")
-            self.assertEqual(payload["analysis_algorithm_version"], 6)
+            self.assertEqual(payload["analysis_algorithm_version"], 7)
             self.assertEqual(payload["vmaf_resolution_mode"], "display_model_canvas")
             self.assertEqual(payload["vmaf_generation"], "v1")
             self.assertEqual(payload["vmaf_model"], "vmaf_v1.0.16_3d0h")
@@ -655,6 +655,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             ffmpeg = root / "ffmpeg"
             ffmpeg.write_bytes(b"binary")
             search_calls = 0
+            reference_counts: list[int] = []
 
             def search(**kwargs):
                 nonlocal search_calls
@@ -664,6 +665,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                 return [result], bitrate, bitrate
 
             def score(_ffmpeg, _item, references, bitrate, *_args, **_kwargs):
+                reference_counts.append(len(references))
                 holdout_probe = len(references) == 1
                 vmaf = 89.0 if holdout_probe and bitrate < 2_000_000 else 95.0
                 return QualityCandidateResult(
@@ -701,11 +703,55 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             self.assertIsNotNone(receipt)
             assert receipt is not None
             self.assertEqual(len(receipt.search_windows), 4)
-            self.assertEqual(
-                [window["id"] for window in receipt.holdout_windows],
-                ["holdout:test"],
-            )
+            self.assertEqual(receipt.holdout_windows, [])
             self.assertEqual(receipt.refinement_rounds[0]["promoted_window_ids"], ["holdout:test"])
+
+            changed_policy = replace(
+                item,
+                options=replace(item.options, min_vmaf=94.0),
+                quality_search_result=None,
+            )
+            reference_counts.clear()
+            reused_progress: list[dict[str, object]] = []
+            with (
+                patch(
+                    "core.smart.workflow.select_vmaf_runtime",
+                    return_value=VmafRuntimeSupport(
+                        VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True
+                    ),
+                ),
+                patch(
+                    "core.smart.workflow.detect_analysis_capabilities",
+                    return_value=_capabilities(),
+                ),
+                patch(
+                    "core.smart.workflow.discover_sample_plan",
+                    side_effect=AssertionError("receipt windows should be reused"),
+                ),
+                patch("core.smart.workflow._run_logged"),
+                patch("core.smart.workflow._score_candidate", side_effect=score),
+                patch(
+                    "core.smart.workflow.search_bitrate_candidates",
+                    side_effect=search,
+                ),
+            ):
+                reused = analyze_quality(
+                    ffmpeg,
+                    changed_policy,
+                    root,
+                    root / "reuse.log",
+                    progress_callback=reused_progress.append,
+                )
+
+            self.assertEqual(reused.status, QualitySearchStatus.FOUND)
+            self.assertTrue(reference_counts)
+            self.assertEqual(set(reference_counts), {4})
+            self.assertFalse(
+                any(
+                    event.get("state") == "holdout_verification"
+                    for event in reused_progress
+                )
+            )
 
     def test_holdout_failure_at_refinement_limit_is_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

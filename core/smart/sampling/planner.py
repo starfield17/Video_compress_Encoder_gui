@@ -128,7 +128,7 @@ def _configured_search_window_count(
         return int(settings.sample_count_under_10m)
     if duration_sec < 60 * 60:
         return int(settings.sample_count_10_to_60m)
-    if duration_sec < 180 * 60:
+    if duration_sec <= 180 * 60:
         return int(settings.sample_count_60_to_180m)
     return int(settings.sample_count_over_180m)
 

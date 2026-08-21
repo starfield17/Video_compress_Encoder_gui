@@ -431,7 +431,7 @@ class AnalysisReceiptTestCase(unittest.TestCase):
                 source_identity={"path": "source.mp4", "size": 10, "mtime_ns": 20},
                 ffmpeg_identity={"path": "ffmpeg", "size": 30, "mtime_ns": 40},
                 encoder_identity={"encoder": "libx265", "backend": "cpu"},
-                sample_scheme_version=4,
+                sample_scheme_version=5,
                 sample_windows=[(10.0, 5.0)],
                 scout_windows=[
                     {
@@ -499,7 +499,7 @@ class AnalysisReceiptTestCase(unittest.TestCase):
             self.assertIsNotNone(loaded)
             assert loaded is not None
             self.assertEqual(loaded.candidates[1].min_vmaf, 96.0)
-            self.assertEqual(loaded.sample_scheme_version, 4)
+            self.assertEqual(loaded.sample_scheme_version, 5)
             self.assertEqual(len(loaded.scout_windows), 1)
             self.assertEqual(loaded.search_windows[0]["reasons"], ["global_hardest"])
             self.assertEqual(
@@ -519,6 +519,21 @@ class AnalysisReceiptTestCase(unittest.TestCase):
             out_of_range["candidates"][1]["min_vmaf"] = 101.0
             out_of_range["candidates"][1]["segment_vmaf"] = [101.0]
             path.write_text(json.dumps(out_of_range), encoding="utf-8")
+            self.assertIsNone(load_analysis_receipt(root, fingerprint))
+
+            inconsistent_windows = json.loads(json.dumps(asdict(receipt)))
+            inconsistent_windows["sample_windows"][0][0] = 11.0
+            path.write_text(json.dumps(inconsistent_windows), encoding="utf-8")
+            self.assertIsNone(load_analysis_receipt(root, fingerprint))
+
+            missing_search_windows = json.loads(json.dumps(asdict(receipt)))
+            missing_search_windows["search_windows"] = []
+            path.write_text(json.dumps(missing_search_windows), encoding="utf-8")
+            self.assertIsNone(load_analysis_receipt(root, fingerprint))
+
+            overlapping_windows = json.loads(json.dumps(asdict(receipt)))
+            overlapping_windows["holdout_windows"][0]["start_sec"] = 12.0
+            path.write_text(json.dumps(overlapping_windows), encoding="utf-8")
             self.assertIsNone(load_analysis_receipt(root, fingerprint))
 
             path.write_text("{not-json", encoding="utf-8")

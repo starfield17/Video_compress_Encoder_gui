@@ -45,6 +45,8 @@ class ContentComplexityCommandTest(unittest.TestCase):
         self.assertIn("siti", graph)
         self.assertIn(f"scdet=threshold={SCENE_CHANGE_THRESHOLD:g}", graph)
         self.assertIn("metadata=mode=print:file='metrics.txt'", graph)
+        self.assertEqual(command.count("-map"), 1)
+        self.assertEqual(command[command.index("-map") : command.index("-map") + 2], ["-map", "0:v:0"])
         self.assertEqual(command[-3:], ["-f", "null", "-"])
 
     def test_scene_guard_does_not_run_siti(self) -> None:
@@ -54,6 +56,8 @@ class ContentComplexityCommandTest(unittest.TestCase):
         graph = command[command.index("-vf") + 1]
         self.assertNotIn(",siti,", graph)
         self.assertIn("scdet=threshold=10", graph)
+        self.assertEqual(command.count("-map"), 1)
+        self.assertEqual(command[command.index("-map") : command.index("-map") + 2], ["-map", "0:v:0"])
 
 
 class ContentComplexityParsingTest(unittest.TestCase):

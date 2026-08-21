@@ -33,8 +33,8 @@ from .vmaf import (
 
 # These version values are part of the persisted receipt identity.  Keep them
 # stable for behavior-preserving refactors.
-SMART_SAMPLE_SCHEME_VERSION = 4
-SMART_ANALYSIS_ALGORITHM_VERSION = 6
+SMART_SAMPLE_SCHEME_VERSION = 5
+SMART_ANALYSIS_ALGORITHM_VERSION = 7
 
 
 class _SampleWindow(Protocol):
