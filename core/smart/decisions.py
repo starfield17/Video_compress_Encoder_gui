@@ -16,6 +16,7 @@ from core.models import (
     EncodePlanItem,
     EncodeResult,
     QualitySearchResult,
+    SkipOrigin,
     SizeBlockedPolicy,
 )
 from .bitrate import reselect_from_candidates
@@ -147,6 +148,7 @@ def discard_rejected_output(item: EncodePlanItem, result: EncodeResult) -> None:
     rejected.unlink(missing_ok=True)
     result.success = False
     result.skipped = True
+    result.skip_origin = SkipOrigin.SIZE_MISS_DISCARD
     result.needs_decision = False
     result.rejected_output_path = None
 

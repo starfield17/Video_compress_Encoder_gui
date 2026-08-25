@@ -4,7 +4,7 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
-from core.models import AudioMode, ContainerChoice, DecodeAcceleration, EncodePlanItem, PreviewJob
+from core.models import AudioMode, ContainerChoice, DecodeAcceleration, EncodePlanItem
 from core.media.paths import passlog_prefix
 
 
@@ -112,7 +112,7 @@ def build_encode_commands(
 
     source_path = input_path or plan_item.source_path
     final_output = output_path or plan_item.output_path
-    overwrite_flag = "-y" if plan_item.options.overwrite or stage == "preview" else "-n"
+    overwrite_flag = "-y" if plan_item.options.overwrite else "-n"
     base_input = [
         str(ffmpeg_path),
         "-hide_banner",
@@ -156,41 +156,3 @@ def build_encode_commands(
         + [str(final_output)]
     )
     return [cmd], None
-
-
-def build_preview_extract_command(ffmpeg_path: Path, preview_job: PreviewJob) -> list[str]:
-    return [
-        str(ffmpeg_path),
-        "-hide_banner",
-        "-y",
-        "-ss",
-        f"{preview_job.start_sec:.3f}",
-        "-t",
-        f"{preview_job.duration_sec:.3f}",
-        "-i",
-        str(preview_job.source_path),
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a?",
-        "-map",
-        "0:s?",
-        "-c",
-        "copy",
-        str(preview_job.source_sample_path),
-    ]
-
-
-def build_preview_encode_commands(
-    ffmpeg_path: Path,
-    preview_job: PreviewJob,
-    workdir: Path,
-) -> tuple[list[list[str]], Path | None]:
-    return build_encode_commands(
-        ffmpeg_path=ffmpeg_path,
-        plan_item=preview_job.plan_item,
-        workdir=workdir,
-        input_path=preview_job.source_sample_path,
-        output_path=preview_job.encoded_sample_path,
-        stage="preview",
-    )

@@ -8,7 +8,6 @@ from core.media.paths import ensure_dir
 
 def validate_workdir(workdir: Path) -> Path:
     workdir = workdir.expanduser().resolve()
-    ensure_dir(workdir / "preview")
     ensure_dir(workdir / "logs")
     ensure_dir(workdir / "temp")
     return workdir

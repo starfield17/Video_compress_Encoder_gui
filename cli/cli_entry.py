@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TypedDict
 
-from cli.cli_interactive import print_encode_results, print_plan, print_preview_result
+from cli.cli_interactive import print_encode_results, print_plan
 from core.config import (
     app_root,
     bundle_root,
@@ -27,13 +27,11 @@ from core.config import (
 from core.encoding import (
     build_encode_plan,
     execute_plan,
-    execute_plan_parallel,
-    execute_preview,
-    execute_smart_preview,
+    execute_plan_concurrent,
 )
 from core.ffmpeg import discover_ffmpeg_tools, list_available_encoders, preset_choices_for_encoder, resolve_encoder
 from core.i18n import TranslationCatalog
-from core.media import build_preview_job, publish_skipped_sources
+from core.media import publish_skipped_sources
 from core.models import (
     AnalysisProfileName,
     AudioMode,
@@ -47,8 +45,6 @@ from core.models import (
     ContainerChoice,
     DecodeAcceleration,
     EncodeOptions,
-    PreviewOptions,
-    PreviewSampleMode,
     VmafViewingContext,
 )
 from core.smart import (
@@ -126,12 +122,6 @@ def _merge_options(base: EncodeOptions, args: argparse.Namespace) -> EncodeOptio
         value = getattr(args, name, None)
         if value is not None:
             updates[name] = bool(value)
-
-    parallel_enabled = getattr(args, "parallel", None)
-    if parallel_enabled is not None:
-        updates["parallel_enabled"] = bool(parallel_enabled)
-    if hasattr(args, "parallel_backends"):
-        updates["parallel_backends"] = _parse_parallel_backends(getattr(args, "parallel_backends", None))
 
     size_blocked = getattr(args, "size_blocked_policy", None)
     constraint_policy = getattr(args, "constraint_policy", None)
@@ -227,8 +217,6 @@ def _add_encode_flags(parser: argparse.ArgumentParser) -> None:
         choices=[acceleration.value for acceleration in DecodeAcceleration],
         help="Video decoding acceleration method",
     )
-    parser.add_argument("--parallel", action="store_true", help="Enable queue-level parallel transcoding")
-    parser.add_argument("--parallel-backends", dest="parallel_backends", help="Comma-separated explicit backends")
     parser.add_argument("--ratio", type=float, help="Target video bitrate ratio")
     parser.add_argument(
         "--min-vmaf",
@@ -273,38 +261,6 @@ def _add_encode_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--maxrate-factor", dest="maxrate_factor", type=float, help="maxrate factor")
     parser.add_argument("--bufsize-factor", dest="bufsize_factor", type=float, help="bufsize factor")
     parser.add_argument("--dry-run", action="store_true", help="Build the plan and stop")
-
-
-def _parse_parallel_backends(raw: str | None) -> tuple[BackendChoice, ...]:
-    if raw is None:
-        return ()
-    seen: set[BackendChoice] = set()
-    parsed: list[BackendChoice] = []
-    for chunk in raw.split(","):
-        value = chunk.strip().lower()
-        if not value:
-            continue
-        backend = BackendChoice(value)
-        if backend == BackendChoice.AUTO:
-            raise ValueError("auto is not allowed for parallel backends")
-        if backend in seen:
-            continue
-        seen.add(backend)
-        parsed.append(backend)
-    return tuple(parsed)
-
-
-def _validate_parallel_options(options: EncodeOptions, tr, *, allow_parallel: bool = True) -> None:
-    if not options.parallel_enabled:
-        return
-    if not allow_parallel:
-        raise ValueError(tr.t("cli.parallel_preview_not_supported"))
-    if not options.parallel_backends:
-        raise ValueError(tr.t("cli.parallel_requires_backends"))
-    if options.two_pass:
-        raise ValueError(tr.t("cli.parallel_two_pass_not_supported"))
-    if options.encoder_preset:
-        raise ValueError(tr.t("cli.parallel_preset_not_supported"))
 
 
 def _validate_compression_options(options: EncodeOptions, args: argparse.Namespace) -> None:
@@ -362,13 +318,20 @@ def _build_parser(catalog: TranslationCatalog | None = None) -> argparse.Argumen
     parser = argparse.ArgumentParser(description="Video compressor CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    plan_parser = subparsers.add_parser("plan", help="Preview the encode plan")
+    plan_parser = subparsers.add_parser("plan", help="Inspect the encode plan")
     _add_runtime_flags(plan_parser, catalog)
     _add_encode_flags(plan_parser)
 
     encode_parser = subparsers.add_parser("encode", help="Execute the encode plan")
     _add_runtime_flags(encode_parser, catalog)
     _add_encode_flags(encode_parser)
+    encode_parser.add_argument(
+        "--jobs",
+        type=int,
+        choices=range(1, 9),
+        default=1,
+        help="Maximum concurrent full encodes (1-8, default: 1)",
+    )
     encode_parser.add_argument(
         "--size-blocked-policy",
         dest="size_blocked_policy",
@@ -390,15 +353,8 @@ def _build_parser(catalog: TranslationCatalog | None = None) -> argparse.Argumen
         "--skipped-output-policy",
         dest="skipped_output_policy",
         choices=[policy.value for policy in SkippedOutputPolicy],
-        help="What to do with skipped sources after encode (default: copy)",
+        help="What to do with sources skipped by Smart analysis (default: copy)",
     )
-
-    preview_parser = subparsers.add_parser("preview", help="Run a manual preview sample")
-    _add_runtime_flags(preview_parser, catalog)
-    _add_encode_flags(preview_parser)
-    preview_parser.add_argument("--sample-mode", choices=["middle", "custom"], default="middle")
-    preview_parser.add_argument("--sample-duration", dest="sample_duration_sec", type=float, default=30.0)
-    preview_parser.add_argument("--sample-start", dest="custom_start_sec", type=float)
 
     preset_parser = subparsers.add_parser("preset", help="Manage presets")
     preset_sub = preset_parser.add_subparsers(dest="preset_command", required=True)
@@ -433,18 +389,10 @@ def _translator_for_args(
     return catalog.translator(language)
 
 
-def _first_valid_plan_item(plan):
-    for item in plan.items:
-        if not item.skip_reason:
-            return item
-    return None
-
-
 def _run_plan(args: argparse.Namespace, config_dir: Path, catalog: TranslationCatalog) -> int:
     tr = _translator_for_args(args, config_dir, catalog)
     options = _options_from_args(args, config_dir)
     _validate_compression_options(options, args)
-    _validate_parallel_options(options, tr)
     _validate_encoder_preset(options, args)
     plan = build_encode_plan(
         input_path=Path(args.input),
@@ -463,7 +411,6 @@ def _run_encode(args: argparse.Namespace, config_dir: Path, catalog: Translation
     tr = _translator_for_args(args, config_dir, catalog)
     options = _options_from_args(args, config_dir)
     _validate_compression_options(options, args)
-    _validate_parallel_options(options, tr)
     _validate_encoder_preset(options, args)
     plan = build_encode_plan(
         input_path=Path(args.input),
@@ -478,11 +425,11 @@ def _run_encode(args: argparse.Namespace, config_dir: Path, catalog: Translation
     if options.dry_run:
         return 0
     workdir = Path(args.workdir).expanduser().resolve() if args.workdir else _default_workdir()
-    if options.parallel_enabled and options.parallel_backends:
-        results = execute_plan_parallel(
+    if args.jobs > 1:
+        results = execute_plan_concurrent(
             plan,
             workdir,
-            backends=options.parallel_backends,
+            max_workers=args.jobs,
             constraint_policy=constraint_policy_from_size_blocked(options.size_blocked_policy),
         )
     else:
@@ -499,67 +446,14 @@ def _run_encode(args: argparse.Namespace, config_dir: Path, catalog: Translation
         )
         for item in published:
             if item.copied:
-                print(f"Copied skipped source {item.source_path.name} -> {item.output_path}")
+                print(f"Copied Smart-skipped source {item.source_path.name} -> {item.output_path}")
             elif item.reason:
-                print(f"Did not copy skipped source {item.source_path.name}: {item.reason}")
+                print(f"Did not copy Smart-skipped source {item.source_path.name}: {item.reason}")
     elif options.skipped_output_policy == SkippedOutputPolicy.ASK:
-        print("Skipped-output policy is ask; CLI leaves skipped sources in place.")
+        print("Skipped-output policy is ask; CLI leaves Smart-skipped sources in place.")
     if any(result.needs_decision for result in results):
         return 3
     return 0 if all(result.success or result.skipped for result in results) else 2
-
-
-def _run_preview(args: argparse.Namespace, config_dir: Path, catalog: TranslationCatalog) -> int:
-    tr = _translator_for_args(args, config_dir, catalog)
-    input_path = Path(args.input).expanduser().resolve()
-    if not input_path.is_file():
-        print(tr.t("cli.preview_requires_file"), file=sys.stderr)
-        return 2
-
-    options = _options_from_args(args, config_dir)
-    _validate_compression_options(options, args)
-    _validate_parallel_options(options, tr, allow_parallel=False)
-    _validate_encoder_preset(options, args)
-    plan = build_encode_plan(
-        input_path=input_path,
-        options=options,
-        output_dir=Path(args.output).expanduser().resolve() if args.output else None,
-        workdir=Path(args.workdir).expanduser().resolve() if args.workdir else _default_workdir(),
-        ffmpeg_path=args.ffmpeg,
-        ffprobe_path=args.ffprobe,
-        config_dir=config_dir,
-    )
-    item = _first_valid_plan_item(plan)
-    if item is None:
-        print(tr.t("cli.preview_no_valid_item"), file=sys.stderr)
-        print_plan(plan, tr)
-        return 2
-
-    workdir = Path(args.workdir).expanduser().resolve() if args.workdir else _default_workdir()
-    if options.compression_mode == CompressionMode.SMART:
-        result = execute_smart_preview(
-            item=item,
-            ffmpeg_path=plan.ffmpeg_path,
-            workdir=workdir,
-        )
-    else:
-        preview_options = PreviewOptions(
-            sample_mode=PreviewSampleMode(args.sample_mode),
-            sample_duration_sec=args.sample_duration_sec,
-            custom_start_sec=args.custom_start_sec,
-        )
-        job = build_preview_job(
-            plan_item=item,
-            workdir=workdir,
-            preview_options=preview_options,
-        )
-        result = execute_preview(
-            job=job,
-            ffmpeg_path=plan.ffmpeg_path,
-            workdir=workdir,
-        )
-    print_preview_result(result, tr)
-    return 0 if result.success else 2
 
 
 def _run_preset(args: argparse.Namespace, config_dir: Path, catalog: TranslationCatalog) -> int:
@@ -586,7 +480,6 @@ def _run_preset(args: argparse.Namespace, config_dir: Path, catalog: Translation
     if args.preset_command == "save":
         options = _options_from_args(args, config_dir)
         _validate_compression_options(options, args)
-        _validate_parallel_options(options, tr)
         _validate_encoder_preset(options, args)
         path = save_preset(args.name, options, config_dir)
         print(tr.t("cli.preset_saved", name=args.name, path=path))
@@ -612,8 +505,6 @@ def run_cli(argv: list[str] | None = None) -> int:
             return _run_plan(args, config_dir, catalog)
         if args.command == "encode":
             return _run_encode(args, config_dir, catalog)
-        if args.command == "preview":
-            return _run_preview(args, config_dir, catalog)
         if args.command == "preset":
             return _run_preset(args, config_dir, catalog)
     except Exception as exc:

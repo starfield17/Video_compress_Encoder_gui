@@ -169,7 +169,6 @@ class SmokeTestCase(unittest.TestCase):
                 window.start_queue_action,
                 window.pause_after_current_action,
                 window.stop_action,
-                window.preview_action,
                 window.queue_action,
                 window.activity_log_action,
                 window.presets_action,

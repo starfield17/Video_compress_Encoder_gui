@@ -250,8 +250,6 @@ class PlanningAndCommandTestCase(unittest.TestCase):
             {
                 "codec": "hevc",
                 "backend": "auto",
-                "parallel_enabled": False,
-                "parallel_backends": [],
                 "ratio": None,
                 "min_video_kbps": 250,
                 "max_video_kbps": 0,
@@ -312,10 +310,7 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
             )
             self.assertEqual(_backend_combo_items(window), ["auto", "cpu"])
             panel = window.options_panel
-            self.assertTrue(panel.parallel_qsv_check.isHidden())
-            self.assertTrue(panel.parallel_nvenc_check.isHidden())
-            self.assertTrue(panel.parallel_amf_check.isHidden())
-            self.assertFalse(panel.parallel_cpu_check.isHidden())
+            self.assertFalse(hasattr(panel, "parallel_qsv_check"))
         finally:
             window.close()
 
@@ -331,11 +326,9 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
             panel = window.options_panel
             panel.codec_combo.setCurrentText("hevc")
             self.assertEqual(_backend_combo_items(window), ["auto", "qsv", "cpu"])
-            self.assertFalse(panel.parallel_qsv_check.isHidden())
 
             panel.codec_combo.setCurrentText("av1")
             self.assertEqual(_backend_combo_items(window), ["auto", "cpu"])
-            self.assertTrue(panel.parallel_qsv_check.isHidden())
         finally:
             window.close()
 
@@ -352,14 +345,11 @@ class GuiPresetSelectionTestCase(unittest.TestCase):
             panel.apply_options(
                 EncodeOptions(
                     backend=BackendChoice.QSV,
-                    parallel_enabled=True,
-                    parallel_backends=(BackendChoice.QSV, BackendChoice.CPU),
                 )
             )
             self.assertEqual(panel.backend_combo.currentText(), "auto")
             options = panel.read_options()
             self.assertEqual(options.backend, BackendChoice.AUTO)
-            self.assertEqual(options.parallel_backends, (BackendChoice.CPU,))
         finally:
             window.close()
 

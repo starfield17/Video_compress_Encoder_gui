@@ -19,7 +19,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from cli.cli_entry import run_cli
-from core.encoding import execute_plan_item
+from core.encoding import execute_plan_concurrent, execute_plan_item
 from core.models import (
     AudioMode,
     BackendChoice,
@@ -41,8 +41,6 @@ from core.models import (
     VmafViewingContext,
 )
 from core.config.store import encode_options_to_preset_data, preset_data_to_encode_options
-from core.encoding import execute_plan_parallel
-from core.encoding import execute_plan
 from core.smart_quality import (
     SMART_ERROR_TAIL_CHARS,
     SmartCommandError,
@@ -781,6 +779,8 @@ class SmartExecutionSafetyTestCase(unittest.TestCase):
             self.assertEqual(result.rejected_output_path.read_bytes(), b"x" * 800)
             self.assertEqual(result.actual_output_bytes, 800)
             self.assertEqual(result.allowed_output_bytes, 700)
+            self.assertEqual(result.effective_min_vmaf, options.min_vmaf)
+            self.assertEqual(result.effective_max_output_ratio, 0.70)
             self.assertEqual(output.read_bytes(), b"original")
             self.assertFalse(list(root.glob(".*.smart-*")))
 
@@ -845,19 +845,24 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
         self.assertIs(actual, expected)
         self.assertEqual(observed_score_hook, [smart_measurement.score_candidate])
 
-    def test_parallel_workers_bind_before_analysis_and_serialize_searches(self) -> None:
+    def test_concurrent_workers_preserve_bindings_during_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            options = EncodeOptions(
-                parallel_enabled=True,
-                parallel_backends=(BackendChoice.CPU, BackendChoice.NVENC),
-                overwrite=True,
-            )
             items: list[EncodePlanItem] = []
             for index in range(2):
                 source = root / f"source-{index}.mov"
                 source.write_bytes(b"s" * 1_000)
-                items.append(_item(source, root / f"output-{index}.mp4", options))
+                item = _item(source, root / f"output-{index}.mp4", EncodeOptions(overwrite=True))
+                if index == 1:
+                    item.encoder_info = EncoderInfo(
+                        codec=CodecChoice.HEVC,
+                        backend=BackendChoice.NVENC,
+                        encoder_name="hevc_nvenc",
+                        supports_two_pass=False,
+                        default_preset=None,
+                    )
+                    item.options = replace(item.options, backend=BackendChoice.NVENC)
+                items.append(item)
             plan = EncodePlan(
                 items=items,
                 ffmpeg_path=Path("ffmpeg"),
@@ -865,22 +870,6 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
                 input_root=root,
                 output_root=root,
             )
-            encoders = {
-                BackendChoice.CPU: EncoderInfo(
-                    codec=CodecChoice.HEVC,
-                    backend=BackendChoice.CPU,
-                    encoder_name="libx265",
-                    supports_two_pass=True,
-                    default_preset=None,
-                ),
-                BackendChoice.NVENC: EncoderInfo(
-                    codec=CodecChoice.HEVC,
-                    backend=BackendChoice.NVENC,
-                    encoder_name="hevc_nvenc",
-                    supports_two_pass=False,
-                    default_preset=None,
-                ),
-            }
             active = 0
             max_active = 0
             observed_backends: set[BackendChoice] = set()
@@ -911,19 +900,10 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
                 Path(cmd[-1]).write_bytes(b"x" * 600)
 
             with (
-                patch("core.encoding.parallel.ensure_encoder_capabilities", return_value={"codecs": {}}),
-                patch(
-                    "core.encoding.parallel.resolve_encoder",
-                    side_effect=lambda _codec, backend, *_args, **_kwargs: encoders[backend],
-                ),
                 patch("core.encoding.analysis.analyze_quality", side_effect=fake_analysis),
                 patch("core.encoding.executor._run_logged_command", side_effect=fake_run),
             ):
-                results = execute_plan_parallel(
-                    plan,
-                    root,
-                    backends=(BackendChoice.CPU, BackendChoice.NVENC),
-                )
+                results = execute_plan_concurrent(plan, root, max_workers=2)
 
             self.assertEqual(len(results), 2)
             self.assertTrue(all(result.success for result in results))
@@ -961,7 +941,7 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
                 patch("core.encoding.analysis.analyze_quality", side_effect=fake_analysis),
                 patch("core.encoding.executor._run_logged_command", side_effect=fake_run),
             ):
-                results = execute_plan(plan, root)
+                results = execute_plan_concurrent(plan, root, max_workers=2)
 
             self.assertEqual(len(results), 3)
             self.assertTrue(all(result.success for result in results))
@@ -1107,8 +1087,6 @@ class SmartGuiTestCase(unittest.TestCase):
                 panel.read_options().viewing_context,
                 VmafViewingContext.STANDARD_DISPLAY,
             )
-            self.assertFalse(panel.sample_mode_combo.isEnabled())
-
             fixed_index = panel.compression_mode_combo.findData(CompressionMode.FIXED_BITRATE.value)
             panel.compression_mode_combo.setCurrentIndex(fixed_index)
             self.assertTrue(panel.viewing_context_combo.isHidden())

@@ -82,9 +82,7 @@ def _options_with_default_preset(
     encoder_info: EncoderInfo,
     progress_callback: Callable[[str], None] | None,
 ) -> EncodeOptions:
-    # When the user is parallel-encoding, baked-in default presets are not
-    # applied because every job gets its own explicit encoder selection.
-    if options.encoder_preset is not None or options.parallel_enabled:
+    if options.encoder_preset is not None:
         return options
 
     default_preset = encoder_info.default_preset

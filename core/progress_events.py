@@ -1,7 +1,7 @@
 """Typed, backwards-compatible payload contract for progress callbacks.
 
 Progress events intentionally remain ordinary dictionaries at runtime.  The
-encoder, planner, Smart analysis and preview paths all add fields that are
+encoder, planner, and Smart analysis paths all add fields that are
 useful to their consumers, so this is a ``total=False`` ``TypedDict`` rather
 than a runtime event class.  Keeping the contract in ``core`` lets CLI and GUI
 adapters share it without introducing a dependency on either entrypoint.
@@ -48,6 +48,7 @@ class ProgressEvent(TypedDict, total=False):
     current_pass_index: int
     total_passes: int
     parallel: bool
+    worker_count: int
     quality_search_result: QualitySearchResult
     target_video_bitrate_bps: int
     candidate_index: int

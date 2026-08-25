@@ -5,8 +5,8 @@ This project refactors the original single-file compressor into a modular layout
 - a thin `main.py`
 - reusable core planning and execution layers
 - preset save/load support
-- manual preview sampling before full encode
 - VMAF-guided smart compression with final-size enforcement
+- configurable concurrent full-file encoding
 - CLI and PySide6 GUI entrypoints
 - configurable English and Simplified Chinese language packs
 - optional copy of matching external subtitle sidecars such as `.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`, `.idx`, and `.sup`
@@ -20,7 +20,7 @@ core/
   media/       media-domain paths, files, subtitles and validation
   ffmpeg/      FFmpeg discovery, probing, capabilities and commands
   smart/       Smart/VMAF analysis and sampling
-  encoding/    planning, execution, preview and parallel scheduling
+  encoding/    planning, Smart analysis, execution and concurrent scheduling
 cli/
 gui/
 FFmpeg/
@@ -32,9 +32,9 @@ workdir/
 
 ```bash
 python main.py --cli plan workdir/test.mp4
-python main.py --cli preview workdir/test.mp4 --backend cpu
 python main.py --cli encode workdir/test.mp4 --backend qsv --overwrite
 python main.py --cli encode workdir/test.mp4 --backend cpu --overwrite
+python main.py --cli encode workdir/test.mp4 --jobs 3 --overwrite
 python main.py --cli encode workdir/test.mp4 --copy-external-subtitles
 python main.py --cli preset list
 ```
@@ -49,16 +49,7 @@ runtime encoders in this order: `nvenc`, `qsv`, `amf`, `videotoolbox`, then
 
 New jobs and the built-in HEVC/AV1 presets use smart compression. The default
 policy requires VMAF v1 90 and limits the final file to 70% of the source for
-HEVC or 50% for AV1. Smart preview runs the same automatic sample search
-without encoding the full video:
-
-```bash
-python main.py --cli preview input.mp4 \
-  --compression-mode smart \
-  --codec hevc \
-  --min-vmaf 90 \
-  --max-output-ratio 0.70
-```
+HEVC or 50% for AV1.
 
 Smart mode requires an FFmpeg build whose `libvmaf`, `siti`, and `scdet`
 filters can actually run. Short videos are analyzed whole. Longer videos first
@@ -95,6 +86,9 @@ the default quality-unreachable policy skips the file; `ask` leaves the item in
 a **Needs decision** state. CLI exit code `3` means a decision is required,
 exit code `2` means analysis or encoding failed, and intentional skips remain a
 successful batch outcome.
+The skipped-output policy applies only to automatic quality-unreachable skips
+and Skip choices made after Smart analysis. Planning, probe, validation, and
+discarded actual-size-miss outcomes are not copied by that policy.
 Candidate sizes are estimated from the largest measured encoded sample
 bitrate (including the existing container safety factor) plus the audio
 budget; the requested video bitrate is not treated as an observed size. Full
@@ -137,8 +131,9 @@ This version does not implement zero-copy hardware frames or
 `-hwaccel_output_format videotoolbox`, and VideoToolbox does not provide AV1
 support in this project.
 
-Parallel VideoToolbox encode/decode workers may contend for shared Apple media
-hardware; parallel mode is never enabled automatically.
+Concurrent VideoToolbox encode/decode jobs may contend for shared Apple media
+hardware. Concurrency defaults to one job and can be raised with CLI `--jobs`
+or the GUI's global concurrent-encode setting.
 
 VideoToolbox CLI examples:
 
@@ -198,7 +193,7 @@ The GUI now includes:
 - explicit source file and source directory pickers
 - editable output, workdir, ffmpeg, and ffprobe paths
 - preset load/save/delete controls
-- plan summary, preview summary, and encode result summary panels
+- plan summary and encode result panels
 - a detailed plan/result table with resolution, duration, bitrate, note, and status columns
 - smart-analysis stages, selected bitrate, SMART temporal quality score, and predicted size
 - language switching across English, Simplified Chinese, and any user-provided language packs
@@ -229,7 +224,7 @@ The GUI now includes:
 - Supported bundled layouts are `FFmpeg/ffmpeg(.exe)` + `FFmpeg/ffprobe(.exe)` and `FFmpeg/bin/ffmpeg(.exe)` + `FFmpeg/bin/ffprobe(.exe)`.
 - Intel QSV requires an FFmpeg build that exposes `hevc_qsv` and/or `av1_qsv`, plus supported Intel graphics hardware/drivers.
 - Presets are stored in `config/presets/`.
-- Preview outputs, logs, and temp files are written into `workdir/`.
+- Logs and temporary encode files are written into `workdir/`.
 - The GUI is PySide6-only.
 
 ## Packaging
@@ -339,7 +334,7 @@ The DMG presents `Video Compressor.app` beside an `Applications` shortcut so
 the app can be installed with the standard drag-to-Applications gesture.
 
 The app's read-only resources are under `Contents/Resources`. Configuration,
-logs, previews, and temporary files are written to
+logs and temporary files are written to
 `~/Library/Application Support/Video Compressor`, outside the app bundle.
 The standalone package continues to use the executable-adjacent layout:
 

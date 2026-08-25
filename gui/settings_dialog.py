@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -14,11 +13,12 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from core.config import smart_policies_from_config
+from core.config import parse_encode_workers, smart_policies_from_config
 from core.i18n import LanguageInfo, Translator
 from core.models import (
     AnalysisProfileName,
@@ -85,7 +85,9 @@ class SettingsDialog(QDialog):
         self.log_level_combo = QComboBox()
         self.log_level_combo.addItems(["info", "debug"])
 
-        self.keep_preview_temp_check = QCheckBox()
+        self.encode_workers_label = QLabel()
+        self.encode_workers_spin = QSpinBox()
+        self.encode_workers_spin.setRange(1, 8)
 
         general.addWidget(self.language_label, 0, 0)
         general.addWidget(self.language_combo, 0, 1, 1, 2)
@@ -100,7 +102,8 @@ class SettingsDialog(QDialog):
         general.addWidget(self.ffprobe_button, 3, 2)
         general.addWidget(self.log_level_label, 4, 0)
         general.addWidget(self.log_level_combo, 4, 1, 1, 2)
-        general.addWidget(self.keep_preview_temp_check, 5, 0, 1, 3)
+        general.addWidget(self.encode_workers_label, 5, 0)
+        general.addWidget(self.encode_workers_spin, 5, 1, 1, 2)
         layout.addLayout(general)
 
         self.policy_group = QGroupBox()
@@ -163,7 +166,7 @@ class SettingsDialog(QDialog):
         self.ffmpeg_edit.setText(str(settings.get("ffmpeg_path", "")))
         self.ffprobe_edit.setText(str(settings.get("ffprobe_path", "")))
         self.log_level_combo.setCurrentText(str(settings.get("log_level", "info")))
-        self.keep_preview_temp_check.setChecked(bool(settings.get("keep_preview_temp", True)))
+        self.encode_workers_spin.setValue(parse_encode_workers(settings.get("encode_workers", 1)))
         self.size_blocked_policy_combo.clear()
         self.size_blocked_policy_combo.addItem("", SizeBlockedPolicy.RELAX_SIZE.value)
         self.size_blocked_policy_combo.addItem("", SizeBlockedPolicy.RELAX_QUALITY.value)
@@ -199,7 +202,10 @@ class SettingsDialog(QDialog):
         self.ffmpeg_label.setText(self.tr.t("gui.label.ffmpeg"))
         self.ffprobe_label.setText(self.tr.t("gui.label.ffprobe"))
         self.log_level_label.setText(self.tr.t("gui.label.log_level"))
-        self.keep_preview_temp_check.setText(self.tr.t("gui.checkbox.keep_preview_temp"))
+        self.encode_workers_label.setText(self.tr.t("gui.label.encode_workers"))
+        encode_workers_tooltip = self.tr.t("gui.tooltip.encode_workers")
+        self.encode_workers_label.setToolTip(encode_workers_tooltip)
+        self.encode_workers_spin.setToolTip(encode_workers_tooltip)
         self.policy_group.setTitle(self.tr.t("gui.group.smart_policies"))
         self.size_blocked_policy_label.setText(self.tr.t("gui.label.size_blocked_policy"))
         self.quality_unreachable_policy_label.setText(self.tr.t("gui.label.quality_unreachable_policy"))
@@ -258,6 +264,12 @@ class SettingsDialog(QDialog):
         self.ffprobe_edit.setPlaceholderText(self.tr.t("gui.placeholder.ffprobe"))
         self.ffmpeg_edit.setToolTip(self.tr.t("gui.placeholder.ffmpeg"))
         self.ffprobe_edit.setToolTip(self.tr.t("gui.placeholder.ffprobe"))
+        size_policy_tooltip = self.tr.t("gui.tooltip.size_blocked_policy")
+        self.size_blocked_policy_label.setToolTip(size_policy_tooltip)
+        self.size_blocked_policy_combo.setToolTip(size_policy_tooltip)
+        skipped_policy_tooltip = self.tr.t("gui.tooltip.skipped_output_policy")
+        self.skipped_output_policy_label.setToolTip(skipped_policy_tooltip)
+        self.skipped_output_policy_combo.setToolTip(skipped_policy_tooltip)
         self.analysis_profile_combo.setToolTip(self.tr.t("gui.tooltip.analysis_profile"))
 
     def values(self) -> dict[str, object]:
@@ -267,7 +279,7 @@ class SettingsDialog(QDialog):
             "ffmpeg_path": self.ffmpeg_edit.text().strip(),
             "ffprobe_path": self.ffprobe_edit.text().strip(),
             "log_level": self.log_level_combo.currentText(),
-            "keep_preview_temp": self.keep_preview_temp_check.isChecked(),
+            "encode_workers": self.encode_workers_spin.value(),
             "size_blocked_policy": self.size_blocked_policy_combo.currentData()
             or SizeBlockedPolicy.RELAX_SIZE.value,
             "quality_unreachable_policy": self.quality_unreachable_policy_combo.currentData()

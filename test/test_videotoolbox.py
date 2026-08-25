@@ -17,7 +17,6 @@ from cli.cli_entry import _build_parser, _merge_options
 from core.ffmpeg.commands import (
     build_encode_commands,
     build_input_acceleration_args,
-    build_preview_encode_commands,
     build_video_args,
 )
 from core.ffmpeg.capabilities import (
@@ -42,7 +41,6 @@ from core.models import (
     EncodeOptions,
     EncodePlanItem,
     EncoderInfo,
-    PreviewJob,
 )
 from core.encoding.planning import _validate_decode_acceleration
 from core.config.store import encode_options_to_preset_data, preset_data_to_encode_options
@@ -53,8 +51,6 @@ def _preset_data(**overrides) -> dict:
     data = {
         "codec": "hevc",
         "backend": "auto",
-        "parallel_enabled": False,
-        "parallel_backends": [],
         "ratio": None,
         "min_video_kbps": 250,
         "max_video_kbps": 0,
@@ -280,7 +276,7 @@ class VideoToolboxCommandTestCase(unittest.TestCase):
         self.assertNotIn("-x265-params", args)
         self.assertNotIn("-preset", args)
 
-    def test_decode_arguments_precede_input_and_preview_keeps_them(self) -> None:
+    def test_decode_arguments_precede_input(self) -> None:
         options = EncodeOptions(
             decode_acceleration=DecodeAcceleration.VIDEOTOOLBOX,
             overwrite=True,
@@ -290,20 +286,6 @@ class VideoToolboxCommandTestCase(unittest.TestCase):
         command = commands[0]
         self.assertEqual(command[command.index("-hwaccel") + 1], "videotoolbox")
         self.assertLess(command.index("-hwaccel"), command.index("-i"))
-
-        job = PreviewJob(
-            source_path=item.source_path,
-            source_sample_path=Path("sample.mp4"),
-            encoded_sample_path=Path("encoded.mp4"),
-            start_sec=0.0,
-            duration_sec=1.0,
-            plan_item=item,
-        )
-        preview_commands, _ = build_preview_encode_commands(Path("ffmpeg"), job, Path("workdir"))
-        preview_command = preview_commands[0]
-        self.assertIn("-hwaccel", preview_command)
-        self.assertLess(preview_command.index("-hwaccel"), preview_command.index("-i"))
-        self.assertNotIn("-hwaccel_output_format", preview_command)
 
     def test_software_decode_adds_no_hwaccel(self) -> None:
         item = _item(EncodeOptions(decode_acceleration=DecodeAcceleration.SOFTWARE))
@@ -367,7 +349,6 @@ class VideoToolboxCliAndGuiTestCase(unittest.TestCase):
             window._on_encoder_capability_detection_completed(capabilities)
             panel = window.options_panel
             self.assertIn("videotoolbox", [panel.backend_combo.itemText(i) for i in range(panel.backend_combo.count())])
-            self.assertFalse(panel.parallel_videotoolbox_check.isHidden())
             self.assertEqual(
                 [panel.decode_acceleration_combo.itemData(i) for i in range(panel.decode_acceleration_combo.count())],
                 ["software", "videotoolbox"],

@@ -32,8 +32,6 @@ from core.models import (
     ContainerChoice,
     DecodeAcceleration,
     EncodeOptions,
-    PreviewOptions,
-    PreviewSampleMode,
     VmafViewingContext,
 )
 from core.smart import analysis_profiles_from_config, parse_analysis_profile_name, resolve_max_output_ratio
@@ -49,7 +47,7 @@ EXPLICIT_BACKEND_ORDER: tuple[BackendChoice, ...] = (
 
 
 class EncodeOptionsPanel(QWidget):
-    """The Basic/Video/Audio-Subtitles/Preview/Advanced options region.
+    """The Basic/Video/Audio-Subtitles options region.
 
     Owns all option widgets and their internal wiring. MainWindow coordinates
     through the public read/apply/set methods and the semantic signals below; it
@@ -84,8 +82,6 @@ class EncodeOptionsPanel(QWidget):
         self._build_basic_tab()
         self._build_video_tab()
         self._build_audio_tab()
-        self._build_preview_tab()
-        self._build_advanced_tab()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -94,10 +90,8 @@ class EncodeOptionsPanel(QWidget):
         self._connect_signals()
 
     def _connect_signals(self) -> None:
-        self.sample_mode_combo.currentIndexChanged.connect(self.sync_dependent_controls)
         self.compression_mode_combo.currentIndexChanged.connect(self._on_compression_mode_changed)
         self.audio_mode_combo.currentIndexChanged.connect(self.sync_dependent_controls)
-        self.parallel_check.toggled.connect(self.sync_dependent_controls)
         self.codec_combo.currentIndexChanged.connect(self._on_codec_changed)
         self.backend_combo.currentIndexChanged.connect(self.refresh_encoder_preset_choices)
         self.decode_acceleration_combo.currentIndexChanged.connect(self.sync_dependent_controls)
@@ -286,76 +280,6 @@ class EncodeOptionsPanel(QWidget):
         self.options_tabs.addTab(page, "")
         self.audio_tab = page
 
-    def _build_preview_tab(self) -> None:
-        page = QWidget()
-        layout = QGridLayout(page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setHorizontalSpacing(10)
-        layout.setVerticalSpacing(10)
-
-        self.sample_mode_label = QLabel()
-        self.sample_mode_combo = QComboBox()
-        self.sample_mode_combo.addItems(["middle", "custom"])
-
-        self.sample_duration_label = QLabel()
-        self.sample_duration_spin = QDoubleSpinBox()
-        self.sample_duration_spin.setRange(1.0, 3600.0)
-        self.sample_duration_spin.setDecimals(1)
-        self.sample_duration_spin.setValue(30.0)
-
-        self.sample_start_label = QLabel()
-        self.sample_start_spin = QDoubleSpinBox()
-        self.sample_start_spin.setRange(0.0, 86400.0)
-        self.sample_start_spin.setDecimals(1)
-        self.sample_start_spin.setValue(0.0)
-
-        layout.addWidget(self.sample_mode_label, 0, 0)
-        layout.addWidget(self.sample_mode_combo, 0, 1)
-        layout.addWidget(self.sample_duration_label, 0, 2)
-        layout.addWidget(self.sample_duration_spin, 0, 3)
-        layout.addWidget(self.sample_start_label, 1, 0)
-        layout.addWidget(self.sample_start_spin, 1, 1)
-        layout.setColumnStretch(1, 1)
-        layout.setColumnStretch(3, 1)
-
-        self.options_tabs.addTab(page, "")
-        self.preview_tab = page
-
-    def _build_advanced_tab(self) -> None:
-        page = QWidget()
-        layout = QGridLayout(page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setHorizontalSpacing(10)
-        layout.setVerticalSpacing(10)
-
-        self.advanced_info = QLabel()
-        self.advanced_info.setWordWrap(True)
-        self.parallel_check = QCheckBox()
-        self.parallel_backends_label = QLabel()
-        self.parallel_nvenc_check = QCheckBox("NVENC")
-        self.parallel_qsv_check = QCheckBox("QSV")
-        self.parallel_amf_check = QCheckBox("AMF")
-        self.parallel_videotoolbox_check = QCheckBox("VideoToolbox")
-        self.parallel_cpu_check = QCheckBox("CPU")
-
-        layout.addWidget(self.advanced_info, 0, 0, 1, 6)
-        layout.addWidget(self.parallel_check, 1, 0, 1, 6)
-        layout.addWidget(self.parallel_backends_label, 2, 0)
-        layout.addWidget(self.parallel_nvenc_check, 2, 1)
-        layout.addWidget(self.parallel_qsv_check, 2, 2)
-        layout.addWidget(self.parallel_amf_check, 2, 3)
-        layout.addWidget(self.parallel_videotoolbox_check, 2, 4)
-        layout.addWidget(self.parallel_cpu_check, 2, 5)
-        layout.setColumnStretch(1, 1)
-        layout.setColumnStretch(2, 1)
-        layout.setColumnStretch(3, 1)
-        layout.setColumnStretch(4, 1)
-        layout.setColumnStretch(5, 1)
-        layout.setRowStretch(3, 1)
-
-        self.options_tabs.addTab(page, "")
-        self.advanced_tab = page
-
     def _fill_analysis_profile_combo(self) -> None:
         self.analysis_profile_combo.clear()
         for name in AnalysisProfileName:
@@ -393,8 +317,6 @@ class EncodeOptionsPanel(QWidget):
                 or self.compression_mode_combo.currentText()
             ),
             backend=BackendChoice(self.backend_combo.currentText()),
-            parallel_enabled=self.parallel_check.isChecked(),
-            parallel_backends=tuple(self._selected_parallel_backends()),
             ratio=float(ratio_text) if ratio_text else None,
             min_vmaf=float(self.min_vmaf_spin.value()),
             viewing_context=VmafViewingContext(self.viewing_context_combo.currentData()),
@@ -424,17 +346,6 @@ class EncodeOptionsPanel(QWidget):
             analysis_settings=profile_settings,
         )
 
-    def read_preview_options(self) -> PreviewOptions:
-        return PreviewOptions(
-            sample_mode=PreviewSampleMode(self.sample_mode_combo.currentText()),
-            sample_duration_sec=float(self.sample_duration_spin.value()),
-            custom_start_sec=(
-                float(self.sample_start_spin.value())
-                if self.sample_mode_combo.currentText() == PreviewSampleMode.CUSTOM.value
-                else None
-            ),
-        )
-
     def apply_options(self, options: EncodeOptions) -> None:
         self.codec_combo.setCurrentText(options.codec.value)
         mode_index = self.compression_mode_combo.findData(options.compression_mode.value)
@@ -445,10 +356,6 @@ class EncodeOptionsPanel(QWidget):
             preferred=options.decode_acceleration,
             log_reset=options.decode_acceleration != DecodeAcceleration.SOFTWARE,
         )
-        self.parallel_check.setChecked(options.parallel_enabled)
-        selected = set(options.parallel_backends)
-        for checkbox, backend in self._parallel_backend_widgets():
-            checkbox.setChecked(backend in selected and not checkbox.isHidden())
         self.ratio_edit.setText("" if options.ratio is None else str(options.ratio))
         self.min_vmaf_spin.setValue(options.min_vmaf)
         viewing_index = self.viewing_context_combo.findData(options.viewing_context.value)
@@ -563,9 +470,6 @@ class EncodeOptionsPanel(QWidget):
         self.viewing_context_combo.setToolTip(viewing_tooltip)
         self.overwrite_check.setText(self.tr.t("gui.checkbox.overwrite"))
         self.recursive_check.setText(self.tr.t("gui.checkbox.recursive"))
-        self.parallel_check.setText(self.tr.t("gui.checkbox.parallel_enabled"))
-        self.parallel_backends_label.setText(self.tr.t("gui.label.parallel_backends"))
-        self.parallel_videotoolbox_check.setText(self.tr.t("gui.value.backend_videotoolbox"))
         self.encoder_preset_label.setText(self.tr.t("gui.label.encoder_preset"))
         self.decode_acceleration_label.setText(self.tr.t("gui.label.decode_acceleration"))
         self.decode_acceleration_combo.setItemText(
@@ -586,10 +490,6 @@ class EncodeOptionsPanel(QWidget):
         self.audio_bitrate_label.setText(self.tr.t("gui.label.audio_bitrate"))
         self.copy_subtitles_check.setText(self.tr.t("gui.checkbox.copy_subtitles"))
         self.copy_external_subtitles_check.setText(self.tr.t("gui.checkbox.copy_external_subtitles"))
-        self.sample_mode_label.setText(self.tr.t("gui.label.sample_mode"))
-        self.sample_duration_label.setText(self.tr.t("gui.label.sample_duration"))
-        self.sample_start_label.setText(self.tr.t("gui.label.sample_start"))
-        self.advanced_info.setText(self.tr.t("gui.advanced.parallel_description"))
         self.ratio_edit.setPlaceholderText(self.tr.t("gui.placeholder.auto_ratio"))
         self.pix_fmt_edit.setPlaceholderText("yuv420p")
         self.audio_bitrate_edit.setPlaceholderText("128k")
@@ -597,8 +497,6 @@ class EncodeOptionsPanel(QWidget):
         self.options_tabs.setTabText(self.options_tabs.indexOf(self.basic_tab), self.tr.t("gui.tab.basic"))
         self.options_tabs.setTabText(self.options_tabs.indexOf(self.video_tab), self.tr.t("gui.tab.video"))
         self.options_tabs.setTabText(self.options_tabs.indexOf(self.audio_tab), self.tr.t("gui.tab.audio_subtitles"))
-        self.options_tabs.setTabText(self.options_tabs.indexOf(self.preview_tab), self.tr.t("gui.tab.preview"))
-        self.options_tabs.setTabText(self.options_tabs.indexOf(self.advanced_tab), self.tr.t("gui.tab.advanced"))
 
         self._rebuild_backend_controls()
         self.refresh_encoder_preset_choices()
@@ -616,15 +514,6 @@ class EncodeOptionsPanel(QWidget):
         self._rebuild_backend_controls()
         self.refresh_encoder_preset_choices()
         self.codec_changed.emit(current_codec)
-
-    def _parallel_backend_widgets(self) -> list[tuple[QCheckBox, BackendChoice]]:
-        return [
-            (self.parallel_nvenc_check, BackendChoice.NVENC),
-            (self.parallel_qsv_check, BackendChoice.QSV),
-            (self.parallel_amf_check, BackendChoice.AMF),
-            (self.parallel_videotoolbox_check, BackendChoice.VIDEOTOOLBOX),
-            (self.parallel_cpu_check, BackendChoice.CPU),
-        ]
 
     def _current_codec(self) -> CodecChoice:
         return CodecChoice(self.codec_combo.currentText())
@@ -743,13 +632,6 @@ class EncodeOptionsPanel(QWidget):
         tooltip_key = "gui.tooltip.backend_filtered" if self._runtime_capabilities() is not None else "gui.tooltip.backend_detecting"
         self.backend_combo.setToolTip(self.tr.t(tooltip_key))
 
-        available_parallel = set(choices) - {BackendChoice.AUTO}
-        for checkbox, backend in self._parallel_backend_widgets():
-            visible = backend in available_parallel
-            checkbox.setVisible(visible)
-            if not visible:
-                checkbox.setChecked(False)
-            checkbox.setToolTip("" if visible else self.tr.t("gui.tooltip.parallel_backend_unavailable"))
         self.sync_dependent_controls()
 
     def sync_dependent_controls(self) -> None:
@@ -762,18 +644,7 @@ class EncodeOptionsPanel(QWidget):
         self.viewing_context_label.setVisible(smart_mode)
         self.viewing_context_combo.setVisible(smart_mode)
         self.viewing_context_combo.setEnabled(smart_mode)
-        self.sample_mode_combo.setEnabled(not smart_mode)
-        self.sample_duration_spin.setEnabled(not smart_mode)
-        custom_sample = (
-            not smart_mode
-            and self.sample_mode_combo.currentText() == PreviewSampleMode.CUSTOM.value
-        )
-        self.sample_start_spin.setEnabled(custom_sample)
         self.audio_bitrate_edit.setEnabled(self.audio_mode_combo.currentText() == AudioMode.AAC.value)
-        parallel_enabled = self.parallel_check.isChecked()
-        self.backend_combo.setEnabled(not parallel_enabled)
-        for widget, _backend in self._parallel_backend_widgets():
-            widget.setEnabled(parallel_enabled and not widget.isHidden())
 
     def _refresh_smart_mode_availability(self, *, force_unavailable: bool = False) -> None:
         capabilities = self._runtime_capabilities()
@@ -869,22 +740,3 @@ class EncodeOptionsPanel(QWidget):
         tooltip_key = "gui.tooltip.encoder_preset_unavailable" if not choices else ""
         self.encoder_preset_combo.setToolTip(self.tr.t(tooltip_key) if tooltip_key else "")
         self._select_encoder_preset(desired_preset, log_invalid=log_invalid)
-
-    def _selected_parallel_backends(self) -> list[BackendChoice]:
-        selected: list[BackendChoice] = []
-        for checkbox, backend in self._parallel_backend_widgets():
-            if not checkbox.isHidden() and checkbox.isChecked():
-                selected.append(backend)
-        return selected
-
-    def validate_parallel_options(self, options: EncodeOptions, *, allow_parallel: bool = True) -> None:
-        if not options.parallel_enabled:
-            return
-        if not allow_parallel:
-            raise ValueError(self.tr.t("gui.message.parallel_preview_not_supported"))
-        if not options.parallel_backends:
-            raise ValueError(self.tr.t("gui.message.parallel_requires_backends"))
-        if options.two_pass:
-            raise ValueError(self.tr.t("gui.message.parallel_two_pass_not_supported"))
-        if options.encoder_preset:
-            raise ValueError(self.tr.t("gui.message.parallel_preset_not_supported"))

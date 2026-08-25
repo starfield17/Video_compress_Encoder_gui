@@ -15,7 +15,7 @@ from core.smart import (
     prepare_size_miss_retry,
     reselect_after_quality_decision,
 )
-from core.models import DecisionActionCode, DecisionOption, QualitySearchStatus
+from core.models import DecisionActionCode, DecisionOption, QualitySearchStatus, SkipOrigin
 from gui.queue_state import QueueItemRecord, QueueItemStatus, reset_for_retry, short_error
 
 
@@ -44,6 +44,7 @@ def apply_quality_decision(record: QueueItemRecord, decision: DecisionOption) ->
         if record.result is not None:
             record.result.needs_decision = False
             record.result.skipped = True
+            record.result.skip_origin = SkipOrigin.SMART_ANALYSIS_DECISION
         record.status = QueueItemStatus.SKIPPED
         record.error_summary = quality.reason
         return True

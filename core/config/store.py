@@ -53,8 +53,6 @@ def encode_options_to_preset_data(options: EncodeOptions) -> dict[str, Any]:
         "compression_mode": options.compression_mode.value,
         "backend": options.backend.value,
         "decode_acceleration": options.decode_acceleration.value,
-        "parallel_enabled": options.parallel_enabled,
-        "parallel_backends": [backend.value for backend in options.parallel_backends],
         "ratio": options.ratio,
         "min_vmaf": options.min_vmaf,
         "viewing_context": options.viewing_context.value,
@@ -79,10 +77,6 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
     data = dict(data)
     if "copy_external_subtitles" not in data:
         data["copy_external_subtitles"] = False
-    if "parallel_enabled" not in data:
-        data["parallel_enabled"] = False
-    if "parallel_backends" not in data:
-        data["parallel_backends"] = []
     if "decode_acceleration" not in data:
         data["decode_acceleration"] = DecodeAcceleration.SOFTWARE.value
     if "compression_mode" not in data:
@@ -126,8 +120,6 @@ def validate_preset_schema(data: dict[str, Any]) -> dict[str, Any]:
     BackendChoice(data["backend"])
     DecodeAcceleration(data["decode_acceleration"])
     VmafViewingContext(data["viewing_context"])
-    for backend in data["parallel_backends"]:
-        BackendChoice(backend)
     ContainerChoice(data["container"])
     AudioMode(data["audio_mode"])
     if data["ratio"] is not None and float(data["ratio"]) <= 0:
@@ -148,8 +140,6 @@ def preset_data_to_encode_options(data: dict[str, Any]) -> EncodeOptions:
         compression_mode=CompressionMode(data["compression_mode"]),
         backend=BackendChoice(data["backend"]),
         decode_acceleration=DecodeAcceleration(data["decode_acceleration"]),
-        parallel_enabled=bool(data.get("parallel_enabled", False)),
-        parallel_backends=tuple(BackendChoice(item) for item in data.get("parallel_backends", [])),
         ratio=None if data["ratio"] is None else float(data["ratio"]),
         min_vmaf=float(data["min_vmaf"]),
         viewing_context=VmafViewingContext(data["viewing_context"]),
@@ -199,7 +189,7 @@ def delete_preset(name: str, config_dir: Path) -> None:
 def _default_app_config() -> dict[str, Any]:
     return {
         "default_preset_name": "default_hevc",
-        "keep_preview_temp": True,
+        "encode_workers": 1,
         "recent_paths": [],
         "log_level": "info",
         "language": "en",
@@ -209,6 +199,16 @@ def _default_app_config() -> dict[str, Any]:
         "analysis_profile": AnalysisProfileName.BALANCE.value,
         "analysis_profiles": {},
     }
+
+
+def parse_encode_workers(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return 1
+    try:
+        workers = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return workers if 1 <= workers <= 8 else 1
 
 
 def parse_size_blocked_policy(value: object) -> SizeBlockedPolicy:

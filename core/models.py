@@ -33,6 +33,13 @@ class SkippedOutputPolicy(str, Enum):
     IGNORE = "ignore"
 
 
+class SkipOrigin(str, Enum):
+    PLANNING = "planning"
+    SMART_ANALYSIS = "smart_analysis"
+    SMART_ANALYSIS_DECISION = "smart_analysis_decision"
+    SIZE_MISS_DISCARD = "size_miss_discard"
+
+
 class AnalysisProfileName(str, Enum):
     FAST = "fast"
     BALANCE = "balance"
@@ -92,11 +99,6 @@ class ContainerChoice(str, Enum):
     MP4 = "mp4"
 
 
-class PreviewSampleMode(str, Enum):
-    MIDDLE = "middle"
-    CUSTOM = "custom"
-
-
 class VmafBackend(str, Enum):
     CPU = "cpu"
     CUDA = "cuda"
@@ -108,7 +110,7 @@ class VmafViewingContext(str, Enum):
 
 
 class OperationCancelledError(RuntimeError):
-    """Raised when a running planning/preview/encode task is cancelled."""
+    """Raised when a running planning or encode task is cancelled."""
 
 
 @dataclass(slots=True)
@@ -141,9 +143,6 @@ class EncodeOptions:
     compression_mode: CompressionMode = CompressionMode.SMART
     backend: BackendChoice = BackendChoice.AUTO
     decode_acceleration: DecodeAcceleration = DecodeAcceleration.SOFTWARE
-    parallel_enabled: bool = False
-    # Explicit backends used when parallel mode fans work out across encoders.
-    parallel_backends: tuple[BackendChoice, ...] = ()
     # None means choose the default compression ratio for the selected codec.
     ratio: Optional[float] = None
     min_vmaf: float = 90.0
@@ -218,44 +217,16 @@ class EncodeResult:
     log_path: Optional[Path] = None
     error_message: Optional[str] = None
     skipped: bool = False
+    skip_origin: Optional[SkipOrigin] = None
     needs_decision: bool = False
+    effective_min_vmaf: Optional[float] = None
+    effective_max_output_ratio: Optional[float] = None
     rejected_output_path: Optional[Path] = None
     actual_output_bytes: Optional[int] = None
     allowed_output_bytes: Optional[int] = None
     copied_external_subtitle_paths: list[Path] = field(default_factory=list)
     external_subtitle_warnings: list[str] = field(default_factory=list)
     quality_search_result: Optional["QualitySearchResult"] = None
-
-
-@dataclass(slots=True)
-class PreviewOptions:
-    sample_mode: PreviewSampleMode = PreviewSampleMode.MIDDLE
-    sample_duration_sec: float = 30.0
-    custom_start_sec: Optional[float] = None
-
-
-@dataclass(slots=True)
-class PreviewJob:
-    source_path: Path
-    source_sample_path: Path
-    encoded_sample_path: Path
-    start_sec: float
-    duration_sec: float
-    plan_item: EncodePlanItem
-    notes: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class PreviewResult:
-    job: PreviewJob
-    success: bool
-    source_sample_size: int = 0
-    encoded_sample_size: int = 0
-    sample_compression_ratio: float = 0.0
-    estimated_full_output_size: int = 0
-    notes: list[str] = field(default_factory=list)
-    log_path: Optional[Path] = None
-    error_message: Optional[str] = None
 
 
 class QualitySearchStatus(str, Enum):
@@ -387,12 +358,3 @@ class AnalysisReceipt:
     viewing_context: str = VmafViewingContext.HIGH_FIDELITY.value
     selected_vmaf_model: str = ""
     independent_final_holdout: bool = False
-
-
-@dataclass(slots=True)
-class SmartPreviewResult:
-    source_path: Path
-    success: bool
-    quality_search_result: QualitySearchResult
-    log_path: Optional[Path] = None
-    error_message: Optional[str] = None

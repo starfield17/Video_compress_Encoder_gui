@@ -473,6 +473,10 @@ def mark_finished(record: QueueItemRecord, result: EncodeResult) -> None:
         record.plan_item.quality_search_result = result.quality_search_result
         if result.quality_search_result.selected_video_bitrate_bps > 0:
             record.plan_item.target_video_bitrate_bps = result.quality_search_result.selected_video_bitrate_bps
+    if result.effective_min_vmaf is not None:
+        record.plan_item.options.min_vmaf = result.effective_min_vmaf
+    if result.effective_max_output_ratio is not None:
+        record.plan_item.options.max_output_ratio = result.effective_max_output_ratio
     if result.needs_decision:
         record.status = QueueItemStatus.NEEDS_DECISION
         record.file_progress = 100.0

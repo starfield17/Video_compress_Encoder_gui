@@ -7,17 +7,15 @@ from typing import Iterable
 
 from PySide6.QtCore import QThread, Signal
 
-from core.encoding import build_encode_plan, execute_plan, execute_preview, execute_smart_preview
+from core.encoding import build_encode_plan, execute_plan
 from core.ffmpeg import ensure_encoder_capabilities, find_binary
 from core.models import (
-    CompressionMode,
     EncodeOptions,
     OperationCancelledError,
-    PreviewOptions,
     VideoFileItem,
     VmafBackend,
 )
-from core.media import build_preview_job, collect_video_files
+from core.media import collect_video_files
 from core.progress_events import ProgressEvent
 from core.smart import VMAF_PRODUCTION_MODELS, probe_vmaf_runtime
 
@@ -161,99 +159,6 @@ class PlanWorker(QThread):
                 cancel_check=self._cancel_event.is_set,
             )
             self.completed.emit(plan)
-        except OperationCancelledError as exc:
-            self.cancelled.emit(str(exc))
-        except Exception as exc:
-            self.failed.emit(str(exc))
-
-
-class PreviewWorker(QThread):
-    completed = Signal(object)
-    failed = Signal(str)
-    cancelled = Signal(str)
-    log = Signal(str)
-    progress = Signal(object)
-
-    def __init__(
-        self,
-        input_path: Path,
-        options: EncodeOptions,
-        preview_options: PreviewOptions,
-        output_dir: Path | None,
-        workdir: Path,
-        ffmpeg_path: str | None,
-        ffprobe_path: str | None,
-        config_dir: Path | None = None,
-    ) -> None:
-        super().__init__()
-        self.input_path = input_path
-        self.options = options
-        self.preview_options = preview_options
-        self.output_dir = output_dir
-        self.workdir = workdir
-        self.ffmpeg_path = ffmpeg_path
-        self.ffprobe_path = ffprobe_path
-        self.config_dir = config_dir
-        self._cancel_event = threading.Event()
-        self._current_process = None
-
-    def _emit_log(self, message: str) -> None:
-        self.log.emit(message)
-        _safe_console_print(message)
-
-    def _emit_progress(self, event: ProgressEvent) -> None:
-        self.progress.emit(event)
-
-    def _set_current_process(self, proc) -> None:
-        self._current_process = proc
-
-    def cancel(self) -> None:
-        self._cancel_event.set()
-        if self._current_process is not None:
-            try:
-                self._current_process.terminate()
-            except Exception:
-                pass
-
-    def run(self) -> None:
-        try:
-            plan = build_encode_plan(
-                input_path=self.input_path,
-                options=self.options,
-                output_dir=self.output_dir,
-                workdir=self.workdir,
-                ffmpeg_path=self.ffmpeg_path,
-                ffprobe_path=self.ffprobe_path,
-                config_dir=self.config_dir,
-                progress_callback=self._emit_log,
-                progress_event_callback=self._emit_progress,
-                cancel_check=self._cancel_event.is_set,
-            )
-            item = next((item for item in plan.items if not item.skip_reason), None)
-            if item is None:
-                raise RuntimeError("No valid plan item is available for preview.")
-            if self.options.compression_mode == CompressionMode.SMART:
-                result = execute_smart_preview(
-                    item,
-                    plan.ffmpeg_path,
-                    self.workdir,
-                    log_callback=self._emit_log,
-                    progress_callback=self._emit_progress,
-                    cancel_check=self._cancel_event.is_set,
-                    process_callback=self._set_current_process,
-                )
-            else:
-                job = build_preview_job(item, self.workdir, self.preview_options)
-                result = execute_preview(
-                    job,
-                    plan.ffmpeg_path,
-                    self.workdir,
-                    log_callback=self._emit_log,
-                    progress_callback=self._emit_progress,
-                    cancel_check=self._cancel_event.is_set,
-                    process_callback=self._set_current_process,
-                )
-            self.completed.emit(result)
         except OperationCancelledError as exc:
             self.cancelled.emit(str(exc))
         except Exception as exc:

@@ -28,8 +28,8 @@ def analysis_concurrency_limit(*, cpu_count: int | None = None) -> int:
 
 
 # One module owns the process-wide resource and its release discipline.  It is
-# deliberately independent from Smart workflow code so previews and encodes
-# cannot accidentally use different semaphores.
+# deliberately independent from Smart workflow code so all analysis paths use
+# the same semaphore.
 SMART_ANALYSIS_SEMAPHORE = threading.Semaphore(analysis_concurrency_limit())
 
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.media.subtitles import copy_external_subtitles
-from core.models import EncodePlanItem, EncodeResult, SkippedOutputPolicy
+from core.models import EncodePlanItem, EncodeResult, SkipOrigin, SkippedOutputPolicy
 from core.media.paths import ensure_dir
 
 
@@ -18,7 +18,18 @@ class SkippedPublishResult:
 
 
 def is_eligible_skipped_item(item: EncodePlanItem, result: EncodeResult) -> bool:
+    """Return whether Smart analysis intentionally skipped this source.
+
+    Planning failures and discarded full-encode size misses are deliberately
+    outside the skipped-output policy.
+    """
+
     if not result.skipped or result.needs_decision:
+        return False
+    if result.skip_origin not in {
+        SkipOrigin.SMART_ANALYSIS,
+        SkipOrigin.SMART_ANALYSIS_DECISION,
+    }:
         return False
     if item.skip_reason:
         return False
@@ -35,7 +46,7 @@ def publish_skipped_source(item: EncodePlanItem) -> SkippedPublishResult:
         return SkippedPublishResult(source, destination, False, "source is missing")
     try:
         if destination.exists() and not item.options.overwrite:
-            return SkippedPublishResult(destination, destination, False, "output exists")
+            return SkippedPublishResult(source, destination, False, "output exists")
         if source.resolve() == destination.resolve():
             return SkippedPublishResult(source, destination, False, "source and output are the same file")
         ensure_dir(destination.parent)

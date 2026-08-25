@@ -24,7 +24,9 @@ from core.models import (
     AnalysisProfileName,
     AnalysisProfileSettings,
     EncodeOptions,
+    QualityUnreachablePolicy,
     SizeBlockedPolicy,
+    SkippedOutputPolicy,
 )
 from core.config.store import _default_app_config
 from gui.gui_mainwindow import MainWindow
@@ -210,6 +212,16 @@ class AnalysisProfileGuiTestCase(unittest.TestCase):
                 window.app_config["analysis_profile"],
                 AnalysisProfileName.PRECISE.value,
             )
+            untouched_options = window.options_panel.read_options()
+            self.assertEqual(untouched_options.size_blocked_policy, SizeBlockedPolicy.RELAX_SIZE)
+            self.assertEqual(
+                untouched_options.quality_unreachable_policy,
+                QualityUnreachablePolicy.SKIP,
+            )
+            self.assertEqual(
+                untouched_options.skipped_output_policy,
+                SkippedOutputPolicy.COPY,
+            )
             update_config.assert_not_called()
         finally:
             window.close()
@@ -230,6 +242,19 @@ class AnalysisProfileGuiTestCase(unittest.TestCase):
             values = dialog.values()
             self.assertEqual(values["analysis_profile"], "precise")
             self.assertEqual(values["analysis_profiles"], {})
+        finally:
+            dialog.close()
+
+    def test_settings_dialog_distinguishes_analysis_policies_from_terminal_validation(self) -> None:
+        tr = get_translator("en", self.repo_root / "config")
+        dialog = SettingsDialog(tr, {"language": "en"})
+        try:
+            self.assertEqual(
+                dialog.skipped_output_policy_label.text(),
+                "When Smart analysis skips a file",
+            )
+            self.assertIn("planning", dialog.skipped_output_policy_combo.toolTip())
+            self.assertIn("before the full encode", dialog.size_blocked_policy_combo.toolTip())
         finally:
             dialog.close()
 

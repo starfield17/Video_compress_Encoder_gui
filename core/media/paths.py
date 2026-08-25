@@ -56,19 +56,6 @@ def _source_token(source_path: Path) -> str:
     return f"{_safe_name(source_path.stem)}_{digest}"
 
 
-def preview_paths(
-    workdir: Path,
-    source_path: Path,
-    codec: CodecChoice,
-    container: ContainerChoice,
-) -> tuple[Path, Path]:
-    token = _source_token(source_path)
-    preview_root = ensure_dir(workdir / "preview" / token)
-    source_sample_path = preview_root / f"{source_path.stem}_source_sample{source_path.suffix}"
-    encoded_sample_path = preview_root / f"{source_path.stem}_{codec.value}_preview.{container.value}"
-    return source_sample_path, encoded_sample_path
-
-
 def log_file_path(workdir: Path, source_path: Path, stage: str) -> Path:
     log_root = ensure_dir(workdir / "logs")
     return log_root / f"{_source_token(source_path)}_{stage}.log"

@@ -12,6 +12,7 @@ from core.models import (
     EncodeResult,
     EncoderInfo,
     QualityUnreachablePolicy,
+    SkipOrigin,
     SkippedOutputPolicy,
 )
 from core.media.skipped import (
@@ -54,6 +55,7 @@ class SkippedOutputPublishTestCase(unittest.TestCase):
                 output_path=item.output_path,
                 success=False,
                 skipped=True,
+                skip_origin=SkipOrigin.SMART_ANALYSIS,
             )
             self.assertTrue(is_eligible_skipped_item(item, result))
             published = publish_skipped_source(item)
@@ -68,6 +70,7 @@ class SkippedOutputPublishTestCase(unittest.TestCase):
                 output_path=item.output_path,
                 success=False,
                 skipped=True,
+                skip_origin=SkipOrigin.PLANNING,
                 error_message="probe failed",
             )
             self.assertFalse(is_eligible_skipped_item(item, result))
@@ -83,6 +86,8 @@ class SkippedOutputPublishTestCase(unittest.TestCase):
             published = publish_skipped_source(item)
             self.assertFalse(published.copied)
             self.assertEqual(published.reason, "output exists")
+            self.assertEqual(published.source_path, item.source_path)
+            self.assertEqual(published.output_path, item.output_path)
             self.assertEqual(item.output_path.read_bytes(), b"existing")
 
     def test_ignore_policy_does_not_change_eligibility(self) -> None:
@@ -93,6 +98,7 @@ class SkippedOutputPublishTestCase(unittest.TestCase):
                 output_path=item.output_path,
                 success=False,
                 skipped=True,
+                skip_origin=SkipOrigin.SMART_ANALYSIS,
             )
             self.assertTrue(is_eligible_skipped_item(item, result))
 
@@ -111,6 +117,7 @@ class SkippedOutputPublishTestCase(unittest.TestCase):
                 output_path=copy_item.output_path,
                 success=False,
                 skipped=True,
+                skip_origin=SkipOrigin.SMART_ANALYSIS,
             )
             grouped = group_skipped_output_pairs(
                 [
@@ -124,6 +131,38 @@ class SkippedOutputPublishTestCase(unittest.TestCase):
             self.assertEqual(len(grouped[SkippedOutputPolicy.COPY]), 1)
             self.assertEqual(len(grouped[SkippedOutputPolicy.ASK]), 1)
             self.assertEqual(len(grouped[SkippedOutputPolicy.IGNORE]), 1)
+
+    def test_only_smart_analysis_skip_origins_are_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            item = _item(Path(temp_dir))
+            for origin in (
+                SkipOrigin.SMART_ANALYSIS,
+                SkipOrigin.SMART_ANALYSIS_DECISION,
+            ):
+                with self.subTest(origin=origin):
+                    result = EncodeResult(
+                        source_path=item.source_path,
+                        output_path=item.output_path,
+                        success=False,
+                        skipped=True,
+                        skip_origin=origin,
+                    )
+                    self.assertTrue(is_eligible_skipped_item(item, result))
+
+            for origin in (
+                None,
+                SkipOrigin.PLANNING,
+                SkipOrigin.SIZE_MISS_DISCARD,
+            ):
+                with self.subTest(origin=origin):
+                    result = EncodeResult(
+                        source_path=item.source_path,
+                        output_path=item.output_path,
+                        success=False,
+                        skipped=True,
+                        skip_origin=origin,
+                    )
+                    self.assertFalse(is_eligible_skipped_item(item, result))
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ from core.models import (
     QualitySearchResult,
     QualitySearchStatus,
     QualityUnreachablePolicy,
+    SkipOrigin,
     SizeBlockedPolicy,
     VmafBackend,
     VmafRuntimeSupport,
@@ -245,6 +246,7 @@ class ConstraintDecisionTestCase(unittest.TestCase):
             assert terminal is not None
             self.assertTrue(terminal.skipped)
             self.assertFalse(terminal.needs_decision)
+            self.assertEqual(terminal.skip_origin, SkipOrigin.SMART_ANALYSIS)
 
     def test_quality_unreachable_ask_needs_a_decision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -316,6 +318,30 @@ class ConstraintDecisionTestCase(unittest.TestCase):
             self.assertEqual(metrics.completed_items, 0)
             self.assertLess(metrics.queue_percent, 100.0)
 
+    def test_finished_smart_result_syncs_effective_constraints(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _item(root)
+            record = QueueItemRecord(
+                item_id="one",
+                plan_item=item,
+                job_snapshot=QueueJobSnapshot(root, root / "ffmpeg", root / "ffprobe", root),
+                status=QueueItemStatus.ANALYZING,
+                total_passes=1,
+            )
+            result = EncodeResult(
+                source_path=item.source_path,
+                output_path=item.output_path,
+                success=True,
+                effective_min_vmaf=91.5,
+                effective_max_output_ratio=0.42,
+            )
+
+            mark_finished(record, result)
+
+            self.assertEqual(record.plan_item.options.min_vmaf, 91.5)
+            self.assertEqual(record.plan_item.options.max_output_ratio, 0.42)
+
     def test_queue_manager_reconciles_idle_after_last_decision_skip(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -385,6 +411,38 @@ class ConstraintDecisionTestCase(unittest.TestCase):
             self.assertEqual(record.status, QueueItemStatus.WAITING_ANALYSIS)
             self.assertEqual(record.plan_item.quality_search_result.status, QualitySearchStatus.FOUND)
 
+    def test_queue_analysis_skip_decision_records_eligible_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _item(root)
+            quality = reselect_from_candidates(_candidates(), item)
+            item.quality_search_result = quality
+            record = QueueItemRecord(
+                item_id="one",
+                plan_item=item,
+                job_snapshot=QueueJobSnapshot(root, root / "ffmpeg", root / "ffprobe", root),
+                status=QueueItemStatus.NEEDS_DECISION,
+                total_passes=1,
+                result=EncodeResult(
+                    source_path=item.source_path,
+                    output_path=item.output_path,
+                    success=False,
+                    needs_decision=True,
+                    quality_search_result=quality,
+                ),
+            )
+            model = QueueTableModel(get_translator("en", Path(__file__).resolve().parent.parent / "config"))
+            model.add_records([record])
+            skip = next(
+                option
+                for option in model.decision_options_for_row(0)
+                if option.action_code == DecisionActionCode.SKIP
+            )
+
+            self.assertTrue(model.apply_quality_decision(0, skip))
+            assert record.result is not None
+            self.assertEqual(record.result.skip_origin, SkipOrigin.SMART_ANALYSIS_DECISION)
+
     def test_queue_can_accept_a_preserved_size_miss(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -418,6 +476,34 @@ class ConstraintDecisionTestCase(unittest.TestCase):
             self.assertFalse(rejected.exists())
             self.assertEqual(record.status, QueueItemStatus.DONE)
             self.assertEqual(item.output_path.with_suffix(".srt").read_text(encoding="utf-8"), "subtitle")
+
+    def test_queue_size_miss_discard_records_non_analysis_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item = _item(root)
+            rejected = root / "output.size-miss-abcd.mp4"
+            rejected.write_bytes(b"encoded")
+            result = EncodeResult(
+                source_path=item.source_path,
+                output_path=item.output_path,
+                success=False,
+                needs_decision=True,
+                rejected_output_path=rejected,
+            )
+            record = QueueItemRecord(
+                item_id="one",
+                plan_item=item,
+                job_snapshot=QueueJobSnapshot(root, root / "ffmpeg", root / "ffprobe", root),
+                status=QueueItemStatus.NEEDS_DECISION,
+                total_passes=1,
+                result=result,
+            )
+            model = QueueTableModel(get_translator("en", Path(__file__).resolve().parent.parent / "config"))
+            model.add_records([record])
+
+            self.assertTrue(model.discard_size_miss(0))
+            self.assertEqual(result.skip_origin, SkipOrigin.SIZE_MISS_DISCARD)
+            self.assertFalse(rejected.exists())
 
 
 class AnalysisReceiptTestCase(unittest.TestCase):

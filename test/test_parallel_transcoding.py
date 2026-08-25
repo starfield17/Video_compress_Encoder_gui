@@ -14,7 +14,16 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from cli.cli_entry import _build_parser, _merge_options, _parse_parallel_backends, run_cli
+from cli.cli_entry import _build_parser, run_cli
+from core.config.store import (
+    _default_app_config,
+    encode_options_to_preset_data,
+    parse_encode_workers,
+    preset_data_to_encode_options,
+)
+from core.encoding import execute_plan_concurrent
+from core.i18n import get_translator
+from core.media.validation import validate_workdir
 from core.models import (
     BackendChoice,
     CodecChoice,
@@ -26,11 +35,8 @@ from core.models import (
     EncoderInfo,
     MediaInfo,
 )
-from core.encoding import execute_plan_parallel
-from core.config.store import encode_options_to_preset_data, preset_data_to_encode_options
 from gui.gui_mainwindow import MainWindow
-from gui.queue_state import create_queue_records
-from gui.queue_model import QueueColumn, QueueTableModel
+from gui.settings_dialog import SettingsDialog
 
 
 def _media(path: Path) -> MediaInfo:
@@ -48,322 +54,307 @@ def _media(path: Path) -> MediaInfo:
     )
 
 
-def _encoder(backend: BackendChoice) -> EncoderInfo:
+def _encoder(codec: CodecChoice, backend: BackendChoice) -> EncoderInfo:
     names = {
-        BackendChoice.CPU: "libx265",
-        BackendChoice.NVENC: "hevc_nvenc",
-        BackendChoice.QSV: "hevc_qsv",
-        BackendChoice.AMF: "hevc_amf",
-    }
-    defaults = {
-        BackendChoice.CPU: "slow",
-        BackendChoice.NVENC: "p6",
-        BackendChoice.QSV: "slow",
-        BackendChoice.AMF: None,
+        (CodecChoice.HEVC, BackendChoice.CPU): "libx265",
+        (CodecChoice.HEVC, BackendChoice.NVENC): "hevc_nvenc",
+        (CodecChoice.AV1, BackendChoice.CPU): "libsvtav1",
+        (CodecChoice.AV1, BackendChoice.NVENC): "av1_nvenc",
     }
     return EncoderInfo(
-        codec=CodecChoice.HEVC,
+        codec=codec,
         backend=backend,
-        encoder_name=names[backend],
+        encoder_name=names[(codec, backend)],
         supports_two_pass=backend == BackendChoice.CPU,
-        default_preset=defaults[backend],
+        default_preset="slow" if backend == BackendChoice.CPU else "p6",
     )
 
 
-def _capabilities(entries: list[tuple[BackendChoice, str]]) -> dict:
-    return {
-        "codecs": {
-            "hevc": [{"backend": backend.value, "encoder": encoder_name} for backend, encoder_name in entries],
-            "av1": [],
-        }
-    }
-
-
-def _plan(tmp: Path, count: int = 4, options: EncodeOptions | None = None) -> EncodePlan:
-    current = options or EncodeOptions(compression_mode=CompressionMode.FIXED_BITRATE, overwrite=True)
+def _plan(root: Path, count: int = 4) -> EncodePlan:
     items: list[EncodePlanItem] = []
     for index in range(count):
-        source = tmp / f"video_{index}.mp4"
+        codec = CodecChoice.HEVC if index % 2 == 0 else CodecChoice.AV1
+        backend = BackendChoice.CPU if index % 3 == 0 else BackendChoice.NVENC
+        source = root / f"video_{index}.mp4"
+        options = EncodeOptions(
+            codec=codec,
+            backend=backend,
+            compression_mode=CompressionMode.FIXED_BITRATE,
+            overwrite=True,
+            two_pass=backend == BackendChoice.CPU,
+            encoder_preset="slow" if backend == BackendChoice.CPU else "p6",
+        )
         items.append(
             EncodePlanItem(
                 source_path=source,
-                output_path=tmp / f"video_{index}.mkv",
+                output_path=root / f"video_{index}.mkv",
                 media_info=_media(source),
-                encoder_info=_encoder(BackendChoice.NVENC),
-                options=current,
+                encoder_info=_encoder(codec, backend),
+                options=options,
                 target_video_bitrate_bps=2_000_000,
             )
         )
     return EncodePlan(
         items=items,
-        ffmpeg_path=tmp / "ffmpeg",
-        ffprobe_path=tmp / "ffprobe",
-        input_root=tmp,
-        output_root=tmp / "out",
+        ffmpeg_path=root / "ffmpeg",
+        ffprobe_path=root / "ffprobe",
+        input_root=root,
+        output_root=root / "out",
     )
 
 
-class ParallelPresetTestCase(unittest.TestCase):
-    def test_parallel_fields_round_trip(self) -> None:
-        options = EncodeOptions(
-            parallel_enabled=True,
-            parallel_backends=(BackendChoice.NVENC, BackendChoice.QSV),
-        )
+class ConcurrentConfigTestCase(unittest.TestCase):
+    def test_encode_workers_defaults_and_validation(self) -> None:
+        self.assertEqual(_default_app_config()["encode_workers"], 1)
+        self.assertEqual(parse_encode_workers(1), 1)
+        self.assertEqual(parse_encode_workers("8"), 8)
+        for invalid in (None, "no", 0, 9, -1, True):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(parse_encode_workers(invalid), 1)
+
+    def test_old_parallel_preset_fields_are_ignored_and_not_written(self) -> None:
+        options = EncodeOptions()
         data = encode_options_to_preset_data(options)
+        self.assertNotIn("parallel_enabled", data)
+        self.assertNotIn("parallel_backends", data)
+        data["parallel_enabled"] = True
+        data["parallel_backends"] = ["nvenc", "qsv"]
         restored = preset_data_to_encode_options(data)
-        self.assertTrue(restored.parallel_enabled)
-        self.assertEqual(restored.parallel_backends, (BackendChoice.NVENC, BackendChoice.QSV))
+        self.assertFalse(hasattr(restored, "parallel_enabled"))
+        self.assertFalse(hasattr(restored, "parallel_backends"))
 
-    def test_old_preset_defaults_parallel_fields(self) -> None:
-        data = {
-            "codec": "hevc",
-            "backend": "auto",
-            "ratio": None,
-            "min_video_kbps": 250,
-            "max_video_kbps": 0,
-            "container": "mp4",
-            "audio_mode": "copy",
-            "audio_bitrate": "128k",
-            "copy_subtitles": True,
-            "copy_external_subtitles": False,
-            "two_pass": False,
-            "preset": None,
-            "pix_fmt": "yuv420p",
-            "maxrate_factor": 1.08,
-            "bufsize_factor": 2.0,
-        }
-        restored = preset_data_to_encode_options(data)
-        self.assertFalse(restored.parallel_enabled)
-        self.assertEqual(restored.parallel_backends, ())
+    def test_cli_jobs_is_encode_only_and_bounded(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["encode", "input.mp4", "--jobs", "8"])
+        self.assertEqual(args.jobs, 8)
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["plan", "input.mp4", "--jobs", "2"])
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["encode", "input.mp4", "--jobs", "9"])
 
+    def test_removed_cli_parallel_flags_are_rejected(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            _build_parser().parse_args(["encode", "input.mp4", "--parallel"])
+        self.assertIn("unrecognized arguments", stderr.getvalue())
 
-class ParallelSchedulerTestCase(unittest.TestCase):
-    def test_parallel_scheduler_uses_multiple_backends_and_preserves_order(self) -> None:
+    def test_preview_command_is_removed(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            _build_parser().parse_args(["preview", "input.mp4"])
+
+    def test_workdir_does_not_create_or_delete_preview_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            temp_root = Path(temp_dir)
-            plan = _plan(temp_root)
-            consumed: list[tuple[str, str]] = []
+            root = Path(temp_dir)
+            validate_workdir(root)
+            self.assertFalse((root / "preview").exists())
+            preview = root / "preview"
+            preview.mkdir()
+            sample = preview / "user-sample.mp4"
+            sample.write_bytes(b"keep")
+            validate_workdir(root)
+            self.assertEqual(sample.read_bytes(), b"keep")
+
+
+class ConcurrentSchedulerTestCase(unittest.TestCase):
+    def test_workers_preserve_bound_encoders_limit_concurrency_and_result_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plan = _plan(root, count=6)
+            original_bindings = [item.encoder_info for item in plan.items]
+            active = 0
+            max_active = 0
+            observed: list[tuple[str, CodecChoice, BackendChoice, bool, str | None]] = []
             lock = threading.Lock()
 
             def fake_execute(_ffmpeg, item, _workdir, **_kwargs):
-                time.sleep(0.02 if item.options.backend == BackendChoice.NVENC else 0.01)
+                nonlocal active, max_active
+                assert item.encoder_info is not None
                 with lock:
-                    consumed.append((item.source_path.name, item.options.backend.value))
-                return EncodeResult(
-                    source_path=item.source_path,
-                    output_path=item.output_path,
-                    success=True,
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.02)
+                with lock:
+                    observed.append(
+                        (
+                            item.source_path.name,
+                            item.encoder_info.codec,
+                            item.encoder_info.backend,
+                            item.options.two_pass,
+                            item.options.encoder_preset,
+                        )
+                    )
+                    active -= 1
+                return EncodeResult(item.source_path, item.output_path, success=True)
+
+            with patch("core.encoding.parallel.execute_plan_item", side_effect=fake_execute):
+                results = execute_plan_concurrent(plan, root, max_workers=3)
+
+            self.assertEqual(max_active, 3)
+            self.assertEqual(
+                [result.source_path.name for result in results],
+                [item.source_path.name for item in plan.items],
+            )
+            self.assertEqual([item.encoder_info for item in plan.items], original_bindings)
+            expected = {
+                (
+                    item.source_path.name,
+                    item.encoder_info.codec,
+                    item.encoder_info.backend,
+                    item.options.two_pass,
+                    item.options.encoder_preset,
                 )
+                for item in plan.items
+                if item.encoder_info is not None
+            }
+            self.assertEqual(set(observed), expected)
 
-            with (
-                patch(
-                    "core.encoding.parallel.ensure_encoder_capabilities",
-                    return_value=_capabilities(
-                        [(BackendChoice.NVENC, "hevc_nvenc"), (BackendChoice.QSV, "hevc_qsv")]
-                    ),
-                ),
-                patch(
-                    "core.encoding.parallel.resolve_encoder",
-                    side_effect=lambda codec, backend, available, ffmpeg_path=None, runtime_capabilities=None: _encoder(backend),
-                ),
-                patch("core.encoding.parallel.execute_plan_item", side_effect=fake_execute),
-            ):
-                results = execute_plan_parallel(
-                    plan,
-                    temp_root,
-                    backends=(BackendChoice.NVENC, BackendChoice.QSV),
-                )
-
-            self.assertEqual(len(results), len(plan.items))
-            self.assertEqual([result.source_path.name for result in results], [item.source_path.name for item in plan.items])
-            self.assertEqual({backend for _, backend in consumed}, {"nvenc", "qsv"})
-
-    def test_parallel_scheduler_stops_on_worker_failure(self) -> None:
+    def test_failed_result_does_not_stop_other_items(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            temp_root = Path(temp_dir)
-            plan = _plan(temp_root, count=5)
-            finished: list[str] = []
+            root = Path(temp_dir)
+            plan = _plan(root, count=5)
 
             def fake_execute(_ffmpeg, item, _workdir, **_kwargs):
-                if item.source_path.name == "video_1.mp4" and item.options.backend == BackendChoice.QSV:
-                    raise RuntimeError("boom")
-                time.sleep(0.01)
+                failed = item.source_path.name == "video_1.mp4"
                 return EncodeResult(
-                    source_path=item.source_path,
-                    output_path=item.output_path,
-                    success=True,
+                    item.source_path,
+                    item.output_path,
+                    success=not failed,
+                    error_message="expected failure" if failed else None,
                 )
 
-            with (
-                patch(
-                    "core.encoding.parallel.ensure_encoder_capabilities",
-                    return_value=_capabilities(
-                        [(BackendChoice.NVENC, "hevc_nvenc"), (BackendChoice.QSV, "hevc_qsv")]
-                    ),
-                ),
-                patch(
-                    "core.encoding.parallel.resolve_encoder",
-                    side_effect=lambda codec, backend, available, ffmpeg_path=None, runtime_capabilities=None: _encoder(backend),
-                ),
-                patch("core.encoding.parallel.execute_plan_item", side_effect=fake_execute),
-            ):
-                with self.assertRaisesRegex(RuntimeError, "boom"):
-                    execute_plan_parallel(
-                        plan,
-                        temp_root,
-                        backends=(BackendChoice.NVENC, BackendChoice.QSV),
-                        item_result_callback=lambda index, result: finished.append(plan.items[index].source_path.name),
-                    )
+            with patch("core.encoding.parallel.execute_plan_item", side_effect=fake_execute):
+                results = execute_plan_concurrent(plan, root, max_workers=2)
 
-            self.assertLess(len(finished), len(plan.items))
+            self.assertEqual(len(results), 5)
+            self.assertEqual(sum(result.success for result in results), 4)
 
-
-class ParallelCliTestCase(unittest.TestCase):
-    def test_parse_parallel_backends(self) -> None:
-        self.assertEqual(
-            _parse_parallel_backends("nvenc, qsv, nvenc"),
-            (BackendChoice.NVENC, BackendChoice.QSV),
-        )
-        self.assertEqual(_parse_parallel_backends(""), ())
-
-    def test_merge_options_sets_parallel_fields(self) -> None:
-        parser = _build_parser()
-        args = parser.parse_args(["encode", "input.mp4", "--parallel", "--parallel-backends", "nvenc,qsv"])
-        options = _merge_options(EncodeOptions(), args)
-        self.assertTrue(options.parallel_enabled)
-        self.assertEqual(options.parallel_backends, (BackendChoice.NVENC, BackendChoice.QSV))
-
-    def test_parallel_requires_backends(self) -> None:
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            exit_code = run_cli(["encode", "input.mp4", "--parallel", "--lang", "en"])
-        self.assertEqual(exit_code, 2)
-        self.assertIn("requires at least one backend", stderr.getvalue())
-
-    def test_parallel_rejects_two_pass(self) -> None:
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            exit_code = run_cli(["encode", "input.mp4", "--parallel", "--parallel-backends", "nvenc,qsv", "--two-pass", "--lang", "en"])
-        self.assertEqual(exit_code, 2)
-        self.assertIn("does not support two-pass", stderr.getvalue())
-
-    def test_parallel_rejects_manual_preset(self) -> None:
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            exit_code = run_cli(
-                [
-                    "encode",
-                    "input.mp4",
-                    "--backend",
-                    "nvenc",
-                    "--parallel",
-                    "--parallel-backends",
-                    "nvenc,qsv",
-                    "--encoder-preset",
-                    "slow",
-                    "--lang",
-                    "en",
-                ]
-            )
-        self.assertEqual(exit_code, 2)
-        self.assertIn("does not support a manual encoder preset", stderr.getvalue())
-
-    def test_parallel_encode_dispatches_to_parallel_executor(self) -> None:
+    def test_unexpected_worker_exception_stops_scheduler(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            temp_root = Path(temp_dir)
-            plan = _plan(
-                temp_root,
-                count=1,
-                options=EncodeOptions(parallel_enabled=True, parallel_backends=(BackendChoice.NVENC, BackendChoice.QSV)),
-            )
-            result = EncodeResult(source_path=plan.items[0].source_path, output_path=plan.items[0].output_path, success=True)
+            root = Path(temp_dir)
+            plan = _plan(root, count=8)
+
+            def fake_execute(_ffmpeg, item, _workdir, **_kwargs):
+                if item.source_path.name == "video_1.mp4":
+                    raise RuntimeError("boom")
+                time.sleep(0.01)
+                return EncodeResult(item.source_path, item.output_path, success=True)
+
             with (
-                patch("cli.cli_entry.build_encode_plan", return_value=plan),
-                patch("cli.cli_entry.execute_plan_parallel", return_value=[result]) as parallel_mock,
-                patch("cli.cli_entry.print_plan"),
-                patch("cli.cli_entry.print_encode_results"),
+                patch("core.encoding.parallel.execute_plan_item", side_effect=fake_execute),
+                self.assertRaisesRegex(RuntimeError, "boom"),
             ):
-                exit_code = run_cli(["encode", "input.mp4", "--parallel", "--parallel-backends", "nvenc,qsv"])
-            self.assertEqual(exit_code, 0)
-            parallel_mock.assert_called_once()
+                execute_plan_concurrent(plan, root, max_workers=2)
+
+    def test_worker_count_and_bound_encoder_are_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plan = _plan(root, count=1)
+            for invalid in (0, 9, True):
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "1 to 8"):
+                    execute_plan_concurrent(plan, root, max_workers=invalid)
+            plan.items[0].encoder_info = None
+            with self.assertRaisesRegex(ValueError, "bound encoder"):
+                execute_plan_concurrent(plan, root, max_workers=1)
+
+    def test_pause_waits_for_active_encodes_and_claims_no_more(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plan = _plan(root, count=6)
+            pause = threading.Event()
+            both_active = threading.Barrier(2)
+            started: list[str] = []
+            lock = threading.Lock()
+
+            def fake_execute(_ffmpeg, item, _workdir, **_kwargs):
+                with lock:
+                    started.append(item.source_path.name)
+                    if len(started) == 2:
+                        pause.set()
+                both_active.wait(timeout=1)
+                time.sleep(0.01)
+                return EncodeResult(item.source_path, item.output_path, success=True)
+
+            with patch("core.encoding.parallel.execute_plan_item", side_effect=fake_execute):
+                results = execute_plan_concurrent(
+                    plan,
+                    root,
+                    max_workers=2,
+                    pause_check=pause.is_set,
+                )
+
+            self.assertEqual(len(started), 2)
+            self.assertEqual(len(results), 2)
 
 
-class ParallelGuiTestCase(unittest.TestCase):
+class ConcurrentCliAndGuiTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
         cls.repo_root = Path(__file__).resolve().parent.parent
 
-    def test_window_collects_parallel_options_and_syncs_controls(self) -> None:
-        window = MainWindow(self.repo_root, language="en")
-        try:
-            window._on_encoder_capability_detection_completed(
-                _capabilities([(BackendChoice.NVENC, "hevc_nvenc"), (BackendChoice.QSV, "hevc_qsv")])
-            )
-            panel = window.options_panel
-            panel.parallel_check.setChecked(True)
-            panel.parallel_nvenc_check.setChecked(True)
-            panel.parallel_qsv_check.setChecked(True)
-            panel.sync_dependent_controls()
-            options = panel.read_options()
-            self.assertTrue(options.parallel_enabled)
-            self.assertEqual(options.parallel_backends, (BackendChoice.NVENC, BackendChoice.QSV))
-            self.assertFalse(panel.backend_combo.isEnabled())
-            self.assertTrue(panel.parallel_nvenc_check.isEnabled())
-        finally:
-            window.close()
+    def test_cli_jobs_dispatches_to_concurrent_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plan = _plan(root, count=1)
+            result = EncodeResult(plan.items[0].source_path, plan.items[0].output_path, success=True)
+            with (
+                patch("cli.cli_entry.build_encode_plan", return_value=plan),
+                patch("cli.cli_entry.execute_plan_concurrent", return_value=[result]) as concurrent,
+                patch("cli.cli_entry.print_plan"),
+                patch("cli.cli_entry.print_encode_results"),
+            ):
+                exit_code = run_cli(["encode", "input.mp4", "--jobs", "3"])
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(concurrent.call_args.kwargs["max_workers"], 3)
 
-    def test_parallel_controls_live_in_advanced_tab(self) -> None:
-        window = MainWindow(self.repo_root, language="en")
-        try:
-            panel = window.options_panel
-            controls = (
-                panel.parallel_check,
-                panel.parallel_backends_label,
-                panel.parallel_nvenc_check,
-                panel.parallel_qsv_check,
-                panel.parallel_amf_check,
-                panel.parallel_videotoolbox_check,
-                panel.parallel_cpu_check,
-            )
-            self.assertTrue(all(panel.advanced_tab.isAncestorOf(widget) for widget in controls))
-            self.assertTrue(all(not panel.basic_tab.isAncestorOf(widget) for widget in controls))
-            self.assertIn("multiple encoders", panel.advanced_info.text())
-        finally:
-            window.close()
+    def test_cli_default_uses_one_serial_encode_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plan = _plan(root, count=1)
+            result = EncodeResult(plan.items[0].source_path, plan.items[0].output_path, success=True)
+            with (
+                patch("cli.cli_entry.build_encode_plan", return_value=plan),
+                patch("cli.cli_entry.execute_plan", return_value=[result]) as serial,
+                patch("cli.cli_entry.execute_plan_concurrent") as concurrent,
+                patch("cli.cli_entry.print_plan"),
+                patch("cli.cli_entry.print_encode_results"),
+            ):
+                exit_code = run_cli(["encode", "input.mp4"])
+            self.assertEqual(exit_code, 0)
+            serial.assert_called_once()
+            concurrent.assert_not_called()
 
-    def test_gui_parallel_validation_rejects_invalid_combinations(self) -> None:
-        window = MainWindow(self.repo_root, language="en")
+    def test_settings_owns_concurrency_and_encode_panel_has_no_parallel_controls(self) -> None:
+        dialog = SettingsDialog(
+            get_translator("en", self.repo_root / "config"),
+            {"language": "en", "encode_workers": 6},
+        )
         try:
-            with self.assertRaisesRegex(ValueError, "requires at least one backend"):
-                window.options_panel.validate_parallel_options(EncodeOptions(parallel_enabled=True))
-            with self.assertRaisesRegex(ValueError, "does not support two-pass"):
-                window.options_panel.validate_parallel_options(
-                    EncodeOptions(parallel_enabled=True, parallel_backends=(BackendChoice.NVENC,), two_pass=True)
-                )
-            with self.assertRaisesRegex(ValueError, "does not support a manual encoder preset"):
-                window.options_panel.validate_parallel_options(
-                    EncodeOptions(
-                        parallel_enabled=True,
-                        parallel_backends=(BackendChoice.NVENC,),
-                        encoder_preset="slow",
-                    )
-                )
+            self.assertEqual(dialog.encode_workers_spin.value(), 6)
+            self.assertEqual(dialog.values()["encode_workers"], 6)
         finally:
-            window.close()
+            dialog.close()
 
-    def test_queue_table_prefers_runtime_assigned_encoder(self) -> None:
-        window = MainWindow(self.repo_root, language="en")
-        model = QueueTableModel(window.tr)
+        default_dialog = SettingsDialog(
+            get_translator("en", self.repo_root / "config"),
+            {"language": "en"},
+        )
         try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_root = Path(temp_dir)
-                plan = _plan(temp_root, count=1)
-                records = create_queue_records(plan, temp_root)
-                model.add_records(records)
-                model.assign_backend(records[0].item_id, "qsv", "hevc_qsv")
-                index = model.index(0, int(QueueColumn.ENCODER))
-                self.assertEqual(model.data(index), "hevc_qsv (qsv)")
+            self.assertEqual(default_dialog.values()["encode_workers"], 1)
+        finally:
+            default_dialog.close()
+
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            self.assertFalse(hasattr(window, "preview_action"))
+            self.assertFalse(hasattr(window.options_panel, "parallel_check"))
+            self.assertFalse(hasattr(window.options_panel, "preview_tab"))
+            self.assertFalse(hasattr(window.options_panel, "advanced_tab"))
+            self.assertTrue(window.options_panel.backend_combo.isEnabled())
+            window.app_config.pop("encode_workers", None)
+            with patch.object(window.queue_manager, "start", return_value=True) as start:
+                window._start_queue()
+            start.assert_called_once_with(max_workers=1)
         finally:
             window.close()
 

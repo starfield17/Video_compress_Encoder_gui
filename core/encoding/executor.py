@@ -93,6 +93,11 @@ def execute_plan_item(
                 if terminal is not None:
                     return terminal
             result.quality_search_result = item.quality_search_result
+            result.effective_min_vmaf = float(item.options.min_vmaf)
+            result.effective_max_output_ratio = resolve_max_output_ratio(
+                item.options.codec,
+                item.options.max_output_ratio,
+            )
             item.output_path.parent.mkdir(parents=True, exist_ok=True)
             temporary_output = item.output_path.parent / (
                 f".{item.output_path.stem}.smart-{uuid.uuid4().hex}{item.output_path.suffix}"

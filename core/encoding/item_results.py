@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from core.media.subtitles import copy_external_subtitles
-from core.models import EncodePlanItem, EncodeResult, QualitySearchResult
+from core.models import EncodePlanItem, EncodeResult, QualitySearchResult, SkipOrigin
 from core.progress_events import ProgressCallback
 
 from .process import _emit, _emit_progress
@@ -84,6 +84,7 @@ def _skipped_encode_result(
         output_path=item.output_path,
         success=False,
         skipped=True,
+        skip_origin=SkipOrigin.PLANNING,
         error_message=item.skip_reason,
         log_path=log_path,
     )

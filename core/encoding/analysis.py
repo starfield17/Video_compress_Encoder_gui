@@ -21,9 +21,11 @@ from core.models import (
     QualitySearchResult,
     QualitySearchStatus,
     QualityUnreachablePolicy,
+    SkipOrigin,
 )
 from core.progress_events import ProgressCallback, ProgressEvent
 from core.smart.concurrency import analysis_concurrency_limit, analysis_slot
+from core.smart.bitrate import resolve_max_output_ratio
 from core.smart.decisions import (
     build_decision_options,
     constraint_policy_from_size_blocked,
@@ -62,6 +64,14 @@ def _apply_constraint_policy(
 
 def item_needs_smart_analysis(item: EncodePlanItem) -> bool:
     return item.skip_reason is None and item.options.compression_mode == CompressionMode.SMART
+
+
+def _record_effective_smart_options(result: EncodeResult, item: EncodePlanItem) -> None:
+    result.effective_min_vmaf = float(item.options.min_vmaf)
+    result.effective_max_output_ratio = resolve_max_output_ratio(
+        item.options.codec,
+        item.options.max_output_ratio,
+    )
 
 
 def analyze_plan_item(
@@ -154,6 +164,9 @@ def analyze_plan_item(
             quality_result.status == QualitySearchStatus.CONSTRAINT_UNSATISFIED and not unreachable_skip
         )
         result.skipped = unreachable_skip
+        if unreachable_skip:
+            result.skip_origin = SkipOrigin.SMART_ANALYSIS
+        _record_effective_smart_options(result, item)
         progress_state = "needs_decision" if result.needs_decision else ("skipped" if result.skipped else "failed")
         outcome = "requires a decision" if result.needs_decision else ("skipped" if result.skipped else "failed")
         _emit(

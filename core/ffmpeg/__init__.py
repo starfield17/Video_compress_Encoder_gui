@@ -10,7 +10,6 @@ from core.ffmpeg.capabilities import (
 from core.ffmpeg.commands import (
     build_encode_commands,
     build_input_acceleration_args,
-    build_preview_encode_commands,
     build_video_args,
 )
 from core.ffmpeg.discovery import discover_ffmpeg_tools, find_binary
@@ -40,7 +39,6 @@ __all__ = [
     "available_backends_for_codec",
     "build_encode_commands",
     "build_input_acceleration_args",
-    "build_preview_encode_commands",
     "build_video_args",
     "default_preset_for_encoder",
     "detect_encoder_capabilities",

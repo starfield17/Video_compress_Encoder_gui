@@ -17,14 +17,14 @@ other `gui` modules — never `cli`, and nothing above it in the dependency grap
 ## EncodeOptionsPanel
 
 `gui.encode_options_panel.EncodeOptionsPanel(QWidget)` owns the Basic / Video /
-Audio-Subtitles / Preview / Advanced tabs and all internal wiring: codec/backend
+Audio-Subtitles tabs and all internal wiring: codec/backend
 filtering from runtime capabilities, encoder-preset refresh, analysis-profile state,
 and Smart/Fixed control syncing.
 
 - `MainWindow` interacts only through the public contract:
-  `read_options()`, `read_preview_options()`, `apply_options()`,
+  `read_options()`, `apply_options()`,
   `apply_analysis_profile_settings()`, `current_analysis_profile_name()`,
-  `sync_dependent_controls()`, `validate_parallel_options()`,
+  `sync_dependent_controls()`,
   `set_runtime_capabilities()`, `notify_capability_detection_failed()`,
   `begin_capability_detection()`, `set_translator()`, `set_busy()`.
 - Semantic signals: `codec_changed`, `compression_mode_changed`,
@@ -46,13 +46,15 @@ and Smart/Fixed control syncing.
 - `gui.queue_view` — `ResponsiveQueueTableView`, header resize modes, reflow, and the
   `create_queue_view()` factory. May use `gui.queue_model`'s column definitions.
 - `gui.queue_manager` — Qt worker/thread orchestration over the model.
+- The global `encode_workers` application setting controls concurrent full-file
+  encodes. Queue workers preserve each plan item's encoder binding; concurrency
+  is not a preset option and does not select or rotate backends.
 - View may depend on the model; model and state must not depend on the view.
 
 ## MainWindow scope (evaluated 2026-08-21)
 
 `MainWindow` remains the GUI composition root. Its UI construction is split into
-same-class builder methods and preview summary formatting lives in
-`preview_result_dialog`; avoid introducing pass-through controller objects. Revisit a
+same-class builder methods; avoid introducing pass-through controller objects. Revisit a
 `SourcePanel` / `QueueDashboard` extraction only when a cohesive feature has a narrow
 interface. Do not split by line count alone.
 

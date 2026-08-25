@@ -38,7 +38,6 @@ from core.models import (
     EncodePlanItem,
     EncodeResult,
     SkippedOutputPolicy,
-    SmartPreviewResult,
     VideoFileItem,
 )
 from core.config import (
@@ -46,6 +45,7 @@ from core.config import (
     list_presets,
     load_app_config,
     load_preset,
+    parse_encode_workers,
     save_preset,
     update_app_config,
 )
@@ -57,8 +57,7 @@ from gui.constraint_decision_dialog import (
     choose_size_miss_decision,
 )
 from gui.encode_options_panel import EncodeOptionsPanel
-from gui.gui_workers import EncoderCapabilityDetectWorker, PlanWorker, PreviewWorker
-from gui.preview_result_dialog import PreviewResultDialog, build_preview_summary
+from gui.gui_workers import EncoderCapabilityDetectWorker, PlanWorker
 from gui.preset_manager_dialog import PresetManagerDialog
 from gui.queue_manager import QueueManager
 from gui.queue_state import QueueItemRecord
@@ -85,7 +84,7 @@ RUNTIME_CONFIG_KEYS = frozenset(
         "default_preset_name",
         "ffmpeg_path",
         "ffprobe_path",
-        "keep_preview_temp",
+        "encode_workers",
         "language",
         "last_output_dir",
         "last_source_path",
@@ -196,7 +195,6 @@ class MainWindow(QMainWindow):
             self.start_queue_action: QStyle.SP_MediaPlay,
             self.pause_after_current_action: QStyle.SP_MediaPause,
             self.stop_action: QStyle.SP_MediaStop,
-            self.preview_action: QStyle.SP_FileDialogContentsView,
             self.queue_action: QStyle.SP_FileDialogListView,
             self.activity_log_action: QStyle.SP_FileDialogInfoView,
             self.presets_action: QStyle.SP_DialogSaveButton,
@@ -213,7 +211,6 @@ class MainWindow(QMainWindow):
             self.start_queue_action,
             self.pause_after_current_action,
             self.stop_action,
-            self.preview_action,
             self.queue_action,
             self.activity_log_action,
             self.presets_action,
@@ -252,7 +249,6 @@ class MainWindow(QMainWindow):
         self.plan_action = QAction(self)
         self.start_queue_action = QAction(self)
         self.pause_after_current_action = QAction(self)
-        self.preview_action = QAction(self)
         self.stop_action = QAction(self)
         self.queue_action = QAction(self)
         self.activity_log_action = QAction(self)
@@ -269,8 +265,6 @@ class MainWindow(QMainWindow):
             self.stop_action,
         ]:
             toolbar.addAction(action)
-        toolbar.addSeparator()
-        toolbar.addAction(self.preview_action)
         toolbar.addSeparator()
         for action in [
             self.queue_action,
@@ -454,7 +448,6 @@ class MainWindow(QMainWindow):
         self.plan_action.triggered.connect(self._plan_current_source)
         self.start_queue_action.triggered.connect(self._start_queue)
         self.pause_after_current_action.triggered.connect(self._pause_after_current)
-        self.preview_action.triggered.connect(self._preview)
         self.stop_action.triggered.connect(self._stop_active_task)
         self.queue_action.triggered.connect(self._show_queue_window)
         self.activity_log_action.triggered.connect(self._show_activity_log)
@@ -530,7 +523,6 @@ class MainWindow(QMainWindow):
         self.plan_action.setText(self.tr.t("gui.button.add_to_queue"))
         self.start_queue_action.setText(self.tr.t("gui.button.start_queue"))
         self.pause_after_current_action.setText(self.tr.t("gui.button.pause_after_current"))
-        self.preview_action.setText(self.tr.t("gui.button.preview"))
         self.stop_action.setText(self.tr.t("gui.button.stop"))
         self.queue_action.setText(self.tr.t("gui.button.queue"))
         self.activity_log_action.setText(self.tr.t("gui.button.activity_log"))
@@ -815,7 +807,6 @@ class MainWindow(QMainWindow):
                 self._append_log(self.tr.t("gui.log.preset_loaded", name=name))
             elif action == "save":
                 options = self.options_panel.read_options()
-                self.options_panel.validate_parallel_options(options)
                 path = save_preset(name, options, self.config_dir)
                 self.app_config["default_preset_name"] = name
                 self._refresh_presets()
@@ -859,7 +850,7 @@ class MainWindow(QMainWindow):
         self.app_config.setdefault("workdir_path", str(self.default_workdir))
         self.app_config.setdefault("ffmpeg_path", "")
         self.app_config.setdefault("ffprobe_path", "")
-        self.app_config.setdefault("keep_preview_temp", True)
+        self.app_config.setdefault("encode_workers", 1)
         self.app_config.setdefault("log_level", "info")
         self.app_config["analysis_profile"] = self.options_panel.current_analysis_profile_name().value
 
@@ -885,9 +876,9 @@ class MainWindow(QMainWindow):
         self.options_panel.set_busy(not enabled)
 
     def _refresh_action_state(self) -> None:
-        plan_preview_busy = self.active_worker is not None
+        plan_busy = self.active_worker is not None
         queue_busy = self.queue_busy
-        any_busy = plan_preview_busy or queue_busy
+        any_busy = plan_busy or queue_busy
         has_queued_items = bool(self.queue_model.execution_records())
 
         self.add_files_action.setEnabled(not any_busy)
@@ -895,7 +886,6 @@ class MainWindow(QMainWindow):
         self.plan_action.setEnabled(not any_busy)
         self.start_queue_action.setEnabled(not any_busy and has_queued_items)
         self.pause_after_current_action.setEnabled(queue_busy)
-        self.preview_action.setEnabled(not any_busy)
         self.stop_action.setEnabled(any_busy)
         self.presets_action.setEnabled(not any_busy)
         self.settings_action.setEnabled(not any_busy)
@@ -1067,7 +1057,6 @@ class MainWindow(QMainWindow):
         if input_path is None:
             raise ValueError(self.tr.t("gui.message.select_source"))
         options = self.options_panel.read_options()
-        self.options_panel.validate_parallel_options(options)
         output_dir = self._selected_output()
         workdir = self._selected_workdir()
         ffmpeg_path = self._selected_ffmpeg()
@@ -1099,11 +1088,6 @@ class MainWindow(QMainWindow):
         if not files:
             return
         options = self.options_panel.read_options()
-        try:
-            self.options_panel.validate_parallel_options(options)
-        except Exception as exc:
-            QMessageBox.warning(self, self.tr.t("gui.message.warning"), str(exc))
-            return
         output_dir = self._selected_output()
         workdir = self._selected_workdir()
         ffmpeg_path = self._selected_ffmpeg()
@@ -1140,39 +1124,9 @@ class MainWindow(QMainWindow):
         self._persist_runtime_state()
         self._plan_current_source()
 
-    def _preview(self) -> None:
-        try:
-            input_path, options, output_dir, workdir, ffmpeg_path, ffprobe_path = self._build_context()
-        except Exception as exc:
-            QMessageBox.warning(self, self.tr.t("gui.message.warning"), str(exc))
-            return
-
-        if not input_path.is_file():
-            QMessageBox.warning(self, self.tr.t("gui.message.warning"), self.tr.t("gui.message.preview_requires_file"))
-            return
-
-        preview_options = self.options_panel.read_preview_options()
-        try:
-            self.options_panel.validate_parallel_options(options, allow_parallel=False)
-        except Exception as exc:
-            QMessageBox.warning(self, self.tr.t("gui.message.warning"), str(exc))
-            return
-        self._append_log(self.tr.t("gui.log.previewing"))
-        self._set_status_snapshot("preview", input_path.name, "-", "-", 0.0)
-        worker = PreviewWorker(
-            input_path=input_path,
-            options=options,
-            preview_options=preview_options,
-            output_dir=output_dir,
-            workdir=workdir,
-            ffmpeg_path=ffmpeg_path,
-            ffprobe_path=ffprobe_path,
-            config_dir=self.config_dir,
-        )
-        self._start_worker(worker, self._on_preview_ready)
-
     def _start_queue(self) -> None:
-        if not self.queue_manager.start():
+        max_workers = parse_encode_workers(self.app_config.get("encode_workers", 1))
+        if not self.queue_manager.start(max_workers=max_workers):
             QMessageBox.information(self, self.tr.t("gui.message.info"), self.tr.t("gui.message.no_queued_items"))
             return
         self._append_log(self.tr.t("gui.log.encoding"))
@@ -1206,36 +1160,6 @@ class MainWindow(QMainWindow):
             )
         )
         self._set_status_snapshot(self.tr.t("gui.status.done"), "-", "-", "-", 100.0)
-
-    def _on_preview_ready(self, result) -> None:
-        if isinstance(result, SmartPreviewResult):
-            dialog = PreviewResultDialog(self.tr, build_preview_summary(self.tr, result), self)
-            dialog.exec()
-            self._set_status_snapshot(
-                self.tr.t("gui.status.done") if result.success else self.tr.t("gui.status.failed"),
-                result.source_path.name,
-                "-",
-                "-",
-                100.0,
-            )
-            return
-
-        if result.success:
-            self._append_log(self.tr.t("gui.log.preview_done"))
-            self._append_log(
-                self.tr.t(
-                    "gui.log.preview_ratio",
-                    ratio=f"{result.sample_compression_ratio:.3f}",
-                    size=format_size(result.estimated_full_output_size),
-                )
-            )
-            dialog = PreviewResultDialog(self.tr, build_preview_summary(self.tr, result), self)
-            dialog.exec()
-            self._set_status_snapshot(self.tr.t("gui.status.done"), result.job.source_path.name, "-", "-", 100.0)
-            return
-
-        self._append_log(f"{self.tr.t('gui.message.error')}: {result.error_message}")
-        QMessageBox.critical(self, self.tr.t("gui.message.error"), result.error_message or "Preview failed.")
 
     def _selected_rows_from_view(self, view) -> list[int]:
         return sorted(index.row() for index in view.selectionModel().selectedRows())

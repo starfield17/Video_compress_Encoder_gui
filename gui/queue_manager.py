@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QThread, Signal
 
-from core.encoding import execute_plan, execute_plan_parallel, normalize_parallel_backends
+from core.encoding import execute_plan, execute_plan_concurrent
 from core.models import EncodePlan, EncodeResult, OperationCancelledError
 from core.progress_events import ProgressEvent
 from gui.queue_state import QueueItemRecord, create_queue_records
@@ -29,9 +29,10 @@ class QueueExecuteWorker(QThread):
     failed = Signal(str)
     queue_finished = Signal()
 
-    def __init__(self, items: list[QueueExecutionItem], parent=None) -> None:
+    def __init__(self, items: list[QueueExecutionItem], max_workers: int, parent=None) -> None:
         super().__init__(parent)
         self.items = items
+        self.max_workers = max_workers
         self._cancel_event = threading.Event()
         self._pause_after_current_event = threading.Event()
         self._current_processes: dict[str, object] = {}
@@ -59,20 +60,6 @@ class QueueExecuteWorker(QThread):
     def pause_after_current(self) -> None:
         self._pause_after_current_event.set()
 
-    def _parallel_config(self) -> tuple[bool, tuple]:
-        if not self.items:
-            return False, ()
-        first = self.items[0].record.plan_item.options
-        enabled = first.parallel_enabled
-        backends = normalize_parallel_backends(first.parallel_backends)
-        for item in self.items[1:]:
-            options = item.record.plan_item.options
-            if options.parallel_enabled != enabled:
-                raise ValueError("Queued items use mixed parallel settings.")
-            if normalize_parallel_backends(options.parallel_backends) != backends:
-                raise ValueError("Queued items use different parallel backend selections.")
-        return enabled, backends
-
     def _build_plan(self) -> EncodePlan:
         first_record = self.items[0].record
         return EncodePlan(
@@ -85,14 +72,13 @@ class QueueExecuteWorker(QThread):
 
     def run(self) -> None:
         try:
-            parallel_enabled, parallel_backends = self._parallel_config()
-            if parallel_enabled and parallel_backends:
+            if self.max_workers > 1:
                 plan = self._build_plan()
                 index_to_item_id = [item.item_id for item in self.items]
-                results = execute_plan_parallel(
+                results = execute_plan_concurrent(
                     plan,
                     self.items[0].record.job_snapshot.workdir,
-                    backends=parallel_backends,
+                    max_workers=self.max_workers,
                     log_callback=self._emit_log,
                     progress_callback=self._emit_progress,
                     cancel_check=self._cancel_event.is_set,
@@ -167,7 +153,7 @@ class QueueManager(QObject):
         self.model.add_records(records)
         return len(records)
 
-    def start(self) -> bool:
+    def start(self, max_workers: int = 1) -> bool:
         if self._worker is not None:
             return False
         execution_records = self.model.execution_records()
@@ -177,7 +163,7 @@ class QueueManager(QObject):
         items = [QueueExecutionItem(item_id=record.item_id, record=record) for record in execution_records]
         self.model.prepare_for_execution([item.item_id for item in items])
         self._pause_after_current_requested = False
-        self._worker = QueueExecuteWorker(items)
+        self._worker = QueueExecuteWorker(items, max_workers)
         self._worker.log.connect(self.log.emit)
         self._worker.progress.connect(self._on_worker_progress)
         self._worker.item_started.connect(self._on_item_started)

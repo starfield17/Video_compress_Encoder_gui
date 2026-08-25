@@ -16,11 +16,11 @@ modules import concrete owners in `config`, `media`, `ffmpeg`, and `smart`.
   and preserved size-miss paths.
 - `executor` performs serial item/plan execution and publishes validated Smart
   output.
-- `preview` executes fixed and Smart preview jobs.
-- `parallel` deep-copies each plan item, binds it to one concrete encoder, runs
-  analysis first, then schedules encode workers.
+- `parallel` deep-copies already-bound plan items, runs Smart analysis for the
+  whole queue first, then dynamically schedules full-file encode workers.
 
-Never share a mutable `EncodePlanItem` between workers. A Smart output is
+Never share a mutable `EncodePlanItem` between workers and never rebind or
+round-robin its encoder in the executor. A Smart output is
 written beside its destination under a temporary name and published only after
 size validation. A size miss remains a `NEEDS_DECISION` result and its preserved
 file must not overwrite the requested output.

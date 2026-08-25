@@ -5,10 +5,10 @@ The root of `core` is intentionally limited to shared public contracts:
 `smart_quality.py` facade. Implementation belongs to one capability package:
 
 - `config` — application paths, configuration and preset persistence.
-- `media` — media-domain paths, files, subtitles, preview values and validation.
+- `media` — media-domain paths, files, subtitles, skipped outputs and validation.
 - `ffmpeg` — discovery, probing, encoder capabilities and command construction.
 - `smart` — sampling, VMAF measurement, cache identity, search and decisions.
-- `encoding` — planning, process execution, analysis, preview and parallel jobs.
+- `encoding` — planning, process execution, analysis and concurrent encode jobs.
 
 CLI and GUI callers use package public APIs (`core.encoding`, `core.ffmpeg`,
 `core.smart`, and so on). Core implementation modules import the concrete owner
