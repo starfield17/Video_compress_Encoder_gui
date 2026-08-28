@@ -42,6 +42,39 @@ def build_output_path(
     return destination_dir / f"{source_path.stem}_{codec.value}.{container.value}"
 
 
+def build_explicit_file_output_path(
+    source_path: Path,
+    relative_path: Path,
+    output_dir: Path | None,
+    codec: CodecChoice,
+    container: ContainerChoice,
+) -> Path:
+    """Build an output path for an explicitly supplied file-list item."""
+
+    if output_dir is None:
+        destination_dir = source_path.parent
+    else:
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise ValueError(
+                f"Explicit file relative path must stay below the output directory: {relative_path}"
+            )
+        output_root = output_dir.expanduser().resolve()
+        destination_dir = (output_root / relative_path.parent).resolve()
+        if not destination_dir.is_relative_to(output_root):
+            raise ValueError(
+                f"Explicit file relative path escapes the output directory: {relative_path}"
+            )
+    ensure_dir(destination_dir)
+    return destination_dir / f"{source_path.stem}_{codec.value}.{container.value}"
+
+
+def disambiguate_output_path(output_path: Path, source_path: Path) -> Path:
+    """Add a stable source-derived suffix to a colliding output filename."""
+
+    digest = hashlib.sha1(str(source_path.resolve()).encode("utf-8")).hexdigest()[:8]
+    return output_path.with_name(f"{output_path.stem}-{digest}{output_path.suffix}")
+
+
 def _safe_name(value: str) -> str:
     # Sanitize a string for use in a filename: replace unsafe chars with underscores,
     # strip leading/trailing dots and underscores, fall back to "item".

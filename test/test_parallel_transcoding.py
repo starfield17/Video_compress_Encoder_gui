@@ -105,7 +105,10 @@ def _plan(root: Path, count: int = 4) -> EncodePlan:
 
 class ConcurrentConfigTestCase(unittest.TestCase):
     def test_encode_workers_defaults_and_validation(self) -> None:
-        self.assertEqual(_default_app_config()["encode_workers"], 1)
+        defaults = _default_app_config()
+        self.assertEqual(defaults["encode_workers"], 1)
+        self.assertEqual(defaults["post_encode_action"], "none")
+        self.assertTrue(defaults["desktop_notifications"])
         self.assertEqual(parse_encode_workers(1), 1)
         self.assertEqual(parse_encode_workers("8"), 8)
         for invalid in (None, "no", 0, 9, -1, True):

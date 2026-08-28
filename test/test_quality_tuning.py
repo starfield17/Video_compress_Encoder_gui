@@ -207,7 +207,19 @@ class PlanningAndCommandTestCase(unittest.TestCase):
                 patch("core.encoding.planning.discover_ffmpeg_tools", return_value=(temp_root / "ffmpeg", temp_root / "ffprobe")),
                 patch(
                     "core.encoding.planning.ensure_encoder_capabilities",
-                    return_value=_capabilities_for(CodecChoice.HEVC, [(BackendChoice.NVENC, "hevc_nvenc")]),
+                    return_value={
+                        "hwaccels": [],
+                        "codecs": {
+                            "hevc": [
+                                {
+                                    "backend": "nvenc",
+                                    "encoder": "hevc_nvenc",
+                                    "preset_choices": ["p5"],
+                                }
+                            ],
+                            "av1": [],
+                        },
+                    },
                 ),
                 patch("core.encoding.planning.resolve_encoder", return_value=encoder_info),
                 patch("core.encoding.planning.preset_choices_for_encoder", return_value=["p5"]),

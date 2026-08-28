@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from core.i18n import LANGUAGE_NAME_KEY, _placeholders
+from core.media import POST_ENCODE_ACTION_KEYS
 from gui.queue_state import STATUS_KEY_BY_VALUE
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -114,7 +115,7 @@ class SourceLiteralKeyTestCase(unittest.TestCase):
                 if (
                     isinstance(arg, ast.Call)
                     and isinstance(arg.func, ast.Name)
-                    and arg.func.id == "status_key"
+                    and arg.func.id in {"status_key", "post_encode_action_key"}
                 ):
                     continue
                 unlisted.append((file, ast.unparse(arg)))
@@ -123,6 +124,11 @@ class SourceLiteralKeyTestCase(unittest.TestCase):
     def test_status_key_values_exist_in_english(self) -> None:
         en = _load("en")
         for value in STATUS_KEY_BY_VALUE.values():
+            self.assertIn(value, en)
+
+    def test_post_encode_action_key_values_exist_in_english(self) -> None:
+        en = _load("en")
+        for value in POST_ENCODE_ACTION_KEYS.values():
             self.assertIn(value, en)
 
     def test_tooltip_key_literals_match_allowlist(self) -> None:

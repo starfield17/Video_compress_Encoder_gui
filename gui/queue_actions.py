@@ -7,6 +7,17 @@ testable without constructing a Qt model or view.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from core.encoding import reconfigure_plan_item
+from core.media import validate_plan_item
+from core.models import (
+    DecisionActionCode,
+    DecisionOption,
+    EncodeOptions,
+    QualitySearchStatus,
+    SkipOrigin,
+)
 from core.smart import (
     accept_rejected_output,
     build_decision_options,
@@ -15,8 +26,78 @@ from core.smart import (
     prepare_size_miss_retry,
     reselect_after_quality_decision,
 )
-from core.models import DecisionActionCode, DecisionOption, QualitySearchStatus, SkipOrigin
-from gui.queue_state import QueueItemRecord, QueueItemStatus, reset_for_retry, short_error
+from gui.queue_state import (
+    QueueItemRecord,
+    QueueItemStatus,
+    reset_for_retry,
+    short_error,
+)
+
+
+EDITABLE_ITEM_STATUSES = {
+    QueueItemStatus.QUEUED,
+    QueueItemStatus.WAITING_ANALYSIS,
+}
+
+
+def can_edit_record(record: QueueItemRecord) -> bool:
+    return record.status in EDITABLE_ITEM_STATUSES
+
+
+def apply_options_to_record(
+    record: QueueItemRecord,
+    options: EncodeOptions,
+    *,
+    config_dir: Path | None = None,
+    runtime_capabilities: dict | None = None,
+) -> bool:
+    """Re-plan one editable queue record with a newly bound encoder."""
+    if not can_edit_record(record):
+        return False
+    if not isinstance(runtime_capabilities, dict):
+        raise RuntimeError("Encoder capabilities are not ready for queue reconfiguration.")
+    record.plan_item = reconfigure_plan_item(
+        record.plan_item,
+        options,
+        ffmpeg_path=record.job_snapshot.ffmpeg_path,
+        workdir=record.job_snapshot.workdir,
+        config_dir=config_dir,
+        runtime_capabilities=runtime_capabilities,
+        create_directories=False,
+    )
+    encoder = record.plan_item.encoder_info
+    record.total_passes = (
+        2
+        if record.plan_item.options.two_pass
+        and encoder is not None
+        and encoder.supports_two_pass
+        else 1
+    )
+    reset_for_retry(record)
+
+    return True
+
+
+def apply_output_dir_to_record(record: QueueItemRecord, output_dir: Path) -> bool:
+    """Change an editable record's output directory after full validation."""
+    if not can_edit_record(record):
+        return False
+    encoder = record.plan_item.encoder_info
+    if encoder is None:
+        raise RuntimeError("Queue item does not have a bound encoder.")
+    output_path = output_dir.expanduser().resolve() / record.output_path.name
+    validate_plan_item(
+        record.source_path,
+        output_path,
+        record.plan_item.options,
+        encoder,
+        record.job_snapshot.workdir,
+        create_directories=False,
+    )
+    record.plan_item.output_path = output_path
+    reset_for_retry(record)
+    return True
+
 
 
 def decision_options_for_record(record: QueueItemRecord) -> list[DecisionOption]:

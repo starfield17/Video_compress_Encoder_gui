@@ -98,11 +98,11 @@ def execute_plan_item(
                 item.options.codec,
                 item.options.max_output_ratio,
             )
-            item.output_path.parent.mkdir(parents=True, exist_ok=True)
             temporary_output = item.output_path.parent / (
                 f".{item.output_path.stem}.smart-{uuid.uuid4().hex}{item.output_path.suffix}"
             )
 
+        item.output_path.parent.mkdir(parents=True, exist_ok=True)
         commands, passlog = build_encode_commands(
             ffmpeg_path,
             item,

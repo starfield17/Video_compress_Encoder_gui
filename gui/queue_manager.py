@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import threading
+import uuid
 from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -9,7 +10,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 from core.encoding import execute_plan, execute_plan_concurrent
 from core.models import EncodePlan, EncodeResult, OperationCancelledError
 from core.progress_events import ProgressEvent
-from gui.queue_state import QueueItemRecord, create_queue_records
+from gui.queue_state import QueueItemRecord, QueueItemStatus, create_queue_records
 from gui.queue_model import QueueTableModel
 
 
@@ -17,6 +18,12 @@ from gui.queue_model import QueueTableModel
 class QueueExecutionItem:
     item_id: str
     record: QueueItemRecord
+
+
+@dataclass(frozen=True, slots=True)
+class QueueRunCompletion:
+    run_id: str
+    item_ids: tuple[str, ...]
 
 
 class QueueExecuteWorker(QThread):
@@ -137,6 +144,7 @@ class QueueManager(QObject):
     stateChanged = Signal(str)
     error = Signal(str)
     workerFinished = Signal()
+    runCompleted = Signal(object)
 
     def __init__(self, model: QueueTableModel, parent=None) -> None:
         super().__init__(parent)
@@ -144,6 +152,9 @@ class QueueManager(QObject):
         self._worker: QueueExecuteWorker | None = None
         self._active_item_ids: set[str] = set()
         self._pause_after_current_requested = False
+        self._pending_run: QueueRunCompletion | None = None
+        self._last_completed_run_id: str | None = None
+        self._worker_outcome: str | None = None
 
     def is_busy(self) -> bool:
         return self._worker is not None
@@ -157,12 +168,23 @@ class QueueManager(QObject):
         if self._worker is not None:
             return False
         execution_records = self.model.execution_records()
+        if self._pending_run is not None:
+            pending_ids = set(self._pending_run.item_ids)
+            execution_records = [
+                record for record in execution_records if record.item_id in pending_ids
+            ]
         if not execution_records:
             return False
 
         items = [QueueExecutionItem(item_id=record.item_id, record=record) for record in execution_records]
+        if self._pending_run is None:
+            self._pending_run = QueueRunCompletion(
+                run_id=uuid.uuid4().hex,
+                item_ids=tuple(item.item_id for item in items),
+            )
         self.model.prepare_for_execution([item.item_id for item in items])
         self._pause_after_current_requested = False
+        self._worker_outcome = None
         self._worker = QueueExecuteWorker(items, max_workers)
         self._worker.log.connect(self.log.emit)
         self._worker.progress.connect(self._on_worker_progress)
@@ -193,13 +215,26 @@ class QueueManager(QObject):
         return True
 
     def remove_rows(self, rows: list[int]) -> int:
+        if not self.can_remove_rows(rows):
+            return 0
         return self.model.remove_rows_by_index(rows)
+
+    def _pending_item_ids(self) -> set[str]:
+        return set(self._pending_run.item_ids) if self._pending_run is not None else set()
+
+    def can_remove_rows(self, rows: list[int]) -> bool:
+        protected = self._pending_item_ids()
+        for row in rows:
+            record = self.model.record_for_row(row)
+            if record is not None and record.item_id in protected:
+                return False
+        return self.model.can_remove_rows(rows)
 
     def retry_rows(self, rows: list[int]) -> int:
         return self.model.retry_rows(rows)
 
     def clear_completed(self) -> int:
-        return self.model.clear_completed()
+        return self.model.clear_completed(excluded_item_ids=self._pending_item_ids())
 
     def _on_item_started(self, item_id: str, backend: str, encoder: str) -> None:
         self._active_item_ids.add(item_id)
@@ -217,40 +252,89 @@ class QueueManager(QObject):
             self.log.emit(warning)
 
     def _on_worker_paused(self) -> None:
-        self.busyChanged.emit(False)
+        self._worker_outcome = "paused"
         self.stateChanged.emit("paused")
 
     def _on_worker_cancelled(self, message: str) -> None:
-        for item_id in list(self._active_item_ids):
-            self.model.mark_cancelled(item_id, message)
-            self._active_item_ids.discard(item_id)
-        self.busyChanged.emit(False)
+        for record in self._pending_records():
+            if record.status in {
+                QueueItemStatus.QUEUED,
+                QueueItemStatus.WAITING_ANALYSIS,
+                QueueItemStatus.RUNNING,
+                QueueItemStatus.ANALYZING,
+                QueueItemStatus.ENCODING,
+                QueueItemStatus.VALIDATING,
+            }:
+                self.model.mark_cancelled(record.item_id, message)
+            self._active_item_ids.discard(record.item_id)
+        self._pending_run = None
+        self._worker_outcome = "cancelled"
         self.stateChanged.emit("cancelled")
 
     def _on_worker_failed(self, message: str) -> None:
-        for item_id in list(self._active_item_ids):
-            self.model.mark_failed(item_id, message)
-            self._active_item_ids.discard(item_id)
-        self.busyChanged.emit(False)
+        for record in self._pending_records():
+            if record.status in {
+                QueueItemStatus.QUEUED,
+                QueueItemStatus.WAITING_ANALYSIS,
+                QueueItemStatus.RUNNING,
+                QueueItemStatus.ANALYZING,
+                QueueItemStatus.ENCODING,
+                QueueItemStatus.VALIDATING,
+            }:
+                self.model.mark_failed(record.item_id, message)
+            self._active_item_ids.discard(record.item_id)
+        self._pending_run = None
+        self._worker_outcome = "failed"
         self.stateChanged.emit("failed")
         self.error.emit(message)
 
     def _on_worker_queue_finished(self) -> None:
-        self.busyChanged.emit(False)
-        state = "awaiting_decision" if self.model.metrics().needs_decision_items else "idle"
-        self.stateChanged.emit(state)
+        self._worker_outcome = "finished"
 
     def reconcile_after_decision(self) -> None:
         """Publish the terminal queue state after a local decision is applied."""
         if self._worker is not None:
             return
-        if self.model.metrics().needs_decision_items:
-            self.stateChanged.emit("awaiting_decision")
-        elif not self.model.execution_records():
+        self._reconcile_pending_run()
+
+    def _pending_records(self) -> list[QueueItemRecord]:
+        if self._pending_run is None:
+            return []
+        records: list[QueueItemRecord] = []
+        for item_id in self._pending_run.item_ids:
+            _row, record = self.model.record_for_id(item_id)
+            if record is not None:
+                records.append(record)
+        return records
+
+    def _reconcile_pending_run(self) -> None:
+        completion = self._pending_run
+        if completion is None:
             self.stateChanged.emit("idle")
+            return
+        records = self._pending_records()
+        if any(record.status == QueueItemStatus.NEEDS_DECISION for record in records):
+            self.stateChanged.emit("awaiting_decision")
+            return
+        if any(
+            record.status in {QueueItemStatus.QUEUED, QueueItemStatus.WAITING_ANALYSIS}
+            for record in records
+        ):
+            self.stateChanged.emit("idle")
+            return
+        self._pending_run = None
+        self.stateChanged.emit("idle")
+        if completion.run_id != self._last_completed_run_id:
+            self._last_completed_run_id = completion.run_id
+            self.runCompleted.emit(completion)
 
     def _on_worker_thread_finished(self) -> None:
+        outcome = self._worker_outcome
         self._worker = None
         self._active_item_ids.clear()
         self._pause_after_current_requested = False
+        self._worker_outcome = None
+        self.busyChanged.emit(False)
+        if outcome == "finished":
+            self._reconcile_pending_run()
         self.workerFinished.emit()

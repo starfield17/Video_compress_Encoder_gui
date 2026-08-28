@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
+from core.media import PostEncodeAction, SystemPowerResult
 from core.models import (
+    BackendChoice,
+    CodecChoice,
     EncodeOptions,
     EncodePlanItem,
+    EncodeResult,
+    EncoderInfo,
+    MediaInfo,
 )
 from gui.gui_mainwindow import MainWindow
+from gui.queue_manager import QueueRunCompletion
 from gui.queue_state import (
     QueueItemRecord,
     QueueItemStatus,
@@ -24,6 +31,56 @@ class MainWindowMaintenanceTestCase(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
         cls.repo_root = Path(__file__).resolve().parent.parent
+
+    def _record(
+        self,
+        root: Path,
+        item_id: str,
+        status: QueueItemStatus,
+    ) -> QueueItemRecord:
+        source = root / f"{item_id}.mov"
+        source.write_bytes(b"source-data")
+        output = root / f"{item_id}.mp4"
+        item = EncodePlanItem(
+            source_path=source,
+            output_path=output,
+            media_info=MediaInfo(
+                path=source,
+                duration=10.0,
+                format_bitrate_bps=2_000_000,
+                video_bitrate_bps=1_800_000,
+                audio_bitrate_bps=128_000,
+                width=1280,
+                height=720,
+                fps=30.0,
+                video_codec="h264",
+                audio_codec="aac",
+            ),
+            encoder_info=EncoderInfo(
+                codec=CodecChoice.HEVC,
+                backend=BackendChoice.CPU,
+                encoder_name="libx265",
+                supports_two_pass=True,
+                default_preset="slow",
+            ),
+            options=EncodeOptions(overwrite=True),
+        )
+        result = EncodeResult(
+            source_path=source,
+            output_path=output,
+            success=status == QueueItemStatus.DONE,
+            actual_output_bytes=5,
+        )
+        return QueueItemRecord(
+            item_id=item_id,
+            plan_item=item,
+            job_snapshot=QueueJobSnapshot(
+                root / "work", root / "ffmpeg", root / "ffprobe", root
+            ),
+            status=status,
+            total_passes=1,
+            result=result,
+        )
 
     def test_runtime_config_patch_preserves_worker_owned_and_unknown_fields(self) -> None:
         window = MainWindow(self.repo_root, language="en")
@@ -95,6 +152,110 @@ class MainWindowMaintenanceTestCase(unittest.TestCase):
         self.assertEqual(record.analysis_candidate_index, 2)
         self.assertEqual(record.analysis_candidate_limit, 4)
         self.assertEqual(record.file_progress, 37.5)
+
+    def test_settings_post_action_updates_main_combo_before_persisting(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        dialog = MagicMock()
+        dialog.exec.return_value = QDialog.DialogCode.Accepted
+        dialog.redetect_requested = False
+        dialog.values.return_value = {
+            "language": "en",
+            "workdir_path": str(window.default_workdir),
+            "ffmpeg_path": "",
+            "ffprobe_path": "",
+            "log_level": "info",
+            "encode_workers": 1,
+            "post_encode_action": PostEncodeAction.SLEEP.value,
+            "desktop_notifications": False,
+            "size_blocked_policy": "relax_size",
+            "quality_unreachable_policy": "skip",
+            "skipped_output_policy": "copy",
+            "analysis_profile": "balance",
+            "analysis_profiles": {},
+        }
+        try:
+            with (
+                patch("gui.gui_mainwindow.SettingsDialog", return_value=dialog),
+                patch("gui.gui_mainwindow.update_app_config"),
+            ):
+                window._open_settings_dialog()
+
+            self.assertEqual(
+                window.post_encode_combo.currentData(), PostEncodeAction.SLEEP.value
+            )
+            self.assertEqual(
+                window.app_config["post_encode_action"], PostEncodeAction.SLEEP.value
+            )
+        finally:
+            window.close()
+
+    def test_busy_queue_rejects_dropped_paths_before_planning(self) -> None:
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            window.queue_busy = True
+            with patch.object(window, "_start_plan_for_files") as start_plan:
+                window._handle_dropped_paths([Path(__file__)])
+            start_plan.assert_not_called()
+        finally:
+            window.queue_busy = False
+            window.close()
+
+    def test_run_completion_uses_only_the_current_run_records(self) -> None:
+        import tempfile
+
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                historical = self._record(root, "historical", QueueItemStatus.DONE)
+                current = self._record(root, "current", QueueItemStatus.FAILED)
+                window.queue_model.add_records([historical, current])
+                completion = QueueRunCompletion("run", (current.item_id,))
+                with (
+                    patch.object(window, "_maybe_publish_skipped_sources") as publish,
+                    patch.object(window, "_handle_post_queue_finished") as finish,
+                ):
+                    window._on_queue_run_completed(completion)
+
+                publish.assert_called_once_with([current])
+                finish.assert_called_once_with([current])
+        finally:
+            window.close()
+
+    def test_power_action_failure_is_logged_and_shown(self) -> None:
+        import tempfile
+
+        window = MainWindow(self.repo_root, language="en")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                record = self._record(Path(temp_dir), "done", QueueItemStatus.DONE)
+                window.app_config["desktop_notifications"] = False
+                window.app_config["post_encode_action"] = PostEncodeAction.SLEEP.value
+                dialog = MagicMock()
+                dialog.exec.return_value = QDialog.DialogCode.Accepted
+                failure = SystemPowerResult(
+                    success=False,
+                    action=PostEncodeAction.SLEEP,
+                    error="permission denied",
+                )
+                with (
+                    patch(
+                        "gui.gui_mainwindow.PowerActionCountdownDialog",
+                        return_value=dialog,
+                    ),
+                    patch("gui.gui_mainwindow.execute_power_action", return_value=failure),
+                    patch("gui.gui_mainwindow.QMessageBox.critical") as critical,
+                    patch.object(window, "_append_log") as append_log,
+                ):
+                    window._handle_post_queue_finished([record])
+
+                critical.assert_called_once()
+                self.assertIn("permission denied", critical.call_args.args[2])
+                self.assertTrue(
+                    any("permission denied" in str(call.args[0]) for call in append_log.call_args_list)
+                )
+        finally:
+            window.close()
 
 
 if __name__ == "__main__":

@@ -193,6 +193,8 @@ def _default_app_config() -> dict[str, Any]:
         "recent_paths": [],
         "log_level": "info",
         "language": "en",
+        "post_encode_action": "none",
+        "desktop_notifications": True,
         "size_blocked_policy": SizeBlockedPolicy.RELAX_SIZE.value,
         "quality_unreachable_policy": QualityUnreachablePolicy.SKIP.value,
         "skipped_output_policy": SkippedOutputPolicy.COPY.value,

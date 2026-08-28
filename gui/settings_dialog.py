@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -27,6 +26,11 @@ from core.models import (
     SkippedOutputPolicy,
 )
 from core.smart import parse_analysis_profile_name
+from core.media import (
+    PostEncodeAction,
+    parse_post_encode_action,
+    post_encode_action_key,
+)
 
 class SettingsDialog(QDialog):
     def __init__(
@@ -89,6 +93,13 @@ class SettingsDialog(QDialog):
         self.encode_workers_spin = QSpinBox()
         self.encode_workers_spin.setRange(1, 8)
 
+        self.post_encode_label = QLabel()
+        self.post_encode_combo = QComboBox()
+        for action in PostEncodeAction:
+            self.post_encode_combo.addItem("", action.value)
+
+        self.desktop_notifications_check = QCheckBox()
+
         general.addWidget(self.language_label, 0, 0)
         general.addWidget(self.language_combo, 0, 1, 1, 2)
         general.addWidget(self.workdir_label, 1, 0)
@@ -104,6 +115,9 @@ class SettingsDialog(QDialog):
         general.addWidget(self.log_level_combo, 4, 1, 1, 2)
         general.addWidget(self.encode_workers_label, 5, 0)
         general.addWidget(self.encode_workers_spin, 5, 1, 1, 2)
+        general.addWidget(self.post_encode_label, 6, 0)
+        general.addWidget(self.post_encode_combo, 6, 1, 1, 2)
+        general.addWidget(self.desktop_notifications_check, 7, 0, 1, 3)
         layout.addLayout(general)
 
         self.policy_group = QGroupBox()
@@ -194,6 +208,12 @@ class SettingsDialog(QDialog):
         if profile_index >= 0:
             self.analysis_profile_combo.setCurrentIndex(profile_index)
 
+        post_action = parse_post_encode_action(settings.get("post_encode_action", PostEncodeAction.DO_NOTHING.value))
+        post_index = self.post_encode_combo.findData(post_action.value)
+        if post_index >= 0:
+            self.post_encode_combo.setCurrentIndex(post_index)
+        self.desktop_notifications_check.setChecked(bool(settings.get("desktop_notifications", True)))
+
     def apply_translations(self, tr: Translator) -> None:
         self.tr = tr
         self.setWindowTitle(self.tr.t("gui.window.settings"))
@@ -206,6 +226,12 @@ class SettingsDialog(QDialog):
         encode_workers_tooltip = self.tr.t("gui.tooltip.encode_workers")
         self.encode_workers_label.setToolTip(encode_workers_tooltip)
         self.encode_workers_spin.setToolTip(encode_workers_tooltip)
+        self.post_encode_label.setText(self.tr.t("gui.label.post_encode_action"))
+        self.desktop_notifications_check.setText(self.tr.t("gui.label.desktop_notifications"))
+        for action in PostEncodeAction:
+            idx = self.post_encode_combo.findData(action.value)
+            if idx >= 0:
+                self.post_encode_combo.setItemText(idx, self.tr.t(post_encode_action_key(action)))
         self.policy_group.setTitle(self.tr.t("gui.group.smart_policies"))
         self.size_blocked_policy_label.setText(self.tr.t("gui.label.size_blocked_policy"))
         self.quality_unreachable_policy_label.setText(self.tr.t("gui.label.quality_unreachable_policy"))
@@ -280,6 +306,8 @@ class SettingsDialog(QDialog):
             "ffprobe_path": self.ffprobe_edit.text().strip(),
             "log_level": self.log_level_combo.currentText(),
             "encode_workers": self.encode_workers_spin.value(),
+            "post_encode_action": self.post_encode_combo.currentData() or PostEncodeAction.DO_NOTHING.value,
+            "desktop_notifications": self.desktop_notifications_check.isChecked(),
             "size_blocked_policy": self.size_blocked_policy_combo.currentData()
             or SizeBlockedPolicy.RELAX_SIZE.value,
             "quality_unreachable_policy": self.quality_unreachable_policy_combo.currentData()

@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+import copy
 from enum import IntEnum
+from pathlib import Path
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QStyle
 
 from core.i18n import Translator
-from core.media import human_kbps
-from core.models import DecisionOption
+from core.media import human_kbps, validate_unique_output_paths
+from core.models import DecisionOption, EncodeOptions
 from core.progress_events import ProgressEvent
 from gui.queue_actions import (
     accept_size_miss as accept_size_miss_action,
+    apply_options_to_record as apply_options_to_record_action,
+    apply_output_dir_to_record as apply_output_dir_to_record_action,
     apply_quality_decision as apply_quality_decision_action,
     decision_options_for_record,
     discard_size_miss as discard_size_miss_action,
+    can_edit_record,
     retry_size_miss as retry_size_miss_action,
 )
 from gui.queue_state import (
@@ -323,6 +328,10 @@ class QueueTableModel(QAbstractTableModel):
     def add_records(self, records: list[QueueItemRecord]) -> None:
         if not records:
             return
+        validate_unique_output_paths(
+            (record.source_path, record.output_path)
+            for record in [*self._records, *records]
+        )
         start = len(self._records)
         end = start + len(records) - 1
         self.beginInsertRows(QModelIndex(), start, end)
@@ -344,11 +353,18 @@ class QueueTableModel(QAbstractTableModel):
             self._emit_metrics_changed()
         return removed
 
-    def clear_completed(self) -> int:
+    def clear_completed(self, *, excluded_item_ids: set[str] | None = None) -> int:
+        excluded = excluded_item_ids or set()
         targets = [
             row
             for row, record in enumerate(self._records)
-            if record.status in {QueueItemStatus.DONE, QueueItemStatus.SKIPPED, QueueItemStatus.CANCELLED}
+            if record.item_id not in excluded
+            and record.status
+            in {
+                QueueItemStatus.DONE,
+                QueueItemStatus.SKIPPED,
+                QueueItemStatus.CANCELLED,
+            }
         ]
         return self.remove_rows_by_index(targets)
 
@@ -495,6 +511,64 @@ class QueueTableModel(QAbstractTableModel):
             self.record_for_row(row) is not None
             and self.record_for_row(row).status in {QueueItemStatus.FAILED, QueueItemStatus.CANCELLED}
             for row in rows
+        )
+
+    def can_edit_rows(self, rows: list[int]) -> bool:
+        if not rows:
+            return False
+        for row in rows:
+            record = self.record_for_row(row)
+            if record is None or not can_edit_record(record):
+                return False
+        return True
+
+    def _atomic_edit_rows(
+        self,
+        rows: list[int],
+        edit,
+    ) -> int:
+        targets = sorted(set(rows))
+        if not targets or not self.can_edit_rows(targets):
+            raise RuntimeError("Every selected queue item must be editable.")
+        replacements: dict[int, QueueItemRecord] = {}
+        for row in targets:
+            record = self.record_for_row(row)
+            assert record is not None
+            candidate = copy.deepcopy(record)
+            if not edit(candidate):
+                raise RuntimeError(f"Queue item {record.source_path.name} is not editable.")
+            replacements[row] = candidate
+        combined = [replacements.get(row, record) for row, record in enumerate(self._records)]
+        validate_unique_output_paths(
+            (record.source_path, record.output_path) for record in combined
+        )
+        for row, replacement in replacements.items():
+            self._records[row] = replacement
+        self._emit_rows_changed(targets)
+        return len(targets)
+
+    def apply_options_to_rows(
+        self,
+        rows: list[int],
+        options: EncodeOptions,
+        *,
+        config_dir: Path | None = None,
+        runtime_capabilities: dict | None = None,
+    ) -> int:
+        return self._atomic_edit_rows(
+            rows,
+            lambda record: apply_options_to_record_action(
+                record,
+                options,
+                config_dir=config_dir,
+                runtime_capabilities=runtime_capabilities,
+            ),
+        )
+
+    def apply_output_dir_to_rows(self, rows: list[int], output_dir: Path) -> int:
+        return self._atomic_edit_rows(
+            rows,
+            lambda record: apply_output_dir_to_record_action(record, output_dir),
         )
 
     def can_resolve_row(self, row: int) -> bool:

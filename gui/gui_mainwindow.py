@@ -1,9 +1,9 @@
-from __future__ import annotations
-
+import sys
+from collections.abc import Sequence
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QPoint, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices
+from PySide6.QtCore import QByteArray, QPoint, QSignalBlocker, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QStatusBar,
     QStyle,
+    QSystemTrayIcon,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -49,7 +50,20 @@ from core.config import (
     save_preset,
     update_app_config,
 )
-from core.media import group_skipped_output_pairs, is_eligible_skipped_item, publish_skipped_source
+from core.media import (
+    PostEncodeAction,
+    SpaceSavingsItem,
+    SpaceSavingsOutcome,
+    VIDEO_EXTENSIONS,
+    calculate_space_savings,
+    collect_video_files,
+    execute_power_action,
+    group_skipped_output_pairs,
+    is_eligible_skipped_item,
+    parse_post_encode_action,
+    post_encode_action_key,
+    publish_skipped_source,
+)
 from gui.activity_log_window import ActivityLogWindow
 from gui.constraint_decision_dialog import (
     SizeMissDecision,
@@ -58,9 +72,10 @@ from gui.constraint_decision_dialog import (
 )
 from gui.encode_options_panel import EncodeOptionsPanel
 from gui.gui_workers import EncoderCapabilityDetectWorker, PlanWorker
+from gui.power_action_dialog import PowerActionCountdownDialog
 from gui.preset_manager_dialog import PresetManagerDialog
-from gui.queue_manager import QueueManager
-from gui.queue_state import QueueItemRecord
+from gui.queue_manager import QueueManager, QueueRunCompletion
+from gui.queue_state import QueueItemRecord, QueueItemStatus
 from gui.queue_model import QueueTableModel, format_duration, format_size
 from gui.queue_view import create_queue_view
 from gui.queue_window import QueueWindow
@@ -82,13 +97,15 @@ RUNTIME_CONFIG_KEYS = frozenset(
         "analysis_profile",
         "analysis_profiles",
         "default_preset_name",
+        "desktop_notifications",
+        "encode_workers",
         "ffmpeg_path",
         "ffprobe_path",
-        "encode_workers",
         "language",
         "last_output_dir",
         "last_source_path",
         "log_level",
+        "post_encode_action",
         "quality_unreachable_policy",
         "queue_table_header_state",
         "recent_paths",
@@ -221,6 +238,7 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         apply_theme(self)
+        self.setAcceptDrops(True)
         self._build_toolbar()
         root_layout = self._build_central_content()
         self.source_box = self._build_source_box()
@@ -236,6 +254,11 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.jobs_box, 1)
         self._build_status_bar()
         self._apply_initial_window_geometry()
+
+        self.tray_icon = QSystemTrayIcon(self)
+        if self.tray_icon.isSystemTrayAvailable() and not self.windowIcon().isNull():
+            self.tray_icon.setIcon(self.windowIcon())
+            self.tray_icon.show()
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar(self)
@@ -311,6 +334,11 @@ class MainWindow(QMainWindow):
         self.preset_combo = QComboBox()
         self.manage_presets_button = QPushButton()
 
+        self.post_encode_label = QLabel()
+        self.post_encode_combo = QComboBox()
+        for action in PostEncodeAction:
+            self.post_encode_combo.addItem("", action.value)
+
         self.output_label = QLabel()
         self.output_edit = QLineEdit()
         self.output_button = QPushButton()
@@ -323,11 +351,14 @@ class MainWindow(QMainWindow):
         source_layout.addWidget(self.output_edit, 1, 1, 1, 4)
         source_layout.addWidget(self.output_button, 1, 5)
         source_layout.addWidget(self.preset_label, 2, 0)
-        source_layout.addWidget(self.preset_combo, 2, 1, 1, 3)
-        source_layout.addWidget(self.manage_presets_button, 2, 4, 1, 2)
+        source_layout.addWidget(self.preset_combo, 2, 1)
+        source_layout.addWidget(self.manage_presets_button, 2, 2)
+        source_layout.addWidget(self.post_encode_label, 2, 3)
+        source_layout.addWidget(self.post_encode_combo, 2, 4, 1, 2)
         source_layout.setColumnStretch(1, 1)
         source_layout.setColumnStretch(2, 1)
-        source_layout.setColumnStretch(3, 1)
+        source_layout.setColumnStretch(4, 1)
+        source_layout.setColumnStretch(5, 1)
         return source_box
 
     def _build_jobs_box(self) -> QGroupBox:
@@ -458,16 +489,21 @@ class MainWindow(QMainWindow):
         self.source_dir_button.clicked.connect(self._browse_source_dir)
         self.output_button.clicked.connect(self._browse_output)
         self.manage_presets_button.clicked.connect(self._open_preset_manager)
+        self.post_encode_combo.currentIndexChanged.connect(self._post_encode_combo_changed)
         self.options_panel.analysis_profile_changed.connect(lambda _name: self._persist_runtime_state())
         self.source_combo.editTextChanged.connect(self._persist_runtime_state)
         self.output_edit.editingFinished.connect(self._persist_runtime_state)
         self.preset_combo.currentIndexChanged.connect(self._preset_combo_changed)
+
+        self.table_view.filesDropped.connect(self._handle_dropped_paths)
+        self.queue_window.table_view.filesDropped.connect(self._handle_dropped_paths)
 
         self.queue_model.metricsChanged.connect(self._update_queue_metrics)
         self.queue_manager.log.connect(self._append_log)
         self.queue_manager.progress.connect(self._update_progress)
         self.queue_manager.busyChanged.connect(self._on_queue_busy_changed)
         self.queue_manager.stateChanged.connect(self._on_queue_state_changed)
+        self.queue_manager.runCompleted.connect(self._on_queue_run_completed)
         self.queue_manager.workerFinished.connect(self._maybe_close_after_running_task)
         self.queue_manager.error.connect(self._on_queue_error)
 
@@ -509,6 +545,11 @@ class MainWindow(QMainWindow):
             self.options_panel.apply_options(EncodeOptions())
         self.options_panel.apply_analysis_profile_settings()
 
+        post_action = parse_post_encode_action(self.app_config.get("post_encode_action", PostEncodeAction.DO_NOTHING.value))
+        post_index = self.post_encode_combo.findData(post_action.value)
+        if post_index >= 0:
+            self.post_encode_combo.setCurrentIndex(post_index)
+
         self._set_status_snapshot("-", "-", "-", "-", None)
         self._restore_header_state()
 
@@ -532,6 +573,11 @@ class MainWindow(QMainWindow):
 
         self.source_label.setText(self.tr.t("gui.label.source"))
         self.preset_label.setText(self.tr.t("gui.label.preset"))
+        self.post_encode_label.setText(self.tr.t("gui.label.post_encode_action"))
+        for action in PostEncodeAction:
+            idx = self.post_encode_combo.findData(action.value)
+            if idx >= 0:
+                self.post_encode_combo.setItemText(idx, self.tr.t(post_encode_action_key(action)))
         self.output_label.setText(self.tr.t("gui.label.output"))
         self.source_file_button.setText(self.tr.t("gui.button.browse_file"))
         self.source_dir_button.setText(self.tr.t("gui.button.browse_dir"))
@@ -631,6 +677,7 @@ class MainWindow(QMainWindow):
             self._append_log(self.tr.t("gui.log.encoder_detection_running"))
             return
 
+        self._encoder_capabilities_ready = False
         self.options_panel.begin_capability_detection()
         worker = EncoderCapabilityDetectWorker(
             self.config_dir,
@@ -646,6 +693,7 @@ class MainWindow(QMainWindow):
 
     def _on_encoder_capability_detection_completed(self, capabilities: dict) -> None:
         self.app_config["encoder_capabilities"] = capabilities
+        self._encoder_capabilities_ready = True
         self.options_panel.set_runtime_capabilities(capabilities)
         self._append_log(
             self.tr.t(
@@ -655,6 +703,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_encoder_capability_detection_failed(self, message: str) -> None:
+        self._encoder_capabilities_ready = False
         self.options_panel.notify_capability_detection_failed()
         self._append_log(self.tr.t("gui.log.encoder_detection_failed", error=message))
 
@@ -778,6 +827,13 @@ class MainWindow(QMainWindow):
         old_language = self.language
         old_ffmpeg_path = str(self.app_config.get("ffmpeg_path", "")).strip()
         self.app_config.update(values)
+        post_action = str(
+            values.get("post_encode_action", PostEncodeAction.DO_NOTHING.value)
+        )
+        with QSignalBlocker(self.post_encode_combo):
+            index = self.post_encode_combo.findData(post_action)
+            if index >= 0:
+                self.post_encode_combo.setCurrentIndex(index)
         self.options_panel.apply_analysis_profile_settings()
         self._persist_runtime_state()
         if values["language"] != old_language:
@@ -839,6 +895,12 @@ class MainWindow(QMainWindow):
 
         update_app_config(self.config_dir, merge)
 
+    def _post_encode_combo_changed(self) -> None:
+        action = self.post_encode_combo.currentData()
+        if action:
+            self.app_config["post_encode_action"] = action
+            self._persist_runtime_state()
+
     def _persist_runtime_state(self) -> None:
         if self._loading_initial_state:
             return
@@ -853,6 +915,9 @@ class MainWindow(QMainWindow):
         self.app_config.setdefault("encode_workers", 1)
         self.app_config.setdefault("log_level", "info")
         self.app_config["analysis_profile"] = self.options_panel.current_analysis_profile_name().value
+        self.app_config["post_encode_action"] = (
+            self.post_encode_combo.currentData() or PostEncodeAction.DO_NOTHING.value
+        )
 
         recent_paths = list(self.app_config.get("recent_paths", []))
         if source_text:
@@ -871,6 +936,7 @@ class MainWindow(QMainWindow):
             self.source_combo,
             self.preset_combo,
             self.output_edit,
+            self.post_encode_combo,
         ]:
             widget.setEnabled(enabled)
         self.options_panel.set_busy(not enabled)
@@ -958,12 +1024,27 @@ class MainWindow(QMainWindow):
         elif state == "awaiting_decision":
             self._append_log(self.tr.t("gui.log.queue_awaiting_decision"))
         elif state == "idle":
-            self._append_log(self.tr.t("gui.log.encode_done"))
-            self._maybe_publish_skipped_sources()
+            self._refresh_action_state()
 
-    def _eligible_skipped_pairs(self) -> list[tuple[EncodePlanItem, EncodeResult]]:
+    def _records_for_ids(self, item_ids: tuple[str, ...]) -> list[QueueItemRecord]:
+        records: list[QueueItemRecord] = []
+        for item_id in item_ids:
+            _row, record = self.queue_model.record_for_id(item_id)
+            if record is not None:
+                records.append(record)
+        return records
+
+    def _runtime_encoder_capabilities(self) -> dict:
+        capabilities = self.app_config.get("encoder_capabilities")
+        if not self._encoder_capabilities_ready or not isinstance(capabilities, dict):
+            raise RuntimeError(self.tr.t("gui.message.encoder_capabilities_not_ready"))
+        return capabilities
+
+    def _eligible_skipped_pairs(
+        self, records: list[QueueItemRecord]
+    ) -> list[tuple[EncodePlanItem, EncodeResult]]:
         eligible: list[tuple[EncodePlanItem, EncodeResult]] = []
-        for record in self.queue_model.records():
+        for record in records:
             if record.result is None:
                 continue
             if is_eligible_skipped_item(record.plan_item, record.result):
@@ -990,8 +1071,8 @@ class MainWindow(QMainWindow):
                     )
                 )
 
-    def _maybe_publish_skipped_sources(self) -> None:
-        grouped = group_skipped_output_pairs(self._eligible_skipped_pairs())
+    def _maybe_publish_skipped_sources(self, records: list[QueueItemRecord]) -> None:
+        grouped = group_skipped_output_pairs(self._eligible_skipped_pairs(records))
         if not any(grouped.values()):
             return
         copy_pairs = grouped[SkippedOutputPolicy.COPY]
@@ -1084,7 +1165,7 @@ class MainWindow(QMainWindow):
         )
         self._start_worker(worker, lambda plan, workdir=workdir: self._on_plan_ready(plan, workdir))
 
-    def _start_plan_for_files(self, files: list[Path]) -> None:
+    def _start_plan_for_files(self, files: Sequence[Path | VideoFileItem]) -> None:
         if not files:
             return
         options = self.options_panel.read_options()
@@ -1093,7 +1174,12 @@ class MainWindow(QMainWindow):
         ffmpeg_path = self._selected_ffmpeg()
         ffprobe_path = self._selected_ffprobe()
         self._persist_runtime_state()
-        file_items = [VideoFileItem(path=path.resolve(), relative_path=Path(path.name)) for path in files]
+        file_items = [
+            item
+            if isinstance(item, VideoFileItem)
+            else VideoFileItem(path=item.resolve(), relative_path=Path(item.name))
+            for item in files
+        ]
         self._append_log(self.tr.t("gui.log.planning"))
         self._set_status_snapshot("planning", "-", "-", "-", 0.0)
         worker = PlanWorker(
@@ -1148,7 +1234,11 @@ class MainWindow(QMainWindow):
         self.activity_log_window.activateWindow()
 
     def _on_plan_ready(self, plan, workdir: Path) -> None:
-        added = self.queue_manager.add_plan(plan, workdir)
+        try:
+            added = self.queue_manager.add_plan(plan, workdir)
+        except Exception as exc:
+            QMessageBox.critical(self, self.tr.t("gui.message.error"), str(exc))
+            return
         valid_items = [item for item in plan.items if not item.skip_reason]
         skipped_items = [item for item in plan.items if item.skip_reason]
         self._append_log(
@@ -1169,26 +1259,49 @@ class MainWindow(QMainWindow):
         rows = self._selected_rows_from_view(view)
         selected_record = self.queue_model.record_for_row(rows[0]) if rows else None
 
+        has_selection = bool(rows)
+        can_edit = has_selection and self.queue_model.can_edit_rows(rows) and not self.queue_busy
+        can_reconfigure = can_edit and self._encoder_capabilities_ready
+
         open_source_action = menu.addAction(self.tr.t("gui.menu.open_source_folder"))
         open_output_action = menu.addAction(self.tr.t("gui.menu.open_output_folder"))
         copy_source_action = menu.addAction(self.tr.t("gui.menu.copy_source_path"))
         copy_output_action = menu.addAction(self.tr.t("gui.menu.copy_output_path"))
         menu.addSeparator()
+
+        apply_options_action = menu.addAction(self.tr.t("gui.menu.apply_current_options"))
+        preset_sub_menu = menu.addMenu(self.tr.t("gui.menu.apply_preset"))
+        change_output_action = menu.addAction(self.tr.t("gui.menu.change_output_dir"))
+        menu.addSeparator()
+
         retry_action = menu.addAction(self.tr.t("gui.menu.retry_selected"))
         resolve_action = menu.addAction(self.tr.t("gui.menu.resolve_decision"))
         remove_action = menu.addAction(self.tr.t("gui.menu.remove_from_queue"))
         clear_completed_action = menu.addAction(self.tr.t("gui.menu.clear_completed"))
 
-        has_selection = bool(rows)
         open_source_action.setEnabled(has_selection)
         open_output_action.setEnabled(has_selection)
         copy_source_action.setEnabled(has_selection)
         copy_output_action.setEnabled(has_selection)
+        apply_options_action.setEnabled(can_reconfigure)
+        preset_sub_menu.setEnabled(can_reconfigure)
+        change_output_action.setEnabled(can_edit)
+
+        available_presets = list_presets(self.config_dir)
+        preset_actions: dict[object, str] = {}
+        for p_name in available_presets:
+            p_action = preset_sub_menu.addAction(p_name)
+            preset_actions[p_action] = p_name
+
         retry_action.setEnabled(has_selection and self.queue_model.can_retry_rows(rows) and not self.queue_busy)
         resolve_action.setEnabled(
             len(rows) == 1 and self.queue_model.can_resolve_row(rows[0]) and not self.queue_busy
         )
-        remove_action.setEnabled(has_selection and self.queue_model.can_remove_rows(rows) and not self.queue_busy)
+        remove_action.setEnabled(
+            has_selection
+            and self.queue_manager.can_remove_rows(rows)
+            and not self.queue_busy
+        )
         clear_completed_action.setEnabled(not self.queue_busy)
 
         action = menu.exec(view.viewport().mapToGlobal(pos))
@@ -1202,6 +1315,44 @@ class MainWindow(QMainWindow):
             self._copy_to_clipboard(str(selected_record.source_path))
         elif action == copy_output_action and selected_record is not None:
             self._copy_to_clipboard(str(selected_record.output_path))
+        elif action == apply_options_action and can_reconfigure:
+            opts = self.options_panel.read_options()
+            try:
+                updated = self.queue_model.apply_options_to_rows(
+                    rows,
+                    opts,
+                    config_dir=self.config_dir,
+                    runtime_capabilities=self._runtime_encoder_capabilities(),
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, self.tr.t("gui.message.error"), str(exc))
+            else:
+                if updated:
+                    self._append_log(self.tr.t("gui.log.batch_options_applied", count=updated))
+        elif action in preset_actions and can_reconfigure:
+            preset_name = preset_actions[action]
+            try:
+                opts = load_preset(preset_name, self.config_dir)
+                updated = self.queue_model.apply_options_to_rows(
+                    rows,
+                    opts,
+                    config_dir=self.config_dir,
+                    runtime_capabilities=self._runtime_encoder_capabilities(),
+                )
+                if updated:
+                    self._append_log(self.tr.t("gui.log.batch_preset_applied", count=updated, name=preset_name))
+            except Exception as exc:
+                QMessageBox.critical(self, self.tr.t("gui.message.error"), str(exc))
+        elif action == change_output_action and can_edit:
+            path = QFileDialog.getExistingDirectory(self, self.tr.t("gui.dialog.select_output_dir"))
+            if path:
+                try:
+                    updated = self.queue_model.apply_output_dir_to_rows(rows, Path(path))
+                except Exception as exc:
+                    QMessageBox.critical(self, self.tr.t("gui.message.error"), str(exc))
+                else:
+                    if updated:
+                        self._append_log(self.tr.t("gui.log.batch_output_dir_applied", count=updated, dir=path))
         elif action == retry_action:
             retried = self.queue_manager.retry_rows(rows)
             if retried:
@@ -1317,3 +1468,174 @@ class MainWindow(QMainWindow):
 
     def _open_folder(self, path: Path) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if self.active_worker is not None or self.queue_busy or self.queue_manager.is_busy():
+            event.ignore()
+            return
+        if event.mimeData().hasUrls():
+            urls = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
+            if urls:
+                event.acceptProposedAction()
+                return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        if self.active_worker is not None or self.queue_busy or self.queue_manager.is_busy():
+            event.ignore()
+            return
+        if event.mimeData().hasUrls():
+            urls = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
+            if urls:
+                event.acceptProposedAction()
+                return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        if self.active_worker is not None or self.queue_busy or self.queue_manager.is_busy():
+            event.ignore()
+            return
+        if event.mimeData().hasUrls():
+            urls = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
+            if urls:
+                event.acceptProposedAction()
+                self._handle_dropped_paths(urls)
+                return
+        super().dropEvent(event)
+
+    def _handle_dropped_paths(self, paths: list[Path]) -> None:
+        if (
+            not paths
+            or self.active_worker is not None
+            or self.queue_busy
+            or self.queue_manager.is_busy()
+        ):
+            return
+        existing_paths = [p.resolve() for p in paths if p.exists()]
+        if not existing_paths:
+            return
+        if len(existing_paths) == 1 and existing_paths[0].is_dir():
+            self.source_combo.setEditText(str(existing_paths[0]))
+            self._persist_runtime_state()
+            self._plan_current_source()
+            return
+
+        all_video_files: list[VideoFileItem] = []
+        for p in existing_paths:
+            if p.is_file():
+                if p.suffix.lower() in VIDEO_EXTENSIONS:
+                    all_video_files.append(
+                        VideoFileItem(path=p.resolve(), relative_path=Path(p.name))
+                    )
+            elif p.is_dir():
+                try:
+                    discovered = collect_video_files(p, recursive=self.options_panel.read_options().recursive)
+                    all_video_files.extend(discovered)
+                except Exception:
+                    pass
+        if not all_video_files:
+            self._append_log(self.tr.t("gui.log.no_video_files_dropped"))
+            return
+        if len(existing_paths) == 1 and existing_paths[0].is_file():
+            self.source_combo.setEditText(str(existing_paths[0]))
+            self._persist_runtime_state()
+        self._start_plan_for_files(all_video_files)
+
+    def _send_desktop_notification(self, title: str, message: str) -> None:
+        if self.tray_icon.isSystemTrayAvailable() and not self.tray_icon.icon().isNull():
+            if not self.tray_icon.isVisible():
+                self.tray_icon.show()
+            self.tray_icon.showMessage(title, message, QSystemTrayIcon.Information, 5000)
+        elif sys.platform == "darwin":
+            try:
+                import subprocess
+                subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        f'display notification "{message}" with title "{title}"',
+                    ],
+                    check=False,
+                    capture_output=True,
+                )
+            except Exception:
+                pass
+
+    def _on_queue_run_completed(self, completion: QueueRunCompletion) -> None:
+        records = self._records_for_ids(completion.item_ids)
+        self._append_log(self.tr.t("gui.log.encode_done"))
+        self._maybe_publish_skipped_sources(records)
+        self._handle_post_queue_finished(records)
+
+    def _space_savings_item(self, record: QueueItemRecord) -> SpaceSavingsItem:
+        outcomes = {
+            QueueItemStatus.DONE: SpaceSavingsOutcome.SUCCESS,
+            QueueItemStatus.FAILED: SpaceSavingsOutcome.FAILED,
+            QueueItemStatus.SKIPPED: SpaceSavingsOutcome.SKIPPED,
+            QueueItemStatus.NEEDS_DECISION: SpaceSavingsOutcome.NEEDS_DECISION,
+            QueueItemStatus.CANCELLED: SpaceSavingsOutcome.CANCELLED,
+        }
+        outcome = outcomes.get(record.status, SpaceSavingsOutcome.FAILED)
+        return SpaceSavingsItem(
+            outcome=outcome,
+            source_path=record.source_path,
+            output_path=record.output_path,
+            actual_output_bytes=(
+                record.result.actual_output_bytes if record.result is not None else None
+            ),
+        )
+
+    def _handle_post_queue_finished(self, records: list[QueueItemRecord]) -> None:
+        elapsed_sec = sum(float(record.elapsed_sec or 0.0) for record in records)
+        savings = calculate_space_savings(
+            [self._space_savings_item(record) for record in records],
+            total_elapsed_sec=elapsed_sec,
+        )
+        if savings.successful_files > 0:
+            report_lines = [
+                "==================================================",
+                f"🎉 {self.tr.t('gui.report.batch_complete')}",
+                f"- {self.tr.t('gui.report.successful_files')}: {savings.successful_files}/{savings.total_files}",
+                f"- {self.tr.t('gui.report.original_size')}: {format_size(savings.original_total_bytes)}",
+                f"- {self.tr.t('gui.report.compressed_size')}: {format_size(savings.compressed_total_bytes)}",
+                f"- {self.tr.t('gui.report.saved_space')}: {format_size(savings.saved_bytes)} ({savings.saved_ratio * 100:.1f}%)",
+                "==================================================",
+            ]
+            self._append_log("\n".join(report_lines))
+            if self.app_config.get("desktop_notifications", True):
+                self._send_desktop_notification(
+                    self.tr.t("app.title"),
+                    self.tr.t(
+                        "gui.notification.batch_done",
+                        count=savings.successful_files,
+                        saved=format_size(savings.saved_bytes),
+                        ratio=f"{savings.saved_ratio * 100:.1f}%",
+                    ),
+                )
+
+        post_action = parse_post_encode_action(self.app_config.get("post_encode_action", PostEncodeAction.DO_NOTHING.value))
+        if post_action != PostEncodeAction.DO_NOTHING and savings.successful_files > 0:
+            dialog = PowerActionCountdownDialog(self.tr, post_action, timeout_sec=30, parent=self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                if post_action == PostEncodeAction.QUIT:
+                    self.close()
+                elif post_action == PostEncodeAction.SLEEP:
+                    result = execute_power_action(post_action)
+                    if not result.success:
+                        message = self.tr.t(
+                            "gui.power.action_failed",
+                            action=self.tr.t(post_encode_action_key(post_action)),
+                            error=result.error or "unknown error",
+                        )
+                        self._append_log(message)
+                        QMessageBox.critical(self, self.tr.t("gui.message.error"), message)
+                elif post_action == PostEncodeAction.SHUTDOWN:
+                    result = execute_power_action(post_action)
+                    if not result.success:
+                        message = self.tr.t(
+                            "gui.power.action_failed",
+                            action=self.tr.t(post_encode_action_key(post_action)),
+                            error=result.error or "unknown error",
+                        )
+                        self._append_log(message)
+                        QMessageBox.critical(self, self.tr.t("gui.message.error"), message)

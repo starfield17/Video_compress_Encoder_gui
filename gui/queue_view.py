@@ -1,12 +1,15 @@
-from __future__ import annotations
+from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableView
 
 from gui.queue_model import FLEX_COLUMN_SPECS, FIXED_COLUMN_WIDTHS, QueueColumn
 
 
 class ResponsiveQueueTableView(QTableView):
+    filesDropped = Signal(list)
+
     _RELEVANT_EVENT_TYPES = {
         QEvent.Show,
         QEvent.Hide,
@@ -52,6 +55,40 @@ class ResponsiveQueueTableView(QTableView):
         if event.type() in {QEvent.LayoutRequest, QEvent.Polish}:
             self.schedule_reflow()
         return result
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if not self.acceptDrops():
+            event.ignore()
+            return
+        if event.mimeData().hasUrls():
+            urls = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
+            if urls:
+                event.acceptProposedAction()
+                return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        if not self.acceptDrops():
+            event.ignore()
+            return
+        if event.mimeData().hasUrls():
+            urls = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
+            if urls:
+                event.acceptProposedAction()
+                return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        if not self.acceptDrops():
+            event.ignore()
+            return
+        if event.mimeData().hasUrls():
+            urls = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
+            if urls:
+                event.acceptProposedAction()
+                self.filesDropped.emit(urls)
+                return
+        super().dropEvent(event)
 
     def eventFilter(self, watched: QObject, event) -> bool:
         result = super().eventFilter(watched, event)
