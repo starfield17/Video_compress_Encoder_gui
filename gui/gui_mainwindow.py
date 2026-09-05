@@ -35,6 +35,7 @@ from core.i18n import TranslationCatalog
 from core.models import (
     BackendChoice,
     CodecChoice,
+    DecisionActionCode,
     EncodeOptions,
     EncodePlanItem,
     EncodeResult,
@@ -1386,7 +1387,12 @@ class MainWindow(QMainWindow):
                 if record.result is not None:
                     for warning in record.result.external_subtitle_warnings:
                         self._append_log(warning)
-                self.queue_manager.reconcile_after_decision()
+                if choice == SizeMissDecision.RETRY:
+                    self.queue_manager.resume_after_decision(
+                        parse_encode_workers(self.app_config.get("encode_workers", 1))
+                    )
+                else:
+                    self.queue_manager.reconcile_after_decision()
             return
 
         options = self.queue_model.decision_options_for_row(row)
@@ -1403,7 +1409,17 @@ class MainWindow(QMainWindow):
                     action=decision.action_code.value,
                 )
             )
-            self.queue_manager.reconcile_after_decision()
+            if decision.action_code in {
+                DecisionActionCode.RELAX_SIZE,
+                DecisionActionCode.RELAX_QUALITY,
+                DecisionActionCode.CHANGE_MEDIA_BUDGET,
+                DecisionActionCode.REANALYZE,
+            }:
+                self.queue_manager.resume_after_decision(
+                    parse_encode_workers(self.app_config.get("encode_workers", 1))
+                )
+            else:
+                self.queue_manager.reconcile_after_decision()
 
     def _show_header_context_menu(self, view, pos: QPoint) -> None:
         menu = QMenu(self)

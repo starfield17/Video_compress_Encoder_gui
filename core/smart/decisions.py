@@ -59,7 +59,6 @@ def build_decision_options(result: QualitySearchResult) -> list[DecisionOption]:
             DecisionOption(
                 action_code=DecisionActionCode.REANALYZE,
                 requires_analysis=True,
-                parameters={"change_encoder": True},
             )
         )
     options.append(DecisionOption(action_code=DecisionActionCode.SKIP))

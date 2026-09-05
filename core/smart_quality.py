@@ -45,6 +45,7 @@ def analyze_quality(
     progress_callback: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
+    active_cpu_vmaf_jobs: int = 1,
 ) -> QualitySearchResult:
     """Forward the historical public call to the current workflow owner."""
     return _workflow.analyze_quality(
@@ -55,6 +56,7 @@ def analyze_quality(
         progress_callback=progress_callback,
         cancel_check=cancel_check,
         process_callback=process_callback,
+        active_cpu_vmaf_jobs=active_cpu_vmaf_jobs,
     )
 
 __all__ = [

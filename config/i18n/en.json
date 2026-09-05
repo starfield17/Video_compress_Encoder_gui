@@ -272,7 +272,7 @@
   "gui.decision.relax_size": "Allow output up to {value}",
   "gui.decision.relax_quality": "Lower sampled-window mean VMAF target to {value}",
   "gui.decision.change_media_budget": "Encode audio as AAC and retry",
-  "gui.decision.reanalyze": "Run Smart analysis again",
+  "gui.decision.reanalyze": "Run Smart analysis again with the current encoder",
   "gui.decision.skip": "Skip this file",
   "gui.decision.size_miss_title": "Encoded file exceeded the size limit",
   "gui.decision.size_miss_intro": "The complete encode for {file} was kept instead of deleted.",

@@ -272,7 +272,7 @@
   "gui.decision.relax_size": "允许成片最大到 {value}",
   "gui.decision.relax_quality": "把采样窗口平均 VMAF 下限降到 {value}",
   "gui.decision.change_media_budget": "音频改用 AAC 后重试",
-  "gui.decision.reanalyze": "重新运行 Smart 分析",
+  "gui.decision.reanalyze": "使用当前编码器重新运行 Smart 分析",
   "gui.decision.skip": "跳过这个文件",
   "gui.decision.size_miss_title": "成片超过体积上限",
   "gui.decision.size_miss_intro": "{file} 已经编码完成，程序没有删除它。",

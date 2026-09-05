@@ -43,6 +43,7 @@ class QueueExecuteWorker(QThread):
         self._cancel_event = threading.Event()
         self._pause_after_current_event = threading.Event()
         self._current_processes: dict[str, object] = {}
+        self._process_lock = threading.Lock()
 
     def _emit_log(self, message: str) -> None:
         self.log.emit(message)
@@ -51,14 +52,17 @@ class QueueExecuteWorker(QThread):
         self.progress.emit(event)
 
     def _set_current_process(self, slot: str, proc) -> None:
-        if proc is None:
-            self._current_processes.pop(slot, None)
-            return
-        self._current_processes[slot] = proc
+        with self._process_lock:
+            if proc is None:
+                self._current_processes.pop(slot, None)
+                return
+            self._current_processes[slot] = proc
 
     def cancel(self) -> None:
         self._cancel_event.set()
-        for proc in list(self._current_processes.values()):
+        with self._process_lock:
+            processes = list(self._current_processes.values())
+        for proc in processes:
             try:
                 proc.terminate()
             except Exception:
@@ -296,6 +300,19 @@ class QueueManager(QObject):
         if self._worker is not None:
             return
         self._reconcile_pending_run()
+
+    def resume_after_decision(self, max_workers: int) -> bool:
+        """Resume the pending run when a decision made work ready again."""
+        if self._worker is not None or self._pending_run is None:
+            return False
+        records = self._pending_records()
+        if not any(
+            record.status in {QueueItemStatus.QUEUED, QueueItemStatus.WAITING_ANALYSIS}
+            for record in records
+        ):
+            self._reconcile_pending_run()
+            return False
+        return self.start(max_workers=max_workers)
 
     def _pending_records(self) -> list[QueueItemRecord]:
         if self._pending_run is None:

@@ -148,6 +148,18 @@ class QueueRunCompletionTestCase(unittest.TestCase):
         self.assertIs(self.manager._pending_run, completion)
         self.manager._worker = None
 
+    def test_resume_after_decision_runs_ready_items_even_when_another_decision_remains(self) -> None:
+        ready = _record(self.root, "ready", QueueItemStatus.WAITING_ANALYSIS)
+        waiting = _record(self.root, "waiting", QueueItemStatus.NEEDS_DECISION)
+        self.model.add_records([ready, waiting])
+        completion = QueueRunCompletion("run-mixed", (ready.item_id, waiting.item_id))
+        self.manager._pending_run = completion
+        with patch("gui.queue_manager.QueueExecuteWorker") as worker_class:
+            self.assertTrue(self.manager.resume_after_decision(2))
+        execution_items = worker_class.call_args.args[0]
+        self.assertEqual([item.item_id for item in execution_items], [ready.item_id])
+        self.manager._worker = None
+
     def test_pending_run_records_cannot_be_removed_or_cleared(self) -> None:
         done = _record(self.root, "done", QueueItemStatus.DONE)
         decision = _record(self.root, "decision", QueueItemStatus.NEEDS_DECISION)

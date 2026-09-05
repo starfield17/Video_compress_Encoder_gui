@@ -15,7 +15,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable, TextIO, cast
 
-from .concurrency import analysis_concurrency_limit
 from .receipts import load_analysis_receipt, save_analysis_receipt
 from .runtime import (
     SOURCE_DECODE_SOFTWARE,
@@ -266,6 +265,7 @@ def analyze_quality(
     progress_callback: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
+    active_cpu_vmaf_jobs: int = 1,
 ) -> QualitySearchResult:
     if item.options.compression_mode != CompressionMode.SMART:
         raise ValueError("Quality analysis is only available in smart mode.")
@@ -284,7 +284,7 @@ def analyze_quality(
     runtime_support = select_vmaf_runtime(ffmpeg_path, model_spec)
 
     analysis_capabilities = detect_analysis_capabilities(ffmpeg_path)
-    active_cpu_vmaf_jobs = analysis_concurrency_limit()
+    active_cpu_vmaf_jobs = max(1, int(active_cpu_vmaf_jobs))
     profile = item.options.analysis_settings
     exact_plan = build_analysis_execution_plan(
         tier=AnalysisTier.EXACT,

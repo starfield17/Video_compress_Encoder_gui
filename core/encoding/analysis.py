@@ -87,6 +87,7 @@ def analyze_plan_item(
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None,
     extra_progress_context: dict[str, object] | None = None,
     constraint_policy: ConstraintPolicy | None = None,
+    active_cpu_vmaf_jobs: int = 1,
 ) -> EncodeResult | None:
     """Run Smart analysis and attach an accepted result to ``item``.
 
@@ -254,6 +255,7 @@ def run_analysis_phase(
                     progress_callback=progress_callback,
                     cancel_check=should_stop,
                     process_callback=slot_process if process_callback is not None else None,
+                    active_cpu_vmaf_jobs=workers,
                     extra_progress_context=context,
                     constraint_policy=constraint_policy,
                 )
