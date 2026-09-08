@@ -175,6 +175,32 @@ def _analysis_item(root: Path, *, max_refinement_rounds: int = 2) -> EncodePlanI
 
 
 class AnalysisSessionTestCase(unittest.TestCase):
+    def test_subset_reference_does_not_overwrite_search_and_expansion_reuses(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory))
+            extracted: list[Path] = []
+
+            def extract(command, *_args, **_kwargs):
+                path = Path(command[-1])
+                path.write_text(command[command.index("-ss") + 1])
+                extracted.append(path)
+
+            with patch("core.smart.session.run_logged", side_effect=extract):
+                session.ensure_references(session.exact_plan)
+                originals = {path: path.read_text() for path in session.references}
+                subset = [PlannedWindow("holdout:new", 73.0, 5.0, ("validation",))]
+                with patch("core.smart.session.score_candidate", return_value=QualityCandidateResult(
+                    video_bitrate_bps=900_000, min_vmaf=95.0, segment_vmaf=[95.0],
+                )):
+                    session.evaluate_planned_subset(900_000, subset)
+                self.assertEqual({path: path.read_text() for path in originals}, originals)
+                self.assertEqual(len(set(extracted)), 4)
+                session.planned_search.extend(subset)
+                session.reset_search_windows()
+                session.ensure_references(session.exact_plan)
+                self.assertEqual(len(extracted), 4)
+                self.assertEqual(session.references[-1].read_text(), "73.000")
+
     def _session(self, root: Path) -> AnalysisSession:
         item = _analysis_item(root)
         plans = {
