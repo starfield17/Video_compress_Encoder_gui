@@ -211,14 +211,10 @@ class MainWindowMaintenanceTestCase(unittest.TestCase):
                 current = self._record(root, "current", QueueItemStatus.FAILED)
                 window.queue_model.add_records([historical, current])
                 completion = QueueRunCompletion("run", (current.item_id,))
-                with (
-                    patch.object(window, "_maybe_publish_skipped_sources") as publish,
-                    patch.object(window, "_handle_post_queue_finished") as finish,
-                ):
+                with patch.object(window.queue_completion_handler, "handle") as finish:
                     window._on_queue_run_completed(completion)
 
-                publish.assert_called_once_with([current])
-                finish.assert_called_once_with([current])
+                finish.assert_called_once_with([current], window.tr, window.app_config)
         finally:
             window.close()
 
@@ -240,14 +236,14 @@ class MainWindowMaintenanceTestCase(unittest.TestCase):
                 )
                 with (
                     patch(
-                        "gui.gui_mainwindow.PowerActionCountdownDialog",
+                        "gui.queue_completion.PowerActionCountdownDialog",
                         return_value=dialog,
                     ),
-                    patch("gui.gui_mainwindow.execute_power_action", return_value=failure),
-                    patch("gui.gui_mainwindow.QMessageBox.critical") as critical,
-                    patch.object(window, "_append_log") as append_log,
+                    patch("gui.queue_completion.execute_power_action", return_value=failure),
+                    patch("gui.queue_completion.QMessageBox.critical") as critical,
+                    patch.object(window.queue_completion_handler, "_append_log") as append_log,
                 ):
-                    window._handle_post_queue_finished([record])
+                    window.queue_completion_handler.handle([record], window.tr, window.app_config)
 
                 critical.assert_called_once()
                 self.assertIn("permission denied", critical.call_args.args[2])

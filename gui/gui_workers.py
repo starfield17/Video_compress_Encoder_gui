@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import subprocess
 import threading
 from pathlib import Path
 from typing import Iterable
@@ -191,7 +192,7 @@ class EncodeWorker(QThread):
         self.ffprobe_path = ffprobe_path
         self.config_dir = config_dir
         self._cancel_event = threading.Event()
-        self._current_process = None
+        self._current_process: subprocess.Popen[str] | None = None
 
     def _emit_log(self, message: str) -> None:
         self.log.emit(message)
@@ -200,7 +201,7 @@ class EncodeWorker(QThread):
     def _emit_progress(self, event: ProgressEvent) -> None:
         self.progress.emit(event)
 
-    def _set_current_process(self, proc) -> None:
+    def _set_current_process(self, proc: subprocess.Popen[str] | None) -> None:
         self._current_process = proc
 
     def cancel(self) -> None:

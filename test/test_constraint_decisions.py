@@ -41,14 +41,10 @@ from core.models import (
     VmafRuntimeSupport,
 )
 from core.config.store import _default_app_config, smart_policies_from_config
-from core.smart_quality import (
-    apply_decision_to_options,
-    analyze_quality,
-    build_decision_options,
-    measurement_configuration_fingerprint,
-    quality_configuration_fingerprint,
-    reselect_from_candidates,
-)
+from core.smart.decisions import apply_decision_to_options, build_decision_options
+from core.smart.workflow import analyze_quality
+from core.smart.cache import measurement_configuration_fingerprint, quality_configuration_fingerprint
+from core.smart.bitrate import reselect_from_candidates
 from core.smart.sampling.planner import PlannedWindow, SamplePlan
 from core.smart.sampling.scout import SamplingResult
 from core.i18n import get_translator
@@ -655,7 +651,8 @@ class AnalysisReceiptTestCase(unittest.TestCase):
                 ),
                 patch("core.smart.workflow.discover_sample_plan", return_value=_three_window_sampling()),
                 patch("core.smart.workflow._run_logged"),
-                patch("core.smart.workflow._score_candidate", side_effect=score) as first_score,
+                patch("core.smart.session.run_logged"),
+                patch("core.smart.session.score_candidate", side_effect=score) as first_score,
             ):
                 progress_events: list[dict[str, object]] = []
                 first = analyze_quality(
@@ -696,7 +693,8 @@ class AnalysisReceiptTestCase(unittest.TestCase):
                     ),
                 ),
                 patch("core.smart.workflow._run_logged"),
-                patch("core.smart.workflow._score_candidate", side_effect=score) as second_score,
+                patch("core.smart.session.run_logged"),
+                patch("core.smart.session.score_candidate", side_effect=score) as second_score,
             ):
                 second = analyze_quality(ffmpeg, changed_policy, root, root / "analysis-2.log")
 

@@ -46,17 +46,26 @@ and Smart/Fixed control syncing.
 - `gui.queue_view` — `ResponsiveQueueTableView`, header resize modes, reflow, and the
   `create_queue_view()` factory. May use `gui.queue_model`'s column definitions.
 - `gui.queue_manager` — Qt worker/thread orchestration over the model.
+- `gui.queue_completion` — skipped-source publishing, reports, notifications and
+  confirmed post-run actions. `QueueCompletionHandler.handle(records, translator,
+  config)` receives only the completed run's records and current settings.
+  MainWindow supplies log/notify/close callbacks; the handler uses its parent
+  widget only for dialog ownership and never accesses MainWindow members.
 - The global `encode_workers` application setting controls concurrent full-file
   encodes. Queue workers preserve each plan item's encoder binding; concurrency
   is not a preset option and does not select or rotate backends.
 - View may depend on the model; model and state must not depend on the view.
 
-## MainWindow scope (evaluated 2026-08-21)
+## MainWindow scope
 
-`MainWindow` remains the GUI composition root. Its UI construction is split into
-same-class builder methods; avoid introducing pass-through controller objects. Revisit a
-`SourcePanel` / `QueueDashboard` extraction only when a cohesive feature has a narrow
-interface. Do not split by line count alone.
+`MainWindow` remains the GUI composition root and owns source selection, queue
+interaction and platform notification delivery. QueueManager decides when a run
+has completed; MainWindow resolves that run's IDs and delegates completion work
+to QueueCompletionHandler. UI construction remains in same-class builder methods.
+
+Pyright covers queue state/actions/model/manager, GUI workers and completion
+handling. QueueTableModel stores its application translator as `translator`,
+leaving Qt's `tr()` method intact.
 
 ## Canonical checks
 
@@ -64,5 +73,6 @@ interface. Do not split by line count alone.
 ruff check .
 pyright
 python -m unittest discover -s test -p "test_architecture.py" -v
+python -m unittest discover -s test -p "test_queue_completion.py" -v
 python -m unittest discover -s test -p "test_*.py" -v
 ```

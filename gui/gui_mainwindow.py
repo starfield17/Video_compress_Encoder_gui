@@ -37,9 +37,6 @@ from core.models import (
     CodecChoice,
     DecisionActionCode,
     EncodeOptions,
-    EncodePlanItem,
-    EncodeResult,
-    SkippedOutputPolicy,
     VideoFileItem,
 )
 from core.config import (
@@ -53,17 +50,10 @@ from core.config import (
 )
 from core.media import (
     PostEncodeAction,
-    SpaceSavingsItem,
-    SpaceSavingsOutcome,
     VIDEO_EXTENSIONS,
-    calculate_space_savings,
     collect_video_files,
-    execute_power_action,
-    group_skipped_output_pairs,
-    is_eligible_skipped_item,
     parse_post_encode_action,
     post_encode_action_key,
-    publish_skipped_source,
 )
 from gui.activity_log_window import ActivityLogWindow
 from gui.constraint_decision_dialog import (
@@ -73,10 +63,10 @@ from gui.constraint_decision_dialog import (
 )
 from gui.encode_options_panel import EncodeOptionsPanel
 from gui.gui_workers import EncoderCapabilityDetectWorker, PlanWorker
-from gui.power_action_dialog import PowerActionCountdownDialog
 from gui.preset_manager_dialog import PresetManagerDialog
+from gui.queue_completion import QueueCompletionHandler
 from gui.queue_manager import QueueManager, QueueRunCompletion
-from gui.queue_state import QueueItemRecord, QueueItemStatus
+from gui.queue_state import QueueItemRecord
 from gui.queue_model import QueueTableModel, format_duration, format_size
 from gui.queue_view import create_queue_view
 from gui.queue_window import QueueWindow
@@ -161,6 +151,12 @@ class MainWindow(QMainWindow):
         self.queue_manager = QueueManager(self.queue_model, self)
         self.activity_log_window = ActivityLogWindow(self.tr, self)
         self.queue_window = QueueWindow(self.tr, self.queue_model, self)
+        self.queue_completion_handler = QueueCompletionHandler(
+            parent=self,
+            append_log=self._append_log,
+            notify=self._send_desktop_notification,
+            close=self.close,
+        )
 
         self._build_ui()
         self._connect_signals()
@@ -1041,60 +1037,6 @@ class MainWindow(QMainWindow):
             raise RuntimeError(self.tr.t("gui.message.encoder_capabilities_not_ready"))
         return capabilities
 
-    def _eligible_skipped_pairs(
-        self, records: list[QueueItemRecord]
-    ) -> list[tuple[EncodePlanItem, EncodeResult]]:
-        eligible: list[tuple[EncodePlanItem, EncodeResult]] = []
-        for record in records:
-            if record.result is None:
-                continue
-            if is_eligible_skipped_item(record.plan_item, record.result):
-                eligible.append((record.plan_item, record.result))
-        return eligible
-
-    def _publish_skipped_pairs(self, pairs: list[tuple[EncodePlanItem, EncodeResult]]) -> None:
-        for item, _result in pairs:
-            published = publish_skipped_source(item)
-            if published.copied:
-                self._append_log(
-                    self.tr.t(
-                        "gui.log.skipped_source_copied",
-                        source=item.source_path.name,
-                        output=str(published.output_path),
-                    )
-                )
-            else:
-                self._append_log(
-                    self.tr.t(
-                        "gui.log.skipped_source_not_copied",
-                        source=item.source_path.name,
-                        reason=published.reason or "",
-                    )
-                )
-
-    def _maybe_publish_skipped_sources(self, records: list[QueueItemRecord]) -> None:
-        grouped = group_skipped_output_pairs(self._eligible_skipped_pairs(records))
-        if not any(grouped.values()):
-            return
-        copy_pairs = grouped[SkippedOutputPolicy.COPY]
-        ask_pairs = grouped[SkippedOutputPolicy.ASK]
-        if copy_pairs:
-            self._publish_skipped_pairs(copy_pairs)
-        if ask_pairs:
-            listing = "\n".join(
-                f"{item.source_path.name} → {item.output_path.name}" for item, _result in ask_pairs
-            )
-            answer = QMessageBox.question(
-                self,
-                self.tr.t("gui.dialog.copy_skipped_title"),
-                self.tr.t("gui.dialog.copy_skipped_text", files=listing),
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if answer != QMessageBox.Yes:
-                return
-            self._publish_skipped_pairs(ask_pairs)
-
     def _on_queue_error(self, message: str) -> None:
         self._append_log(f"{self.tr.t('gui.message.error')}: {message}")
         QMessageBox.critical(self, self.tr.t("gui.message.error"), message)
@@ -1579,79 +1521,4 @@ class MainWindow(QMainWindow):
 
     def _on_queue_run_completed(self, completion: QueueRunCompletion) -> None:
         records = self._records_for_ids(completion.item_ids)
-        self._append_log(self.tr.t("gui.log.encode_done"))
-        self._maybe_publish_skipped_sources(records)
-        self._handle_post_queue_finished(records)
-
-    def _space_savings_item(self, record: QueueItemRecord) -> SpaceSavingsItem:
-        outcomes = {
-            QueueItemStatus.DONE: SpaceSavingsOutcome.SUCCESS,
-            QueueItemStatus.FAILED: SpaceSavingsOutcome.FAILED,
-            QueueItemStatus.SKIPPED: SpaceSavingsOutcome.SKIPPED,
-            QueueItemStatus.NEEDS_DECISION: SpaceSavingsOutcome.NEEDS_DECISION,
-            QueueItemStatus.CANCELLED: SpaceSavingsOutcome.CANCELLED,
-        }
-        outcome = outcomes.get(record.status, SpaceSavingsOutcome.FAILED)
-        return SpaceSavingsItem(
-            outcome=outcome,
-            source_path=record.source_path,
-            output_path=record.output_path,
-            actual_output_bytes=(
-                record.result.actual_output_bytes if record.result is not None else None
-            ),
-        )
-
-    def _handle_post_queue_finished(self, records: list[QueueItemRecord]) -> None:
-        elapsed_sec = sum(float(record.elapsed_sec or 0.0) for record in records)
-        savings = calculate_space_savings(
-            [self._space_savings_item(record) for record in records],
-            total_elapsed_sec=elapsed_sec,
-        )
-        if savings.successful_files > 0:
-            report_lines = [
-                "==================================================",
-                f"🎉 {self.tr.t('gui.report.batch_complete')}",
-                f"- {self.tr.t('gui.report.successful_files')}: {savings.successful_files}/{savings.total_files}",
-                f"- {self.tr.t('gui.report.original_size')}: {format_size(savings.original_total_bytes)}",
-                f"- {self.tr.t('gui.report.compressed_size')}: {format_size(savings.compressed_total_bytes)}",
-                f"- {self.tr.t('gui.report.saved_space')}: {format_size(savings.saved_bytes)} ({savings.saved_ratio * 100:.1f}%)",
-                "==================================================",
-            ]
-            self._append_log("\n".join(report_lines))
-            if self.app_config.get("desktop_notifications", True):
-                self._send_desktop_notification(
-                    self.tr.t("app.title"),
-                    self.tr.t(
-                        "gui.notification.batch_done",
-                        count=savings.successful_files,
-                        saved=format_size(savings.saved_bytes),
-                        ratio=f"{savings.saved_ratio * 100:.1f}%",
-                    ),
-                )
-
-        post_action = parse_post_encode_action(self.app_config.get("post_encode_action", PostEncodeAction.DO_NOTHING.value))
-        if post_action != PostEncodeAction.DO_NOTHING and savings.successful_files > 0:
-            dialog = PowerActionCountdownDialog(self.tr, post_action, timeout_sec=30, parent=self)
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                if post_action == PostEncodeAction.QUIT:
-                    self.close()
-                elif post_action == PostEncodeAction.SLEEP:
-                    result = execute_power_action(post_action)
-                    if not result.success:
-                        message = self.tr.t(
-                            "gui.power.action_failed",
-                            action=self.tr.t(post_encode_action_key(post_action)),
-                            error=result.error or "unknown error",
-                        )
-                        self._append_log(message)
-                        QMessageBox.critical(self, self.tr.t("gui.message.error"), message)
-                elif post_action == PostEncodeAction.SHUTDOWN:
-                    result = execute_power_action(post_action)
-                    if not result.success:
-                        message = self.tr.t(
-                            "gui.power.action_failed",
-                            action=self.tr.t(post_encode_action_key(post_action)),
-                            error=result.error or "unknown error",
-                        )
-                        self._append_log(message)
-                        QMessageBox.critical(self, self.tr.t("gui.message.error"), message)
+        self.queue_completion_handler.handle(records, self.tr, self.app_config)

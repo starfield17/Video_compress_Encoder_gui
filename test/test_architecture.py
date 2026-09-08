@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 APP_PACKAGES = ("core", "cli", "gui")
 QT_ROOTS = {"PySide2", "PySide6", "PyQt5", "PyQt6", "qtpy", "Qt"}
-CORE_ROOT_MODULES = {"core", "core.i18n", "core.models", "core.progress_events", "core.smart_quality"}
+CORE_ROOT_MODULES = {"core", "core.i18n", "core.models", "core.progress_events"}
 CORE_PACKAGES = ("config", "media", "ffmpeg", "smart", "encoding")
 ALLOWED_CORE_PACKAGE_DEPENDENCIES = {
     "config": set(),
@@ -35,8 +37,8 @@ def _app_modules() -> dict[str, Path]:
     return {_module_name(path): path for path in paths if path.is_file()}
 
 
-def _resolve_relative(source: str, level: int, imported: str | None) -> str:
-    package_parts = source.split(".")[:-1]
+def _resolve_relative(source: str, level: int, imported: str | None, *, is_package: bool = False) -> str:
+    package_parts = source.split(".") if is_package else source.split(".")[:-1]
     if level > len(package_parts) + 1:
         return imported or ""
     base = package_parts[: len(package_parts) - level + 1]
@@ -55,7 +57,7 @@ def _imports(source: str, path: Path) -> list[str]:
             imported_names.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.level:
-                base = _resolve_relative(source, node.level, node.module)
+                base = _resolve_relative(source, node.level, node.module, is_package=path.name == "__init__.py")
             elif node.module:
                 base = node.module
             else:
@@ -77,6 +79,14 @@ def _is_qt_import(name: str) -> bool:
     top = _top_level(name)
     lower = top.lower()
     return top in QT_ROOTS or lower.startswith(("pyside", "pyqt")) or lower == "qt"
+
+
+def _layer_violations(source: str, path: Path) -> list[str]:
+    layer = _top_level(source)
+    allowed = set(sys.stdlib_module_names) | {layer, "core"}
+    if layer == "gui" and source not in {"gui.queue_state", "gui.queue_actions"}:
+        allowed.add("PySide6")
+    return [name for name in _imports(source, path) if _top_level(name) not in allowed]
 
 
 def _dependency_graph() -> dict[str, set[str]]:
@@ -135,7 +145,6 @@ class ArchitectureTestCase(unittest.TestCase):
             "i18n.py",
             "models.py",
             "progress_events.py",
-            "smart_quality.py",
             *CORE_PACKAGES,
         }
         self.assertEqual(
@@ -144,6 +153,42 @@ class ArchitectureTestCase(unittest.TestCase):
             "core root is a small public contract surface; place implementation "
             "inside its owning capability package",
         )
+
+    def test_application_layers_use_only_allowed_dependencies(self) -> None:
+        violations = {
+            source: invalid
+            for source, path in _app_modules().items()
+            if _top_level(source) in APP_PACKAGES
+            and (invalid := _layer_violations(source, path))
+        }
+        self.assertFalse(violations, f"Application layer dependency violations: {violations}")
+
+    def test_layer_checks_reject_forbidden_imports(self) -> None:
+        cases = [
+            ("core.example", "example.py", "import requests", "requests"),
+            ("core.example", "example.py", "from gui import queue_model", "gui"),
+            ("gui.example", "example.py", "from cli import cli_entry", "cli"),
+            ("gui.example", "example.py", "import main", "main"),
+            ("gui.queue_state", "queue_state.py", "from PySide6.QtCore import QObject", "PySide6.QtCore"),
+            ("gui.queue_actions", "queue_actions.py", "import PySide6", "PySide6"),
+            ("core.example", "example.py", "from ..gui import queue_model", "gui"),
+            ("core", "__init__.py", "from ..gui import queue_model", "gui"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            for source, filename, code, expected in cases:
+                with self.subTest(source=source, code=code):
+                    path = Path(directory) / filename
+                    path.write_text(code, encoding="utf-8")
+                    self.assertIn(expected, _layer_violations(source, path))
+
+    def test_package_relative_imports_resolve_to_concrete_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "__init__.py"
+            path.write_text("from . import workflow\nfrom ..models import EncodePlanItem\n", encoding="utf-8")
+            imports = _imports("core.smart", path)
+            self.assertIn("core.smart.workflow", imports)
+            self.assertIn("core.models", imports)
+            self.assertEqual(_layer_violations("core.smart", path), [])
 
     def test_core_has_no_ui_or_entrypoint_dependencies(self) -> None:
         violations: list[str] = []
@@ -256,11 +301,13 @@ class ArchitectureTestCase(unittest.TestCase):
             "core.smart.bitrate",
             "core.smart.cache",
             "core.smart.measurement",
+            "core.smart.runtime",
         }
         forbidden_dependencies = {
-            "core.smart_quality",
             "core.smart.workflow",
             "core.smart.decisions",
+            "core.smart.session",
+            "core.smart.search",
         }
         violations = {
             module: sorted(graph[module] & forbidden_dependencies)
@@ -273,10 +320,37 @@ class ArchitectureTestCase(unittest.TestCase):
             f"into orchestration or decisions: {violations}",
         )
         self.assertFalse(
-            graph["core.smart.workflow"] & {"core.smart_quality", "core.smart.decisions"},
+            graph["core.smart.workflow"] & {"core.smart.decisions"},
             "Smart workflow must orchestrate focused modules without importing the "
-            "compatibility facade or queue decision policy",
+            "queue decision policy",
         )
+
+    def test_smart_session_and_search_have_no_upward_dependencies(self) -> None:
+        graph = _dependency_graph()
+        self.assertFalse(graph["core.smart.session"] & {
+            "core.smart", "core.smart.workflow", "core.smart.search", "core.smart.decisions",
+        })
+        self.assertFalse(graph["core.smart.search"] & {
+            "core.smart", "core.smart.workflow", "core.smart.decisions",
+        })
+        self.assertNotIn("core.smart_quality", graph)
+
+    def test_smart_public_surface_matches_adapter_operations(self) -> None:
+        tree = ast.parse((ROOT / "core/smart/__init__.py").read_text(encoding="utf-8"))
+        exports = next(
+            ast.literal_eval(node.value)
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets)
+        )
+        used = {"analyze_quality"}
+        for source, path in _app_modules().items():
+            if not source.startswith(("cli.", "gui.")):
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.ImportFrom) and node.module == "core.smart":
+                    used.update(alias.name for alias in node.names)
+        self.assertEqual(set(exports), used)
 
     def test_core_capability_dependency_direction(self) -> None:
         graph = _dependency_graph()
@@ -335,6 +409,14 @@ class ArchitectureTestCase(unittest.TestCase):
             "QueueTableModel should emit Qt notifications and delegate record mutations "
             f"to gui.queue_actions, not own domain/file side effects: {violations}",
         )
+
+    def test_queue_completion_is_consumed_only_by_main_window(self) -> None:
+        graph = _dependency_graph()
+        callers = {source for source, dependencies in graph.items() if "gui.queue_completion" in dependencies}
+        self.assertEqual(callers, {"gui.gui_mainwindow"})
+        self.assertFalse(graph["gui.queue_completion"] & {
+            "gui.gui_mainwindow", "gui.queue_manager", "gui.gui_workers", "gui.queue_view",
+        })
 
     def test_options_panel_does_not_probe_ffmpeg(self) -> None:
         path = _app_modules()["gui.encode_options_panel"]

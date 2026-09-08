@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import tempfile
 import unittest
 from dataclasses import replace
@@ -38,20 +39,19 @@ from core.models import (
     EncodePlanItem,
     EncoderInfo,
     MediaInfo,
+    OperationCancelledError,
     QualityCandidateResult,
     QualitySearchStatus,
     SizePrediction,
     VmafRuntimeSupport,
     VmafViewingContext,
 )
-from core.smart_quality import (
-    SMART_ANALYSIS_ALGORITHM_VERSION,
-    SMART_ANALYSIS_SEMAPHORE,
-    SMART_SAMPLE_SCHEME_VERSION,
-    analyze_quality,
-    measurement_configuration_fingerprint,
-    search_bitrate_candidates,
-)
+from core.smart.cache import SMART_ANALYSIS_ALGORITHM_VERSION, SMART_SAMPLE_SCHEME_VERSION, measurement_configuration_fingerprint
+from core.smart.concurrency import SMART_ANALYSIS_SEMAPHORE
+from core.smart.workflow import analyze_quality
+from core.smart.bitrate import calculate_smart_bitrate_budget, search_bitrate_candidates
+from core.smart.measurement import SmartCommandError
+from core.smart.session import AnalysisSession
 from core.smart.measurement import build_loopback_score_command as _build_loopback_score_command
 from core.smart.measurement import build_reference as _build_reference
 from core.smart.measurement import score_candidate as _score_candidate
@@ -172,6 +172,173 @@ def _analysis_item(root: Path, *, max_refinement_rounds: int = 2) -> EncodePlanI
         encoder_info=_encoder("libx265", BackendChoice.CPU, two_pass=True, preset="slow"),
         options=options,
     )
+
+
+class AnalysisSessionTestCase(unittest.TestCase):
+    def _session(self, root: Path) -> AnalysisSession:
+        item = _analysis_item(root)
+        plans = {
+            tier: build_analysis_execution_plan(
+                tier=tier,
+                encoder_info=item.encoder_info,
+                production_preset=item.options.encoder_preset,
+                production_two_pass=item.options.two_pass,
+                capabilities=_capabilities(),
+            )
+            for tier in AnalysisTier
+        }
+        return AnalysisSession(
+            ffmpeg_path=root / "ffmpeg", item=item, workdir=root,
+            temp_root=root, log_file=io.StringIO(),
+            budget=calculate_smart_bitrate_budget(item),
+            exact_plan=plans[AnalysisTier.EXACT], coarse_plan=plans[AnalysisTier.COARSE],
+            planned_search=list(_three_window_sampling().plan.search_windows),
+            scout_observations=[], initial_candidates=[],
+        )
+
+    def test_measurement_resources_and_counters_are_per_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            first = self._session(Path(directory))
+            second = self._session(Path(directory))
+            first.references.append(Path("first-reference.mkv"))
+            first.candidate_indexes[AnalysisTier.EXACT] += 1
+            first.planned_search.pop()
+            first.reset_search_windows()
+            self.assertEqual(second.references, [])
+            self.assertEqual(second.candidate_indexes[AnalysisTier.EXACT], 0)
+            self.assertEqual(len(second.windows), 3)
+            self.assertEqual(len(second.planned_search), 3)
+            self.assertEqual(len(first.windows), 2)
+
+    def test_subset_restores_search_state_on_success_and_cancellation(self) -> None:
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled), tempfile.TemporaryDirectory() as directory:
+                session = self._session(Path(directory))
+                session.references = [Path("search-reference.mkv")]
+                session.hardest_window = 2
+                windows, references = session.windows, session.references
+                holdout = _sampling_with_holdout().plan.holdout_windows[0]
+                expected = QualityCandidateResult(video_bitrate_bps=900_000, min_vmaf=97, segment_vmaf=[97])
+
+                def evaluate(_bitrate, _plan):
+                    self.assertEqual(len(session.windows), 1)
+                    self.assertEqual(session.windows[0].start_sec, holdout.start_sec)
+                    self.assertEqual(session.references, [])
+                    self.assertEqual(session.hardest_window, 0)
+                    session.exact_plan = cpu_vmaf_plan(session.exact_plan, reason="test fallback")
+                    if cancelled:
+                        raise OperationCancelledError("cancelled")
+                    return expected
+
+                with patch.object(session, "evaluate", side_effect=evaluate):
+                    if cancelled:
+                        with self.assertRaises(OperationCancelledError):
+                            session.evaluate_planned_subset(900_000, [holdout])
+                    else:
+                        self.assertIs(session.evaluate_planned_subset(900_000, [holdout]), expected)
+                self.assertIs(session.windows, windows)
+                self.assertIs(session.references, references)
+                self.assertEqual(session.hardest_window, 2)
+                self.assertEqual(session.exact_plan.fallback_reason, "test fallback")
+
+    def test_decode_fallback_updates_both_tiers_and_is_not_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory))
+            session.exact_plan = replace(session.exact_plan, source_decode_acceleration=SOURCE_DECODE_VIDEOTOOLBOX)
+            session.coarse_plan = replace(session.coarse_plan, source_decode_acceleration=SOURCE_DECODE_VIDEOTOOLBOX)
+            failure = SmartCommandError(1, ["ffmpeg"], "reference extraction", "hardware unavailable")
+            with patch("core.smart.session.run_logged", side_effect=[failure, "", "", ""]) as run:
+                active = session.ensure_references(session.coarse_plan)
+                self.assertEqual(run.call_count, 4)
+            self.assertEqual(active.source_decode_acceleration, SOURCE_DECODE_SOFTWARE)
+            self.assertEqual(session.exact_plan.source_decode_acceleration, SOURCE_DECODE_SOFTWARE)
+            self.assertEqual(session.coarse_plan.source_decode_acceleration, SOURCE_DECODE_SOFTWARE)
+            with patch("core.smart.session.run_logged") as run:
+                session.ensure_references(session.exact_plan)
+                run.assert_not_called()
+
+    def test_cuda_fallback_persists_for_subsequent_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory))
+            session.references = [Path(f"reference-{index}.mkv") for index in range(3)]
+            session.exact_plan = replace(session.exact_plan, vmaf_backend=VmafBackend.CUDA)
+            session.coarse_plan = replace(session.coarse_plan, vmaf_backend=VmafBackend.CUDA)
+            failure = SmartCommandError(1, ["ffmpeg"], "VMAF", "CUDA unavailable")
+            candidate = QualityCandidateResult(video_bitrate_bps=900_000, min_vmaf=97, segment_vmaf=[97]*3)
+            with patch("core.smart.session.score_candidate", side_effect=[failure, candidate, candidate]) as score:
+                session.evaluate(900_000, session.coarse_plan)
+                session.evaluate(900_000, session.exact_plan)
+            self.assertEqual(
+                [call.kwargs["plan"].vmaf_backend for call in score.call_args_list],
+                [VmafBackend.CUDA, VmafBackend.CPU, VmafBackend.CPU],
+            )
+            self.assertEqual(session.exact_plan.vmaf_backend, VmafBackend.CPU)
+            self.assertEqual(session.coarse_plan.vmaf_backend, VmafBackend.CPU)
+
+    def test_workflow_persists_actual_fallback_identity_and_reports_write_failure(self) -> None:
+        for write_fails in (False, True):
+            with self.subTest(write_fails=write_fails), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                item = _analysis_item(root)
+                ffmpeg = root / "ffmpeg"
+                ffmpeg.write_bytes(b"binary")
+                events = []
+                backends = []
+
+                def plan_for(**kwargs):
+                    return replace(build_analysis_execution_plan(**kwargs), vmaf_backend=VmafBackend.CUDA)
+
+                def score(*args, **kwargs):
+                    backends.append(kwargs["plan"].vmaf_backend)
+                    if len(backends) == 1:
+                        raise SmartCommandError(1, ["ffmpeg"], "VMAF", "CUDA unavailable")
+                    return QualityCandidateResult(
+                        video_bitrate_bps=args[3], min_vmaf=99, segment_vmaf=[99]*3,
+                        observed_video_bitrate_bps=args[3],
+                    )
+
+                with (
+                    patch("core.smart.workflow.select_vmaf_runtime", return_value=VmafRuntimeSupport(VmafBackend.CUDA, "vmaf_v1.0.16_3d0h", True)),
+                    patch("core.smart.workflow.detect_analysis_capabilities", return_value=_capabilities()),
+                    patch("core.smart.workflow.build_analysis_execution_plan", side_effect=plan_for),
+                    patch("core.smart.workflow.discover_sample_plan", return_value=_three_window_sampling()),
+                    patch("core.smart.session.run_logged"),
+                    patch("core.smart.session.score_candidate", side_effect=score),
+                    patch("core.smart.workflow.save_analysis_receipt", side_effect=OSError("disk full") if write_fails else None) as save,
+                ):
+                    result = analyze_quality(ffmpeg, item, root, root / "analysis.log", progress_callback=events.append)
+
+                self.assertEqual(result.status, QualitySearchStatus.FOUND)
+                self.assertEqual(backends[0], VmafBackend.CUDA)
+                self.assertTrue(all(backend == VmafBackend.CPU for backend in backends[1:]))
+                save.assert_called_once()
+                receipt = save.call_args.args[1]
+                self.assertEqual(receipt.measurement_fingerprint, result.measurement_fingerprint)
+                self.assertEqual(result.measurement_fingerprint, measurement_configuration_fingerprint(
+                    ffmpeg, item, vmaf_backend=VmafBackend.CPU, vmaf_subsample=EXACT_VMAF_SUBSAMPLE,
+                ))
+                failures = [event for event in events if event.get("state") == "receipt_write_failed"]
+                self.assertEqual(len(failures), int(write_fails))
+                if write_fails:
+                    self.assertEqual(failures[0]["message"], "disk full")
+
+    def test_workflow_cancellation_cleans_temporary_resources_without_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            item = _analysis_item(root)
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"binary")
+            with (
+                patch("core.smart.workflow.select_vmaf_runtime", return_value=VmafRuntimeSupport(VmafBackend.CPU, "vmaf_v1.0.16_3d0h", True)),
+                patch("core.smart.workflow.detect_analysis_capabilities", return_value=_capabilities()),
+                patch("core.smart.workflow.discover_sample_plan", return_value=_three_window_sampling()),
+                patch("core.smart.session.run_logged", side_effect=OperationCancelledError("cancelled")),
+                patch("core.smart.workflow.save_analysis_receipt") as save,
+            ):
+                with self.assertRaises(OperationCancelledError):
+                    analyze_quality(ffmpeg, item, root, root / "analysis.log")
+            save.assert_not_called()
+            self.assertEqual(list(root.glob("smart-analysis-*")), [])
 
 
 class AnalysisCapabilityParsingTestCase(unittest.TestCase):
@@ -515,7 +682,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 6)
             self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 8)
             self.assertEqual(ANALYSIS_RECEIPT_SCHEMA_VERSION, 5)
-            from core.smart_quality import measurement_configuration_payload
+            from core.smart.cache import measurement_configuration_payload
 
             payload = measurement_configuration_payload(ffmpeg, item, vmaf_backend=VmafBackend.CPU)
             self.assertEqual(payload["sample_scheme_version"], 6)
@@ -622,7 +789,8 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                 patch("core.smart.workflow.detect_analysis_capabilities", return_value=_capabilities()),
                 patch("core.smart.workflow.discover_sample_plan", return_value=_three_window_sampling()),
                 patch("core.smart.workflow._run_logged"),
-                patch("core.smart.workflow._score_candidate", side_effect=score),
+                patch("core.smart.session.run_logged"),
+                patch("core.smart.session.score_candidate", side_effect=score),
             ):
                 result = analyze_quality(ffmpeg, item, root, root / "log.txt")
 
@@ -669,7 +837,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                             "core.smart.workflow.discover_sample_plan",
                             side_effect=failure,
                         ),
-                        patch("core.smart.workflow._score_candidate") as score,
+                        patch("core.smart.session.score_candidate") as score,
                     ):
                         result = analyze_quality(
                             ffmpeg, item, root, root / "log.txt"
@@ -716,8 +884,9 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                 patch("core.smart.workflow.detect_analysis_capabilities", return_value=_capabilities()),
                 patch("core.smart.workflow.discover_sample_plan", return_value=_sampling_with_holdout()),
                 patch("core.smart.workflow._run_logged"),
-                patch("core.smart.workflow._score_candidate", side_effect=score),
-                patch("core.smart.workflow.search_bitrate_candidates", side_effect=search),
+                patch("core.smart.session.run_logged"),
+                patch("core.smart.session.score_candidate", side_effect=score),
+                patch("core.smart.search.search_bitrate_candidates", side_effect=search),
             ):
                 result = analyze_quality(
                     ffmpeg,
@@ -764,9 +933,10 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                     side_effect=AssertionError("receipt windows should be reused"),
                 ),
                 patch("core.smart.workflow._run_logged"),
-                patch("core.smart.workflow._score_candidate", side_effect=score),
+                patch("core.smart.session.run_logged"),
+                patch("core.smart.session.score_candidate", side_effect=score),
                 patch(
-                    "core.smart.workflow.search_bitrate_candidates",
+                    "core.smart.search.search_bitrate_candidates",
                     side_effect=search,
                 ),
             ):
@@ -828,10 +998,11 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                 patch("core.smart.workflow.detect_analysis_capabilities", return_value=_capabilities()),
                 patch("core.smart.workflow.discover_sample_plan", return_value=_sampling_with_holdout()),
                 patch("core.smart.workflow._run_logged"),
-                patch("core.smart.workflow._score_candidate", side_effect=score),
-                patch("core.smart.workflow.search_bitrate_candidates", side_effect=search),
+                patch("core.smart.session.run_logged"),
+                patch("core.smart.session.score_candidate", side_effect=score),
+                patch("core.smart.search.search_bitrate_candidates", side_effect=search),
                 patch(
-                    "core.smart.workflow._measure_size_only",
+                    "core.smart.search.measure_size_only",
                     return_value=[1_000_000, 1_100_000],
                 ) as calibrate,
             ):
@@ -866,7 +1037,8 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                 patch("core.smart.workflow.detect_analysis_capabilities", return_value=_capabilities()),
                 patch("core.smart.workflow.discover_sample_plan", return_value=_sampling_with_holdout()),
                 patch("core.smart.workflow._run_logged"),
-                patch("core.smart.workflow._score_candidate", side_effect=score),
+                patch("core.smart.session.run_logged"),
+                patch("core.smart.session.score_candidate", side_effect=score),
             ):
                 result = analyze_quality(ffmpeg, item, root, root / "log.txt")
             self.assertEqual(result.status, QualitySearchStatus.FAILED)
@@ -928,8 +1100,9 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                 patch("core.smart.workflow.discover_sample_plan", return_value=_three_window_sampling()),
                 patch("core.smart.workflow.build_analysis_execution_plan") as planner,
                 patch("core.smart.workflow._run_logged"),
-                patch("core.smart.workflow._score_candidate_loopback", side_effect=fake_loopback),
-                patch("core.smart.workflow._score_candidate", side_effect=fake_score),
+                patch("core.smart.session.run_logged"),
+                patch("core.smart.session.score_candidate_loopback", side_effect=fake_loopback),
+                patch("core.smart.session.score_candidate", side_effect=fake_score),
             ):
                 def plan_for(*, tier, **kwargs):
                     return build_analysis_execution_plan(
@@ -956,7 +1129,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             encoder_info=_encoder("hevc_videotoolbox", BackendChoice.VIDEOTOOLBOX),
             options=EncodeOptions(),
         )
-        from core.smart_quality import SampleWindow, SmartCommandError
+        from core.smart.measurement import SampleWindow, SmartCommandError
 
         command = _build_reference(
             Path("ffmpeg"),

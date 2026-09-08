@@ -1,8 +1,8 @@
 # Core package guide
 
 The root of `core` is intentionally limited to shared public contracts:
-`models.py`, `progress_events.py`, `i18n.py`, and the legacy
-`smart_quality.py` facade. Implementation belongs to one capability package:
+`models.py`, `progress_events.py`, and `i18n.py`.
+Implementation belongs to one capability package:
 
 - `config` — application paths, configuration and preset persistence.
 - `media` — media-domain paths, files, subtitles, skipped outputs and validation.
@@ -35,3 +35,6 @@ in `smart/AGENTS.md` and `encoding/AGENTS.md`. Run targeted checks with:
 ```text
 python -m unittest discover -s test -p "test_architecture.py" -v
 ```
+
+The retired `core.smart_quality` import path is removed. Application adapters
+use `core.smart`; implementation tests import the concrete owner they exercise.

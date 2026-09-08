@@ -108,7 +108,7 @@ class QueueTableModel(QAbstractTableModel):
 
     def __init__(self, tr: Translator, parent=None) -> None:
         super().__init__(parent)
-        self.tr = tr
+        self.translator = tr
         self._records: list[QueueItemRecord] = []
         self._metrics = QueueMetrics()
 
@@ -122,35 +122,35 @@ class QueueTableModel(QAbstractTableModel):
             return 0
         return COLUMN_COUNT
 
-    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
-        if role != Qt.DisplayRole:
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
+        if role != Qt.ItemDataRole.DisplayRole:
             return None
-        if orientation == Qt.Vertical:
+        if orientation == Qt.Orientation.Vertical:
             return section + 1
         labels = {
-            QueueColumn.NAME: self.tr.t("gui.table.name"),
-            QueueColumn.FOLDER: self.tr.t("gui.table.folder"),
-            QueueColumn.RESOLUTION: self.tr.t("gui.table.resolution"),
-            QueueColumn.DURATION: self.tr.t("gui.table.duration"),
-            QueueColumn.SOURCE_BITRATE: self.tr.t("gui.table.source_bitrate"),
-            QueueColumn.TARGET_BITRATE: self.tr.t("gui.table.target_bitrate"),
-            QueueColumn.QUALITY: self.tr.t("gui.table.quality"),
-            QueueColumn.ENCODER: self.tr.t("gui.table.encoder"),
-            QueueColumn.OUTPUT: self.tr.t("gui.table.output"),
-            QueueColumn.TAGS: self.tr.t("gui.table.tags"),
-            QueueColumn.STATUS: self.tr.t("gui.table.status"),
-            QueueColumn.PROGRESS: self.tr.t("gui.table.progress"),
+            QueueColumn.NAME: self.translator.t("gui.table.name"),
+            QueueColumn.FOLDER: self.translator.t("gui.table.folder"),
+            QueueColumn.RESOLUTION: self.translator.t("gui.table.resolution"),
+            QueueColumn.DURATION: self.translator.t("gui.table.duration"),
+            QueueColumn.SOURCE_BITRATE: self.translator.t("gui.table.source_bitrate"),
+            QueueColumn.TARGET_BITRATE: self.translator.t("gui.table.target_bitrate"),
+            QueueColumn.QUALITY: self.translator.t("gui.table.quality"),
+            QueueColumn.ENCODER: self.translator.t("gui.table.encoder"),
+            QueueColumn.OUTPUT: self.translator.t("gui.table.output"),
+            QueueColumn.TAGS: self.translator.t("gui.table.tags"),
+            QueueColumn.STATUS: self.translator.t("gui.table.status"),
+            QueueColumn.PROGRESS: self.translator.t("gui.table.progress"),
         }
         return labels.get(QueueColumn(section), "")
 
-    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
         record = self._records[index.row()]
         column = QueueColumn(index.column())
         media = record.media_info
 
-        if role == Qt.DisplayRole:
+        if role == Qt.ItemDataRole.DisplayRole:
             if column == QueueColumn.NAME:
                 return record.source_path.name
             if column == QueueColumn.FOLDER:
@@ -187,10 +187,10 @@ class QueueTableModel(QAbstractTableModel):
             if column == QueueColumn.STATUS:
                 if record.status == QueueItemStatus.ANALYZING and record.analysis_candidate_limit:
                     return (
-                        f"{self.tr.t(status_key(record.status))} "
+                        f"{self.translator.t(status_key(record.status))} "
                         f"{record.analysis_candidate_index}/{record.analysis_candidate_limit}"
                     )
-                return self.tr.t(status_key(record.status))
+                return self.translator.t(status_key(record.status))
             if column == QueueColumn.PROGRESS:
                 if record.status in {
                     QueueItemStatus.QUEUED,
@@ -199,7 +199,7 @@ class QueueTableModel(QAbstractTableModel):
                 }:
                     return "-"
                 return f"{max(0.0, min(100.0, record.file_progress)):.1f}%"
-        elif role == Qt.ToolTipRole:
+        elif role == Qt.ItemDataRole.ToolTipRole:
             if column == QueueColumn.FOLDER:
                 return str(record.source_path.parent)
             if column == QueueColumn.OUTPUT:
@@ -207,7 +207,7 @@ class QueueTableModel(QAbstractTableModel):
             if column == QueueColumn.TAGS and record.error_summary:
                 return build_tooltip(record)
             return build_tooltip(record)
-        elif role == Qt.TextAlignmentRole:
+        elif role == Qt.ItemDataRole.TextAlignmentRole:
             if column in {
                 QueueColumn.RESOLUTION,
                 QueueColumn.DURATION,
@@ -217,8 +217,8 @@ class QueueTableModel(QAbstractTableModel):
                 QueueColumn.STATUS,
                 QueueColumn.PROGRESS,
             }:
-                return int(Qt.AlignCenter)
-        elif role == Qt.ForegroundRole and column in {QueueColumn.STATUS, QueueColumn.PROGRESS}:
+                return int(Qt.AlignmentFlag.AlignCenter)
+        elif role == Qt.ItemDataRole.ForegroundRole and column in {QueueColumn.STATUS, QueueColumn.PROGRESS}:
             palette = {
                 QueueItemStatus.RUNNING: QColor("#0B5394"),
                 QueueItemStatus.WAITING_ANALYSIS: QColor("#666666"),
@@ -233,39 +233,39 @@ class QueueTableModel(QAbstractTableModel):
                 QueueItemStatus.PAUSED: QColor("#7F6000"),
             }
             return palette.get(record.status)
-        elif role == Qt.DecorationRole and column == QueueColumn.STATUS:
+        elif role == Qt.ItemDataRole.DecorationRole and column == QueueColumn.STATUS:
             style = QApplication.style()
             if style is None:
                 return None
             if record.status in ACTIVE_ITEM_STATUSES:
-                return style.standardIcon(QStyle.SP_MediaPlay)
+                return style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
             if record.status == QueueItemStatus.DONE:
-                return style.standardIcon(QStyle.SP_DialogApplyButton)
+                return style.standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton)
             if record.status == QueueItemStatus.FAILED:
-                return style.standardIcon(QStyle.SP_MessageBoxCritical)
+                return style.standardIcon(QStyle.StandardPixmap.SP_MessageBoxCritical)
             if record.status == QueueItemStatus.NEEDS_DECISION:
-                return style.standardIcon(QStyle.SP_MessageBoxWarning)
+                return style.standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning)
             if record.status == QueueItemStatus.CANCELLED:
-                return style.standardIcon(QStyle.SP_DialogCancelButton)
+                return style.standardIcon(QStyle.StandardPixmap.SP_DialogCancelButton)
             if record.status == QueueItemStatus.SKIPPED:
-                return style.standardIcon(QStyle.SP_MessageBoxWarning)
+                return style.standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning)
             if record.status == QueueItemStatus.PAUSED:
-                return style.standardIcon(QStyle.SP_MediaPause)
-        elif role == Qt.UserRole:
+                return style.standardIcon(QStyle.StandardPixmap.SP_MediaPause)
+        elif role == Qt.ItemDataRole.UserRole:
             return record.item_id
         return None
 
-    def flags(self, index: QModelIndex) -> Qt.ItemFlags:
-        default_flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+    def flags(self, index: QModelIndex) -> Qt.ItemFlag:
+        default_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         if not index.isValid():
-            return default_flags | Qt.ItemIsDropEnabled
+            return default_flags | Qt.ItemFlag.ItemIsDropEnabled
         record = self._records[index.row()]
         if record.status not in ACTIVE_ITEM_STATUSES:
-            default_flags |= Qt.ItemIsDragEnabled
-        return default_flags | Qt.ItemIsDropEnabled
+            default_flags |= Qt.ItemFlag.ItemIsDragEnabled
+        return default_flags | Qt.ItemFlag.ItemIsDropEnabled
 
-    def supportedDropActions(self) -> Qt.DropActions:
-        return Qt.MoveAction
+    def supportedDropActions(self) -> Qt.DropAction:
+        return Qt.DropAction.MoveAction
 
     def moveRows(
         self,
@@ -300,12 +300,12 @@ class QueueTableModel(QAbstractTableModel):
         return True
 
     def set_translator(self, tr: Translator) -> None:
-        self.tr = tr
+        self.translator = tr
         if self.rowCount() > 0:
             top_left = self.index(0, 0)
             bottom_right = self.index(self.rowCount() - 1, self.columnCount() - 1)
             self.dataChanged.emit(top_left, bottom_right)
-        self.headerDataChanged.emit(Qt.Horizontal, 0, self.columnCount() - 1)
+        self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, self.columnCount() - 1)
         self._emit_metrics_changed()
 
     def records(self) -> list[QueueItemRecord]:
@@ -508,8 +508,8 @@ class QueueTableModel(QAbstractTableModel):
 
     def can_retry_rows(self, rows: list[int]) -> bool:
         return any(
-            self.record_for_row(row) is not None
-            and self.record_for_row(row).status in {QueueItemStatus.FAILED, QueueItemStatus.CANCELLED}
+            (record := self.record_for_row(row)) is not None
+            and record.status in {QueueItemStatus.FAILED, QueueItemStatus.CANCELLED}
             for row in rows
         )
 

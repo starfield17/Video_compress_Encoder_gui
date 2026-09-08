@@ -12,9 +12,20 @@ import the concrete owner module.
 - `bitrate` owns budgets, candidate search and reselection.
 - `cache` owns measurement/quality fingerprints and receipt construction.
 - `measurement` owns FFmpeg/VMAF execution for one candidate.
-- `workflow` owns reuse, planning, coarse search, holdout promotion,
-  refinement and receipt persistence; it never imports `decisions`.
+- `session` owns one analysis call's references, candidate counters, measurement
+  callbacks and backend fallback state. Each call has its own session.
+- `search` owns coarse/exact search, size calibration, adaptive expansion,
+  holdout refinement and ambiguity checks. Its result carries candidates,
+  selection, terminal failure and the window history needed for receipts.
+- `workflow` owns validation, reuse, sampling setup, temporary/log resource
+  lifetime, stage calls and receipt persistence. It never imports `decisions`.
 - `decisions` owns user choice policy and preserved size-miss actions.
+
+Dependencies flow from `workflow` to `search` to `session` to measurement/runtime;
+lower owners never import orchestration, decisions or the package facade.
+The package API exports application operations only. Fingerprint builders,
+search utilities, measurement types and concurrency resources stay with their
+concrete owners; there is no `core.smart_quality` compatibility facade.
 
 Measurement identity includes the source, FFmpeg, bound encoder, measurement
 settings and sample scheme. Quality and size policy changes may reuse measured

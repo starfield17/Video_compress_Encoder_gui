@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import threading
+import subprocess
 import uuid
 from dataclasses import dataclass
 
@@ -42,7 +43,7 @@ class QueueExecuteWorker(QThread):
         self.max_workers = max_workers
         self._cancel_event = threading.Event()
         self._pause_after_current_event = threading.Event()
-        self._current_processes: dict[str, object] = {}
+        self._current_processes: dict[str, subprocess.Popen[str]] = {}
         self._process_lock = threading.Lock()
 
     def _emit_log(self, message: str) -> None:
@@ -51,7 +52,7 @@ class QueueExecuteWorker(QThread):
     def _emit_progress(self, event: ProgressEvent) -> None:
         self.progress.emit(event)
 
-    def _set_current_process(self, slot: str, proc) -> None:
+    def _set_current_process(self, slot: str, proc: subprocess.Popen[str] | None) -> None:
         with self._process_lock:
             if proc is None:
                 self._current_processes.pop(slot, None)

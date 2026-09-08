@@ -41,18 +41,10 @@ from core.models import (
     VmafViewingContext,
 )
 from core.config.store import encode_options_to_preset_data, preset_data_to_encode_options
-from core.smart_quality import (
-    SMART_ERROR_TAIL_CHARS,
-    SmartCommandError,
-    analyze_quality,
-    calculate_smart_bitrate_budget,
-    choose_smart_sample_windows,
-    measurement_configuration_fingerprint,
-    quality_configuration_fingerprint,
-    reselect_from_candidates,
-    resolve_max_output_ratio,
-    search_bitrate_candidates,
-)
+from core.smart.measurement import SMART_ERROR_TAIL_CHARS, SmartCommandError
+from core.smart.workflow import analyze_quality, choose_smart_sample_windows
+from core.smart.bitrate import calculate_smart_bitrate_budget, reselect_from_candidates, resolve_max_output_ratio, search_bitrate_candidates
+from core.smart.cache import measurement_configuration_fingerprint, quality_configuration_fingerprint
 from core.smart.measurement import run_logged as _run_logged
 from core.smart.measurement import score_candidate as _score_candidate
 from gui.gui_mainwindow import MainWindow
@@ -825,25 +817,6 @@ class SmartParallelExecutionTestCase(unittest.TestCase):
             max_output_bytes=max_bytes,
             fingerprint="fingerprint",
         )
-
-    def test_facade_default_path_does_not_rebind_workflow_globals(self) -> None:
-        from core import smart_quality
-        from core.smart import measurement as smart_measurement
-        from core.smart import workflow as smart_workflow
-
-        observed_score_hook: list[object] = []
-        expected = self._quality_result()
-
-        def fake_workflow(*_args, **_kwargs):
-            observed_score_hook.append(smart_workflow._score_candidate)
-            return expected
-
-        item = _item(Path("source.mov"), Path("output.mp4"), EncodeOptions())
-        with patch.object(smart_workflow, "analyze_quality", side_effect=fake_workflow):
-            actual = smart_quality.analyze_quality(Path("ffmpeg"), item, Path("workdir"), Path("analysis.log"))
-
-        self.assertIs(actual, expected)
-        self.assertEqual(observed_score_hook, [smart_measurement.score_candidate])
 
     def test_concurrent_workers_preserve_bindings_during_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
