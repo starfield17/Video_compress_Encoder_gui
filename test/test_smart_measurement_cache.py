@@ -10,14 +10,14 @@ from unittest.mock import patch
 from core.smart.measurement import score_candidate
 from core.smart.runtime import AnalysisTier
 from core.smart.vmaf import VmafWindowScore
-from test_analysis_runtime import AnalysisSessionTestCase
+import test_analysis_runtime as runtime_tests
 
 
 class WindowMeasurementCacheTest(unittest.TestCase):
     def test_reuse_expansion_parameter_change_and_forced_remeasurement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            session = AnalysisSessionTestCase()._session(root)
+            session = runtime_tests.AnalysisSessionTestCase()._session(root)
             references = [root / f"source-{index}.mkv" for index in range(3)]
             for reference in references:
                 reference.write_bytes(b"reference")
@@ -58,7 +58,7 @@ class WindowMeasurementCacheTest(unittest.TestCase):
     def test_partial_rejection_is_cached_by_window_not_list_position(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            session = AnalysisSessionTestCase()._session(root)
+            session = runtime_tests.AnalysisSessionTestCase()._session(root)
             references = [root / f"ref-{index}.mkv" for index in range(3)]
             for reference in references:
                 reference.write_bytes(b"reference")

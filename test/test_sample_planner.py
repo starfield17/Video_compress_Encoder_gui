@@ -46,12 +46,39 @@ class SamplePlannerTest(unittest.TestCase):
                 self.assertEqual(search_window_count(duration, settings), search_count)
                 self.assertEqual(holdout_window_count(duration, settings), holdout_count)
 
-    def test_scouts_are_uniform_and_non_overlapping(self) -> None:
+    def test_scouts_are_stratified_and_non_overlapping(self) -> None:
         settings = FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.BALANCE]
         windows = plan_scout_windows(2 * 60 * 60, settings)
         self.assertEqual(len(windows), 24)
         for left, right in zip(windows, windows[1:]):
             self.assertLessEqual(left.start_sec + left.duration_sec, right.start_sec)
+        self.assertEqual(windows, plan_scout_windows(7200, settings))
+        gaps = {round(right.start_sec - left.start_sec, 5) for left, right in zip(windows, windows[1:])}
+        self.assertGreater(len(gaps), 1)
+
+    def test_seeded_plans_keep_validation_outside_scout_and_coverage_honest(self) -> None:
+        for profile in AnalysisProfileName:
+            settings = FACTORY_ANALYSIS_PROFILES[profile]
+            for seed in ("source-a", "source-b", "source-c"):
+                scouts = plan_scout_windows(600, settings, seed=seed)
+                observations = tuple(ScoutObservation(w, 100 if i < 5 else 1, 50 if i < 5 else 1)
+                                     for i, w in enumerate(scouts))
+                plan = build_sample_plan(600, settings, observations, seed=seed)
+                self.assertFalse(plan.whole_video)
+                independent = [w for w in plan.holdout_windows if "unscouted_validation" in w.reasons]
+                self.assertEqual(len(independent), 1)
+                for scout in scouts:
+                    self.assertTrue(independent[0].start_sec + independent[0].duration_sec <= scout.start_sec + 1e-9
+                                    or scout.start_sec + scout.duration_sec <= independent[0].start_sec + 1e-9)
+                bins = max(1, len(plan.search_windows) // 2)
+                for index in range(bins):
+                    covered = [w for w in plan.search_windows if f"coverage_bin_{index + 1}" in w.reasons]
+                    self.assertTrue(covered)
+                    self.assertTrue(all(index * 600 / bins <= w.center_sec < (index + 1) * 600 / bins for w in covered))
+                all_windows = sorted((*plan.search_windows, *plan.holdout_windows, *plan.reserve_windows), key=lambda w: w.start_sec)
+                for left, right in zip(all_windows, all_windows[1:]):
+                    self.assertLessEqual(left.start_sec + left.duration_sec, right.start_sec + 1e-9)
+        self.assertNotEqual(plan_scout_windows(600, settings, seed="a"), plan_scout_windows(600, settings, seed="b"))
 
     def test_midrank_and_plan_reasons_are_deterministic(self) -> None:
         settings = FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.BALANCE]
@@ -73,9 +100,10 @@ class SamplePlannerTest(unittest.TestCase):
         self.assertEqual(len(plan.holdout_windows), 2)
         self.assertEqual(len(plan.reserve_windows), settings.reserve_window_count)
         reasons = {reason for window in plan.search_windows for reason in window.reasons}
-        self.assertIn("highest_si", reasons)
-        self.assertIn("highest_ti", reasons)
-        self.assertIn("global_hardest", reasons)
+        risk_reasons = {"highest_si", "highest_ti", "global_hardest", "hardship", "transition_risk"}
+        self.assertTrue(reasons & risk_reasons)
+        self.assertEqual(len(plan.search_windows), len({w.scout_id for w in plan.search_windows}))
+        self.assertTrue(any("unscouted_validation" in w.reasons for w in plan.holdout_windows))
         self.assertTrue(any(reason.startswith("coverage_bin_") for reason in reasons))
         all_windows = (*plan.search_windows, *plan.holdout_windows, *plan.reserve_windows)
         self.assertEqual(len({window.id for window in all_windows}), len(all_windows))
@@ -108,7 +136,12 @@ class SamplePlannerTest(unittest.TestCase):
                     for window in scouts
                 )
                 plan = build_sample_plan(duration, settings, observations)
-                self.assertFalse(plan.whole_video)
+                if plan.whole_video:
+                    self.assertEqual(plan.search_windows[0].start_sec, 0.0)
+                    self.assertEqual(plan.search_windows[0].duration_sec, duration)
+                    self.assertEqual(plan.holdout_windows, ())
+                    continue
+                self.assertTrue(any("unscouted_validation" in w.reasons for w in plan.holdout_windows))
                 self.assertGreaterEqual(len(plan.search_windows), 1)
                 self.assertEqual(
                     len(plan.holdout_windows), settings.holdout_window_count

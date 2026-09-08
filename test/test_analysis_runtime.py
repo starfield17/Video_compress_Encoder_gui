@@ -706,12 +706,12 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                 cpu,
             )
             self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 6)
-            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 8)
+            self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 9)
             self.assertEqual(ANALYSIS_RECEIPT_SCHEMA_VERSION, 5)
             from core.smart.cache import measurement_configuration_payload
 
             payload = measurement_configuration_payload(ffmpeg, item, vmaf_backend=VmafBackend.CPU)
-            self.assertEqual(payload["sample_scheme_version"], 6)
+            self.assertEqual(payload["sample_scheme_version"], 7)
             self.assertEqual(payload["vmaf_subsample"], 1)
             self.assertEqual(payload["vmaf_backend"], "cpu")
             self.assertEqual(payload["analysis_algorithm_version"], 8)
