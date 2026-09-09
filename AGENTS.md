@@ -26,6 +26,11 @@ verification, read `docs/release-map.md` before changing those three areas.
 - Publish an encoded file only through its validated temporary path. A Smart
   size miss is a user-visible `NEEDS_DECISION` result, not success or a silent
   skip, and its preserved file must not overwrite the requested output.
+- Keep committed code and documentation portable: no personal environment,
+  executable bundle or font paths. Evaluation tools accept explicit paths;
+  honor a user-specified FFmpeg without falling back to a system installation.
+- Smart reference and measurement reuse must identify actual window coordinates
+  and measurement settings, never a window's position in a list.
 
 ## Canonical commands
 
@@ -49,5 +54,8 @@ Run architecture checks alone with
 - For platform-sensitive changes, prefer targeted platform verification.
 - Before proposing a release tag, run `Verify/full`.
 - Release workflow is always full and may not be selectively reduced.
+- Keep Smart development, calibration and acceptance corpora separate. Do not
+  tune against acceptance results or treat synthetic tests as evidence of
+  real-world quality. Record tool versions, seeds and measured costs.
 
 See `docs/ci-workflows.md` for the routing policy and workflow profiles.

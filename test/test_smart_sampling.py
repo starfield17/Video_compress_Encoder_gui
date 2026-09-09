@@ -10,6 +10,17 @@ from core.smart.sampling.scout import _align_plan
 
 
 class SmartSamplingAlignmentTest(unittest.TestCase):
+    def test_unscouted_validation_is_not_probed_or_shifted(self) -> None:
+        blind = PlannedWindow("holdout:unscouted", 30.0, 5.0, ("unscouted_validation",))
+        plan = SamplePlan((), (), (blind,), False)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("core.smart.sampling.scout.build_scene_guard_command") as command:
+                aligned = _align_plan(plan, ffmpeg_path=Path("ffmpeg"), source_path=Path("source"),
+                                     source_duration_sec=60.0, temp_root=Path(directory),
+                                     run_command=lambda *_args: None, progress=lambda *_args: None)
+        command.assert_not_called()
+        self.assertEqual(aligned.holdout_windows, (blind,))
+
     def test_scene_alignment_preserves_original_non_overlap_contract(self) -> None:
         plan = SamplePlan(
             scout_windows=(),

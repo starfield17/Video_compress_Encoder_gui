@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, TextIO, cast
 
-from core.models import AnalysisProfileSettings, EncodePlanItem, QualityCandidateResult, VmafBackend
+from core.models import AnalysisProfileSettings, EncodePlanItem, OperationCancelledError, QualityCandidateResult, VmafBackend
 from core.progress_events import ProgressCallback, ProgressEvent
 from .bitrate import SmartBitrateBudget
 from .runtime import (
@@ -21,6 +22,7 @@ from .runtime import (
 )
 from .measurement import (
     SampleWindow,
+    WindowMeasurement,
     SmartCommandError,
     build_reference,
     log_timing,
@@ -85,6 +87,8 @@ class AnalysisSession:
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None = None
     windows: list[SampleWindow] = field(init=False)
     references: list[Path] = field(default_factory=list, init=False)
+    reference_cache: dict[tuple[SampleWindow, str], Path] = field(default_factory=dict, init=False)
+    measurement_cache: dict[str, WindowMeasurement] = field(default_factory=dict, init=False)
     hardest_window: int = field(default=0, init=False)
     candidate_indexes: dict[AnalysisTier, int] = field(
         default_factory=lambda: {AnalysisTier.COARSE: 0, AnalysisTier.EXACT: 0},
@@ -108,8 +112,18 @@ class AnalysisSession:
         if self.references:
             return plan
         active_plan = plan
+        references: list[Path] = []
         for index, window in enumerate(self.windows):
-            reference_path = self.temp_root / f"reference-{index}.mkv"
+            if self.cancel_check is not None and self.cancel_check():
+                raise OperationCancelledError("Smart analysis cancelled.")
+            key = (window, active_plan.source_decode_acceleration)
+            cached = self.reference_cache.get(key)
+            if cached is not None and cached.is_file():
+                references.append(cached)
+                log_timing(self.log_file, f"reference cache hit: {cached.name}")
+                continue
+            identity = f"{self.item.source_path.resolve()}:{window.start_sec:.9f}:{window.duration_sec:.9f}:{key[1]}"
+            reference_path = self.temp_root / f"reference-{hashlib.sha256(identity.encode()).hexdigest()[:24]}.mkv"
             extract_started = time.perf_counter()
             command = build_reference(
                 self.ffmpeg_path,
@@ -151,10 +165,14 @@ class AnalysisSession:
                 self.log_file,
                 f"reference extraction #{index + 1}: {time.perf_counter() - extract_started:.2f}s",
             )
-            self.references.append(reference_path)
+            references.append(reference_path)
+            self.reference_cache[(window, active_plan.source_decode_acceleration)] = reference_path
+        self.references = references
         return active_plan
 
-    def evaluate(self, bitrate_bps: int, plan: AnalysisExecutionPlan) -> QualityCandidateResult:
+    def evaluate(
+        self, bitrate_bps: int, plan: AnalysisExecutionPlan, *, force_remeasure: bool = False,
+    ) -> QualityCandidateResult:
         active_plan = self.ensure_references(plan)
         if plan.tier == AnalysisTier.EXACT:
             self.exact_plan = active_plan
@@ -202,6 +220,8 @@ class AnalysisSession:
                         process_callback=self.process_callback,
                         min_vmaf_target=float(self.item.options.min_vmaf),
                         window_order=order,
+                        measurement_cache=self.measurement_cache,
+                        force_remeasure=force_remeasure,
                     )
                 except (SmartCommandError, RuntimeError) as exc:
                     reason = f"loopback scoring failed; using legacy FFV1 path ({exc})"
@@ -226,6 +246,8 @@ class AnalysisSession:
                         plan=active_plan,
                         min_vmaf_target=float(self.item.options.min_vmaf),
                         window_order=order,
+                        measurement_cache=self.measurement_cache,
+                        force_remeasure=force_remeasure,
                     )
             else:
                 result = score_candidate(
@@ -244,6 +266,8 @@ class AnalysisSession:
                     plan=active_plan,
                     min_vmaf_target=float(self.item.options.min_vmaf),
                     window_order=order,
+                    measurement_cache=self.measurement_cache,
+                    force_remeasure=force_remeasure,
                 )
         except SmartCommandError:
             if active_plan.vmaf_backend != VmafBackend.CUDA:
@@ -269,13 +293,16 @@ class AnalysisSession:
                 plan=active_plan,
                 min_vmaf_target=float(self.item.options.min_vmaf),
                 window_order=order,
+                measurement_cache=self.measurement_cache,
+                force_remeasure=force_remeasure,
             )
         if len(result.segment_vmaf) == len(self.windows):
             self.hardest_window = _hardest_window_index(result)
         if (
             len(result.observed_window_bitrates) == len(self.planned_search)
-            and len(self.windows) == len(self.planned_search)
+            and self.windows == [sample_window(window) for window in self.planned_search]
             and self.scout_observations
+            and all(window.scout_id is not None for window in self.planned_search)
         ):
             assert self.item.media_info is not None
             ranked_risks = rank_scout_observations(self.scout_observations)

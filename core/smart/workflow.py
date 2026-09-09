@@ -287,7 +287,7 @@ def analyze_quality(
                 scout_windows=tuple(value.window for value in scout_observations),
                 search_windows=tuple(planned_search),
                 holdout_windows=tuple(planned_holdouts),
-                whole_video=not scout_observations,
+                whole_video=any("whole_video" in window.reasons for window in planned_search),
                 reserve_windows=tuple(planned_reserves),
                 content_uncertainty=receipt.content_uncertainty,
                 content_heterogeneity=receipt.content_heterogeneity,

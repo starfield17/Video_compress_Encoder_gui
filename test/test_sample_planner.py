@@ -10,6 +10,7 @@ from core.smart.sampling.planner import (
     align_window_to_scene_cuts,
     build_sample_plan,
     content_statistics,
+    fresh_validation_window,
     holdout_window_count,
     plan_scout_windows,
     rank_scout_observations,
@@ -27,6 +28,31 @@ def _observations(duration: float, settings: AnalysisProfileSettings) -> tuple[S
 
 
 class SamplePlannerTest(unittest.TestCase):
+    def test_fresh_validation_uses_largest_gap_and_never_reuses_occupied_time(self) -> None:
+        occupied = [(0.0, 15.0), (30.0, 20.0), (60.0, 5.0)]
+        window = fresh_validation_window(100, 5, occupied, identity="holdout:fresh")
+        self.assertIsNotNone(window)
+        assert window is not None
+        self.assertEqual((window.start_sec, window.duration_sec), (80.0, 5.0))
+        self.assertIsNone(fresh_validation_window(10, 5, [(0, 6), (8, 2)], identity="holdout:none"))
+
+    def test_capacity_across_seeds_and_short_durations(self) -> None:
+        for name, settings in FACTORY_ANALYSIS_PROFILES.items():
+            for duration in (settings.whole_video_max_sec + 0.1, 40.0, 60.0, 120.0):
+                for seed in range(20):
+                    with self.subTest(profile=name, duration=duration, seed=seed):
+                        scouts = plan_scout_windows(duration, settings, seed=str(seed))
+                        observations = [ScoutObservation(w, (i * 17) % 130, (i * 13) % 70)
+                                        for i, w in enumerate(scouts)]
+                        plan = build_sample_plan(duration, settings, observations, seed=str(seed))
+                        windows = sorted((*plan.search_windows, *plan.holdout_windows, *plan.reserve_windows),
+                                         key=lambda w: w.start_sec)
+                        self.assertTrue(windows)
+                        for left, right in zip(windows, windows[1:]):
+                            self.assertLessEqual(left.start_sec + left.duration_sec, right.start_sec + 1e-9)
+                        if not plan.whole_video:
+                            self.assertTrue(any("unscouted_validation" in w.reasons for w in plan.holdout_windows))
+
     def test_profile_duration_buckets(self) -> None:
         settings = FACTORY_ANALYSIS_PROFILES[AnalysisProfileName.BALANCE]
         self.assertEqual(search_window_count(9 * 60, settings), 4)

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import subprocess
 import time
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable, TextIO
 
@@ -69,6 +71,35 @@ class SampleWindow:
     duration_sec: float
 
 
+@dataclass(frozen=True, slots=True)
+class WindowMeasurement:
+    score: VmafWindowScore
+    encoded_bytes: int
+    duration_sec: float
+
+
+def _measurement_key(
+    ffmpeg_path: Path, item: EncodePlanItem, plan: AnalysisExecutionPlan,
+    source: Path, duration: float, start: float = 0.0,
+) -> str:
+    def identity(path: Path) -> tuple[str, int | None, int | None]:
+        try:
+            stat = path.stat()
+            return str(path.resolve()), stat.st_size, stat.st_mtime_ns
+        except OSError:
+            return str(path.resolve()), None, None
+
+    assert item.media_info is not None
+    payload = (
+        identity(ffmpeg_path), identity(item.source_path), identity(source), start, duration,
+        build_video_args(item, plan.encoder_extra_args), asdict(plan),
+        asdict(select_vmaf_model(item.media_info, item.options.viewing_context)),
+        asdict(candidate_encode_metadata(item.media_info, item.options.pix_fmt)),
+        item.media_info.fps,
+    )
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
 def run_logged(
     cmd: list[str],
     log_file: TextIO,
@@ -79,6 +110,7 @@ def run_logged(
     phase: str = "command",
     capture_output: bool = False,
 ) -> str:
+    started = time.perf_counter()
     log_file.write("$ " + " ".join(cmd) + "\n")
     log_file.flush()
     try:
@@ -124,6 +156,10 @@ def run_logged(
     finally:
         if process_callback is not None:
             process_callback(None)
+        log_file.write("[smart phase] " + json.dumps({
+            "phase": phase, "seconds": time.perf_counter() - started,
+        }) + "\n")
+        log_file.flush()
     if return_code != 0:
         failure = SmartCommandError(return_code, cmd, phase, output_tail)
         log_file.write(f"[smart command failed] phase={phase} exit_code={return_code}\n{failure.output_tail}\n")
@@ -303,6 +339,8 @@ def score_candidate_loopback(
     process_callback: Callable[[subprocess.Popen[str] | None], None] | None,
     audio_bitrate_bps: int = 0, source_bytes: int | None = None,
     min_vmaf_target: float | None = None, window_order: list[int] | None = None,
+    measurement_cache: dict[str, WindowMeasurement] | None = None,
+    force_remeasure: bool = False,
 ) -> QualityCandidateResult:
     candidate_item = bind_candidate_item(item, bitrate_bps, plan)
     if item.media_info is None:
@@ -314,7 +352,20 @@ def score_candidate_loopback(
     encoded_bytes: dict[int, int] = {}
     encoded_durations: dict[int, float] = {}
     for window_index in order:
+        if cancel_check is not None and cancel_check():
+            raise OperationCancelledError("Smart analysis cancelled.")
         window = windows[window_index]
+        cache_key = _measurement_key(ffmpeg_path, candidate_item, plan, item.source_path,
+                                     window.duration_sec, window.start_sec)
+        cached = measurement_cache.get(cache_key) if measurement_cache is not None and not force_remeasure else None
+        if cached is not None:
+            scores[window_index] = cached.score
+            encoded_bytes[window_index] = cached.encoded_bytes
+            encoded_durations[window_index] = cached.duration_sec
+            log_timing(log_file, f"measurement cache hit: {cache_key}")
+            if min_vmaf_target is not None and cached.score.gate_score < min_vmaf_target:
+                break
+            continue
         candidate_path = temp_root / f"loopback-{plan.tier.value}-{bitrate_bps}-{window_index}.mkv"
         json_path = temp_root / f"vmaf-{plan.tier.value}-{bitrate_bps}-{window_index}.json"
         started = time.perf_counter()
@@ -337,6 +388,10 @@ def score_candidate_loopback(
         scores[window_index] = score
         encoded_bytes[window_index] = encoded_size
         encoded_durations[window_index] = float(window.duration_sec)
+        if cancel_check is not None and cancel_check():
+            raise OperationCancelledError("Smart analysis cancelled.")
+        if measurement_cache is not None:
+            measurement_cache[cache_key] = WindowMeasurement(score, encoded_size, window.duration_sec)
         if min_vmaf_target is not None and score.gate_score < min_vmaf_target:
             log_timing(log_file, f"{plan.tier.value} candidate {bitrate_bps}: window {window_index + 1} quality_score={score.gate_score:.3f} early rejected")
             break
@@ -356,6 +411,8 @@ def score_candidate(
     window_durations_sec: list[float] | None = None, audio_bitrate_bps: int = 0,
     source_bytes: int | None = None, plan: AnalysisExecutionPlan | None = None,
     min_vmaf_target: float | None = None, window_order: list[int] | None = None,
+    measurement_cache: dict[str, WindowMeasurement] | None = None,
+    force_remeasure: bool = False,
 ) -> QualityCandidateResult:
     if plan is None:
         if item.encoder_info is None:
@@ -377,7 +434,26 @@ def score_candidate(
     encode_metadata = candidate_encode_metadata(item.media_info, item.options.pix_fmt)
     order = window_order or list(range(len(references)))
     for window_index in order:
+        if cancel_check is not None and cancel_check():
+            raise OperationCancelledError("Smart analysis cancelled.")
         reference = references[window_index]
+        duration = (
+            window_durations_sec[window_index]
+            if window_durations_sec is not None and window_index < len(window_durations_sec)
+            else item.media_info.duration
+        )
+        if duration <= 0:
+            raise RuntimeError(f"Smart candidate encode produced an invalid sample duration: {duration}")
+        cache_key = _measurement_key(ffmpeg_path, candidate_item, plan, reference, duration)
+        cached = measurement_cache.get(cache_key) if measurement_cache is not None and not force_remeasure else None
+        if cached is not None:
+            scores[window_index] = cached.score
+            encoded_bytes[window_index] = cached.encoded_bytes
+            encoded_durations[window_index] = cached.duration_sec
+            log_timing(log_file, f"measurement cache hit: {cache_key}")
+            if min_vmaf_target is not None and cached.score.gate_score < min_vmaf_target:
+                break
+            continue
         candidate_path = temp_root / f"candidate-{plan.tier.value}-{bitrate_bps}-{window_index}.mkv"
         commands, passlog = build_encode_commands(
             ffmpeg_path, candidate_item, workdir, input_path=reference, output_path=candidate_path,
@@ -399,13 +475,6 @@ def score_candidate(
             encoded_size = candidate_path.stat().st_size
         except OSError as exc:
             raise RuntimeError(f"Smart candidate encode did not produce its sample output: {candidate_path}") from exc
-        duration = (
-            window_durations_sec[window_index]
-            if window_durations_sec is not None and window_index < len(window_durations_sec)
-            else item.media_info.duration
-        )
-        if duration <= 0:
-            raise RuntimeError(f"Smart candidate encode produced an invalid sample duration: {duration}")
         json_path = temp_root / f"vmaf-{plan.tier.value}-{bitrate_bps}-{window_index}.json"
         vmaf_started = time.perf_counter()
         run_logged(
@@ -420,6 +489,10 @@ def score_candidate(
         scores[window_index] = score
         encoded_bytes[window_index] = encoded_size
         encoded_durations[window_index] = float(duration)
+        if cancel_check is not None and cancel_check():
+            raise OperationCancelledError("Smart analysis cancelled.")
+        if measurement_cache is not None:
+            measurement_cache[cache_key] = WindowMeasurement(score, encoded_size, duration)
         log_timing(log_file, f"{plan.tier.value} candidate {bitrate_bps} window {window_index + 1}: encode={encode_elapsed:.2f}s vmaf={vmaf_elapsed:.2f}s quality_score={score.gate_score:.3f}")
         if min_vmaf_target is not None and score.gate_score < min_vmaf_target:
             log_timing(log_file, f"{plan.tier.value} candidate {bitrate_bps}: window {window_index + 1} quality_score={score.gate_score:.3f} early rejected")

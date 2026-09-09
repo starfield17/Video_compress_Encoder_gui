@@ -35,10 +35,10 @@ from .size_prediction import SIZE_PREDICTION_VERSION
 
 # These version values are part of the persisted receipt identity.  Keep them
 # stable for behavior-preserving refactors.
-SMART_SAMPLE_SCHEME_VERSION = 6
-SMART_ANALYSIS_ALGORITHM_VERSION = 8
+SMART_SAMPLE_SCHEME_VERSION = 7
+SMART_ANALYSIS_ALGORITHM_VERSION = 9
 SMART_RISK_VECTOR_VERSION = 2
-SMART_ADAPTIVE_PLANNER_VERSION = 2
+SMART_ADAPTIVE_PLANNER_VERSION = 3
 
 
 class _SampleWindow(Protocol):

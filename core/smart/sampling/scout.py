@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
 from pathlib import Path
 from typing import Callable
 
@@ -51,9 +52,12 @@ def discover_sample_plan(
     run_command: RunCommand,
     progress: ProgressCallback,
 ) -> SamplingResult:
-    scouts = plan_scout_windows(source_duration_sec, settings)
+    stat = source_path.stat()
+    seed = hashlib.sha256(f"{source_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}".encode()).hexdigest()
+    scouts = plan_scout_windows(source_duration_sec, settings, seed=seed)
     if not scouts:
-        return SamplingResult(build_sample_plan(source_duration_sec, settings), ())
+        whole = PlannedWindow("search:whole-video", 0.0, source_duration_sec, ("whole_video",))
+        return SamplingResult(SamplePlan((), (whole,), (), True), ())
 
     observations: list[ScoutObservation] = []
     for index, scout in enumerate(scouts):
@@ -91,7 +95,7 @@ def discover_sample_plan(
             )
         )
     progress("scout_finished", {"scout_count": len(observations)})
-    plan = build_sample_plan(source_duration_sec, settings, observations)
+    plan = build_sample_plan(source_duration_sec, settings, observations, seed=seed)
     progress(
         "sample_plan_ready",
         {
@@ -128,7 +132,11 @@ def _align_plan(
         return plan
     aligned: list[PlannedWindow] = []
     all_windows = [*plan.search_windows, *plan.holdout_windows, *plan.reserve_windows]
+    coverage_bins = max(1, len(plan.search_windows) // 2)
     for index, window in enumerate(all_windows):
+        if "unscouted_validation" in window.reasons:
+            aligned.append(window)
+            continue
         progress(
             "boundary_alignment",
             {"window_index": index + 1, "window_count": len(all_windows)},
@@ -152,6 +160,11 @@ def _align_plan(
             (guard_start + value for value in cuts),
             source_duration_sec,
         )
+        for reason in window.reasons:
+            if reason.startswith("coverage_bin_"):
+                bin_index = int(reason.rsplit("_", 1)[1]) - 1
+                if not bin_index * source_duration_sec / coverage_bins <= candidate.center_sec < (bin_index + 1) * source_duration_sec / coverage_bins:
+                    candidate = replace(window, crosses_scene_cut=True)
         original_peers = [*all_windows[:index], *all_windows[index + 1 :]]
         protected = [*aligned, *original_peers]
         overlaps = any(

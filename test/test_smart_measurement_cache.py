@@ -11,9 +11,27 @@ from core.smart.measurement import score_candidate
 from core.smart.runtime import AnalysisTier
 from core.smart.vmaf import VmafWindowScore
 import test_analysis_runtime as runtime_tests
+from core.models import OperationCancelledError
 
 
 class WindowMeasurementCacheTest(unittest.TestCase):
+    def test_failure_and_cancellation_do_not_publish_measurement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = runtime_tests.AnalysisSessionTestCase()._session(root)
+            reference = root / "reference.mkv"
+            reference.write_bytes(b"reference")
+            for failure in (RuntimeError("invalid score"), OperationCancelledError("cancelled")):
+                with self.subTest(failure=type(failure).__name__):
+                    cache = {}
+                    with patch("core.smart.measurement.run_logged", side_effect=failure):
+                        with self.assertRaises(type(failure)):
+                            score_candidate(session.ffmpeg_path, session.item, [reference], 900_000,
+                                            root, root, io.StringIO(), cancel_check=None,
+                                            process_callback=None, plan=session.exact_plan,
+                                            measurement_cache=cache, window_durations_sec=[5.0])
+                    self.assertEqual(cache, {})
+
     def test_reuse_expansion_parameter_change_and_forced_remeasurement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

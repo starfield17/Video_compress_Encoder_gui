@@ -705,7 +705,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
                 measurement_configuration_fingerprint(ffmpeg, standard_display),
                 cpu,
             )
-            self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 6)
+            self.assertEqual(SMART_SAMPLE_SCHEME_VERSION, 7)
             self.assertEqual(SMART_ANALYSIS_ALGORITHM_VERSION, 9)
             self.assertEqual(ANALYSIS_RECEIPT_SCHEMA_VERSION, 5)
             from core.smart.cache import measurement_configuration_payload
@@ -714,7 +714,7 @@ class SmartAnalyseV2TestCase(unittest.TestCase):
             self.assertEqual(payload["sample_scheme_version"], 7)
             self.assertEqual(payload["vmaf_subsample"], 1)
             self.assertEqual(payload["vmaf_backend"], "cpu")
-            self.assertEqual(payload["analysis_algorithm_version"], 8)
+            self.assertEqual(payload["analysis_algorithm_version"], 9)
             self.assertEqual(payload["vmaf_resolution_mode"], "display_model_canvas")
             self.assertEqual(payload["vmaf_generation"], "v1")
             self.assertEqual(payload["vmaf_model"], "vmaf_v1.0.16_3d0h")

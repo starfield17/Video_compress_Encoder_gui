@@ -15,7 +15,7 @@ from .bitrate import (
 )
 from .measurement import measure_size_only
 from .runtime import search_tolerance_bps
-from .sampling.planner import PlannedWindow, SamplePlan, rank_scout_observations
+from .sampling.planner import PlannedWindow, SamplePlan, fresh_validation_window, rank_scout_observations
 from .session import AnalysisSession, emit_analysis_progress, sample_window
 
 
@@ -353,6 +353,24 @@ def _refine_holdouts(session: AnalysisSession, settings: SearchSettings, result:
         )
         result.search_history_scout_ids.update(window.scout_id for window in failed if window.scout_id is not None)
         result.remaining_holdouts = [window for window in result.remaining_holdouts if window not in failed]
+        if any("unscouted_validation" in window.reasons for window in failed):
+            occupied = [
+                (window.start_sec, window.duration_sec)
+                for window in (*session.planned_search, *result.remaining_holdouts, *result.remaining_reserves)
+            ]
+            occupied.extend((value.window.start_sec, value.window.duration_sec) for value in session.scout_observations)
+            fresh_blind = fresh_validation_window(
+                session.item.media_info.duration, session.profile.sample_duration_sec, occupied,
+                identity=f"holdout:unscouted:{refinement_round}",
+            )
+            if fresh_blind is None:
+                result.terminal_result = replace(
+                    result.selection, status=QualitySearchStatus.FAILED,
+                    reason="Holdout refinement exhausted unscouted validation space.",
+                )
+                break
+            result.remaining_holdouts.append(fresh_blind)
+            result.refinement_records[-1]["fresh_unscouted_holdout_id"] = fresh_blind.id
         if not result.remaining_holdouts and result.remaining_reserves:
             reserve = result.remaining_reserves.pop(0)
             fresh = replace(
@@ -421,7 +439,7 @@ def _resolve_ambiguity(session: AnalysisSession, settings: SearchSettings, resul
             result.candidates,
             key=lambda candidate: abs(candidate.min_vmaf - float(session.item.options.min_vmaf)),
         )
-        repeated = session.evaluate(decision_point.video_bitrate_bps, session.exact_plan)
+        repeated = session.evaluate(decision_point.video_bitrate_bps, session.exact_plan, force_remeasure=True)
         result.candidates = [
             repeated if candidate.video_bitrate_bps == repeated.video_bitrate_bps else candidate
             for candidate in result.candidates
@@ -466,7 +484,16 @@ def run_search(
     _calibrate_size(session, settings, result)
     _expand_near_threshold(session, settings, result)
     _refine_holdouts(session, settings, result)
+    verified_bitrate = result.selection.selected_video_bitrate_bps
     _resolve_ambiguity(session, settings, result)
+    if (result.terminal_result is None and result.selection.success and result.remaining_holdouts
+            and result.selection.selected_video_bitrate_bps != verified_bitrate):
+        failed, scores = _verify_holdouts(session, result.selection.selected_video_bitrate_bps,
+                                         result.remaining_holdouts, refinement_round=len(result.refinement_records))
+        result.holdout_min_vmaf = min(scores)
+        if failed:
+            result.terminal_result = replace(result.selection, status=QualitySearchStatus.FAILED,
+                                             reason="Final bitrate changed after ambiguity resolution and failed holdout validation.")
     session.log_file.write(
         f"selected_bitrate_bps={result.selection.selected_video_bitrate_bps}\n"
         f"search_min_vmaf={result.selection.min_vmaf}\n"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import statistics
 from dataclasses import dataclass, replace
@@ -193,8 +194,40 @@ def should_analyze_whole_video(
     return duration_sec <= settings.whole_video_max_sec
 
 
-def plan_scout_windows(duration_sec: float, settings: AnalysisProfileSettings) -> tuple[ScoutWindow, ...]:
-    """Return evenly distributed low-cost scout windows."""
+def _unit_hash(seed: str, label: str) -> float:
+    return int.from_bytes(hashlib.sha256(f"smart-strata-v1:{seed}:{label}".encode()).digest()[:8], "big") / 2**64
+
+
+def _blind_window(duration_sec: float, settings: AnalysisProfileSettings, seed: str) -> PlannedWindow:
+    duration = min(settings.sample_duration_sec, duration_sec)
+    start = (duration_sec - duration) * (0.25 + 0.5 * _unit_hash(seed, "validation"))
+    return PlannedWindow("holdout:unscouted", start, duration, ("unscouted_validation",))
+
+
+def fresh_validation_window(
+    duration_sec: float, sample_duration_sec: float,
+    occupied: Iterable[tuple[float, float]], *, identity: str,
+) -> PlannedWindow | None:
+    """Use the largest unobserved gap without consulting measured quality."""
+    end = 0.0
+    gaps: list[tuple[float, float]] = []
+    for start, duration in sorted(occupied):
+        if start - end >= sample_duration_sec:
+            gaps.append((end, start))
+        end = max(end, start + duration)
+    if duration_sec - end >= sample_duration_sec:
+        gaps.append((end, duration_sec))
+    if not gaps:
+        return None
+    low, high = max(gaps, key=lambda gap: (gap[1] - gap[0], -gap[0]))
+    start = (low + high - sample_duration_sec) / 2.0
+    return PlannedWindow(identity, start, sample_duration_sec, ("unscouted_validation", "fresh_gap_holdout"))
+
+
+def plan_scout_windows(
+    duration_sec: float, settings: AnalysisProfileSettings, *, seed: str = "",
+) -> tuple[ScoutWindow, ...]:
+    """Stratify probes around an independently reserved, unobserved interval."""
 
     if not math.isfinite(duration_sec) or duration_sec <= 0:
         raise SamplePlanningError("Source duration must be finite and positive.")
@@ -213,12 +246,27 @@ def plan_scout_windows(duration_sec: float, settings: AnalysisProfileSettings) -
         ),
     )
     count = max(1, int(requested))
-    scout_duration = min(float(settings.scout_duration_sec), duration_sec)
-    max_start = max(0.0, duration_sec - scout_duration)
-    if count == 1:
-        starts = [max_start / 2.0]
-    else:
-        starts = [max_start * index / (count - 1) for index in range(count)]
+    blind = _blind_window(duration_sec, settings, seed)
+    if blind.duration_sec >= duration_sec:
+        return ()
+    scout_duration = min(float(settings.scout_duration_sec), blind.start_sec,
+                         duration_sec - blind.start_sec - blind.duration_sec)
+    left_count = max(1, min(count - 1, round(count * blind.start_sec / (duration_sec - blind.duration_sec)))) if count > 1 else 1
+    regions = ((0.0, blind.start_sec, left_count),
+               (blind.start_sec + blind.duration_sec, duration_sec, count - left_count))
+    starts: list[float] = []
+    for low, high, region_count in regions:
+        if not region_count:
+            continue
+        if high - low < scout_duration:
+            continue
+        cell = (high - low) / region_count
+        for index in range(region_count):
+            if cell >= scout_duration:
+                start = low + index * cell + (cell - scout_duration) * _unit_hash(seed, f"scout:{len(starts)}")
+            else:
+                start = low + (high - low - scout_duration) * index / max(1, region_count - 1)
+            starts.append(start)
     return tuple(
         ScoutWindow(id=f"scout-{index + 1:03d}", start_sec=start, duration_sec=scout_duration)
         for index, start in enumerate(starts)
@@ -475,10 +523,10 @@ def _coverage_candidates(
             item
             for item in ranked
             if low <= item.observation.window.center_sec < high
-            or (bin_index == bins - 1 and item.observation.window.center_sec <= high)
+            or (bin_index == bins - 1 and low <= item.observation.window.center_sec <= high)
         ]
         if within:
-            midpoint = (low + high) / 2.0
+            midpoint = (low + high) / 2.0 if bins > 1 else duration_sec * 0.25
             choices.append(
                 (
                     _ranked_desc(within, "difficulty", anchor_sec=midpoint),
@@ -496,6 +544,7 @@ def _select_holdouts(
     duration_sec: float,
     sample_duration_sec: float,
     count: int,
+    capacity_reserve: int = 0,
 ) -> list[PlannedWindow]:
     holdouts: list[PlannedWindow] = []
     if count <= 0:
@@ -529,7 +578,7 @@ def _select_holdouts(
         available.remove(candidate_ranked)
         if any(_overlaps(candidate, window) for window in (*search, *holdouts)):
             continue
-        remaining = count - len(holdouts) - 1
+        remaining = count - len(holdouts) - 1 + capacity_reserve
         if _available_window_capacity(
             ranked,
             [*search, *holdouts, candidate],
@@ -545,6 +594,7 @@ def build_sample_plan(
     duration_sec: float,
     settings: AnalysisProfileSettings,
     observations: Iterable[ScoutObservation] = (),
+    *, seed: str = "",
 ) -> SamplePlan:
     """Select hard and timeline-representative search/holdout windows."""
 
@@ -557,7 +607,7 @@ def build_sample_plan(
         return SamplePlan((), (whole,), (), True)
 
     ranked = rank_scout_observations(observations)
-    expected = {window.id for window in plan_scout_windows(duration_sec, settings)}
+    expected = {window.id for window in plan_scout_windows(duration_sec, settings, seed=seed)}
     actual = {item.observation.window.id for item in ranked}
     if actual != expected:
         raise SamplePlanningError("Scout observations do not match the deterministic scout plan.")
@@ -567,31 +617,34 @@ def build_sample_plan(
         (settings.holdout_target_max - settings.holdout_target_min) * uncertainty
     )
     expected_holdouts = max(holdout_window_count(duration_sec, settings), target_holdouts)
-    expected_holdouts = min(settings.holdout_target_max, expected_holdouts)
+    expected_holdouts = max(1, min(settings.holdout_target_max, expected_holdouts))
+    blind = _blind_window(duration_sec, settings, seed)
+    risk_holdouts = expected_holdouts - 1
     projected_capacity = _available_window_capacity(
         ranked,
-        [],
+        [blind],
         duration_sec=duration_sec,
         sample_duration_sec=settings.sample_duration_sec,
     )
     expected_reserves = min(
         settings.reserve_window_count,
-        max(0, projected_capacity - expected_holdouts - 1),
+        max(0, projected_capacity - risk_holdouts - 1),
     )
     target = max(
         1,
         min(
             adaptive_search_window_count(duration_sec, settings, (item.observation for item in ranked)),
-            projected_capacity - expected_holdouts - expected_reserves,
+            projected_capacity - risk_holdouts - expected_reserves,
         ),
     )
-    if target < 1:
-        raise SamplePlanningError(
-            "Unable to reserve independent search and holdout windows."
-        )
+    if projected_capacity < risk_holdouts + 1:
+        whole = PlannedWindow("search:whole-video", 0.0, duration_sec, ("whole_video", "insufficient_independent_capacity"))
+        return SamplePlan(tuple(item.observation.window for item in ranked), (whole,), (), True)
     search: list[PlannedWindow] = []
 
     def add_search(candidate: PlannedWindow, *, allow_merge: bool = True) -> bool:
+        if _overlaps(candidate, blind):
+            return False
         trial = list(search)
         if not _add_window(
             trial,
@@ -601,10 +654,10 @@ def build_sample_plan(
         ):
             return False
         if len(trial) > len(search):
-            remaining = target - len(trial) + expected_holdouts + expected_reserves
+            remaining = target - len(trial) + risk_holdouts + expected_reserves
             if _available_window_capacity(
                 ranked,
-                trial,
+                [blind, *trial],
                 duration_sec=duration_sec,
                 sample_duration_sec=settings.sample_duration_sec,
             ) < remaining:
@@ -612,33 +665,39 @@ def build_sample_plan(
         search[:] = trial
         return True
 
-    # Preserve the three distinct compression-risk representatives first.  On
-    # very small K this intentionally outweighs the approximate 50/50 split.
+    # Coverage has an explicit budget; risk representatives use the remainder.
+    coverage_slots = max(1, target // 2)
+    for candidates, reason, _midpoint in _coverage_candidates(ranked, coverage_slots, duration_sec):
+        for candidate_ranked in candidates:
+            candidate = _project_window(candidate_ranked, duration_sec=duration_sec,
+                                        sample_duration_sec=settings.sample_duration_sec,
+                                        kind="search", reasons=(reason,))
+            bin_index = int(reason.rsplit("_", 1)[1]) - 1
+            if not bin_index * duration_sec / coverage_slots <= candidate.center_sec < (bin_index + 1) * duration_sec / coverage_slots:
+                continue
+            if add_search(candidate, allow_merge=False):
+                break
+        else:
+            whole = PlannedWindow("search:whole-video", 0.0, duration_sec, ("whole_video", "insufficient_coverage_capacity"))
+            return SamplePlan(tuple(item.observation.window for item in ranked), (whole,), (), True)
     representatives = (
         ("si", "highest_spatial_risk", 0.25),
         ("ti", "highest_motion_risk", 0.75),
         ("difficulty", "global_compression_risk", 0.50),
     )
     for key, reason, anchor_fraction in representatives:
-        candidate = _project_window(
-            _ranked_desc(
-                ranked,
-                key,
-                anchor_sec=duration_sec * anchor_fraction,
-            )[0],
-            duration_sec=duration_sec,
-            sample_duration_sec=settings.sample_duration_sec,
-            kind="search",
-            reasons=(
-                reason,
-                {
+        for ranked_candidate in _ranked_desc(ranked, key, anchor_sec=duration_sec * anchor_fraction):
+            candidate = _project_window(
+                ranked_candidate, duration_sec=duration_sec,
+                sample_duration_sec=settings.sample_duration_sec, kind="search",
+                reasons=(reason, {
                     "highest_spatial_risk": "highest_si",
                     "highest_motion_risk": "highest_ti",
                     "global_compression_risk": "global_hardest",
-                }[reason],
-            ),
-        )
-        add_search(candidate)
+                }[reason]),
+            )
+            if add_search(candidate):
+                break
 
     transition_candidates = sorted(
         ranked,
@@ -663,39 +722,6 @@ def build_sample_plan(
             allow_merge=True,
         )
 
-    coverage_slots = target // 2
-    for candidates, reason, midpoint in _coverage_candidates(
-        ranked, coverage_slots, duration_sec
-    ):
-        added = False
-        for candidate_ranked in candidates:
-            if add_search(
-                _project_window(
-                    candidate_ranked,
-                    duration_sec=duration_sec,
-                    sample_duration_sec=settings.sample_duration_sec,
-                    kind="search",
-                    reasons=(reason,),
-                ),
-                allow_merge=False,
-            ):
-                added = True
-                break
-        if not added and search:
-            nearest_index = min(
-                range(len(search)),
-                key=lambda index: (
-                    abs(search[index].center_sec - midpoint),
-                    search[index].start_sec,
-                    search[index].id,
-                ),
-            )
-            existing = search[nearest_index]
-            search[nearest_index] = replace(
-                existing,
-                reasons=tuple(dict.fromkeys((*existing.reasons, reason))),
-            )
-
     for candidate_ranked in _ranked_desc(
         ranked, "difficulty", anchor_sec=duration_sec / 2.0
     ):
@@ -716,11 +742,13 @@ def build_sample_plan(
 
     holdouts = _select_holdouts(
         ranked,
-        search,
+        [*search, blind],
         duration_sec=duration_sec,
         sample_duration_sec=settings.sample_duration_sec,
-        count=expected_holdouts,
+        count=risk_holdouts,
+        capacity_reserve=expected_reserves,
     )
+    holdouts.append(blind)
     if len(holdouts) != expected_holdouts:
         raise SamplePlanningError(
             "Unable to select the requested number of independent holdout windows."
