@@ -221,6 +221,10 @@ def align_cfr_command(command: list[str], fps: float) -> list[str]:
     aligned = list(command)
     index = aligned.index("-filter_complex") + 1
     aligned[index] = aligned[index].replace("setpts=PTS-STARTPTS", f"setpts=N/({fps:.12g}*TB)")
+    # Bound decoder/filter queues independently of libvmaf's worker count.
+    for index in reversed([i for i, value in enumerate(aligned) if value == "-i"]):
+        aligned[index:index] = ["-threads", "2"]
+    aligned[1:1] = ["-filter_complex_threads", "1"]
     return aligned
 
 
@@ -468,7 +472,7 @@ def run_oracle_search(
             model_spec=model_spec,
             encode_metadata=encode_metadata,
             log_name=str(vmaf_json),
-            n_threads=min(MAX_VMAF_THREADS, vmaf_thread_budget()),
+            n_threads=min(2, MAX_VMAF_THREADS, vmaf_thread_budget()),
             n_subsample=1,
         )
         vmaf_cmd = align_cfr_command(vmaf_cmd, fps)
@@ -874,7 +878,7 @@ def run_smart_case(argv: Sequence[str] | None = None) -> int:
             model_spec=model_spec,
             encode_metadata=encode_metadata,
             log_name=str(vmaf_json_path),
-            n_threads=min(MAX_VMAF_THREADS, vmaf_thread_budget()),
+            n_threads=min(2, MAX_VMAF_THREADS, vmaf_thread_budget()),
             n_subsample=1,
         )
         vmaf_cmd = align_cfr_command(vmaf_cmd, validated_fps)

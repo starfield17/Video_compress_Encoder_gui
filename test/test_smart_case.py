@@ -429,7 +429,7 @@ class TestFullFrameGroundTruth(unittest.TestCase):
     def test_cfr_alignment_pairs_both_inputs_by_frame_index(self) -> None:
         command = ["ffmpeg", "-filter_complex", "[0:v]setpts=PTS-STARTPTS[a];[1:v]setpts=PTS-STARTPTS[b]", "-"]
         aligned = align_cfr_command(command, 30.0)
-        self.assertEqual(aligned[2], "[0:v]setpts=N/(30*TB)[a];[1:v]setpts=N/(30*TB)[b]")
+        self.assertEqual(aligned[aligned.index("-filter_complex") + 1], "[0:v]setpts=N/(30*TB)[a];[1:v]setpts=N/(30*TB)[b]")
         self.assertIn("PTS-STARTPTS", command[2])
 
     def test_truncated_ground_truth_is_rejected(self) -> None:
