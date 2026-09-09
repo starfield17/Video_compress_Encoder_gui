@@ -1,4 +1,4 @@
 -r requirements.txt
 pyright==1.1.411
-ruff==0.15.21
-Pillow>=11.0
+ruff==0.16.6
+Pillow==12.3.0
