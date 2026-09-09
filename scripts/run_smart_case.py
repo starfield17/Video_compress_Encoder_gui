@@ -118,8 +118,8 @@ def apply_disable_window_cache_patch() -> None:
 def validate_constant_fps(
     ffprobe_path: Path,
     source_path: Path,
-) -> float:
-    """Validate that source is constant frame rate (CFR) and return fps.
+) -> tuple[float, int]:
+    """Validate CFR and return fps and decoded frame count from one timeline scan.
 
     Fails clear if variable frame rate (VFR) is detected.
     """
@@ -206,9 +206,9 @@ def validate_constant_fps(
                 f"r_frame_rate={r_fps:.3f}, avg_frame_rate={avg_fps:.3f}. "
                 "VFR detected; temporal oracle fails clear."
             )
-        return r_fps
+        return r_fps, len(timestamps)
 
-    return float(r_fps or avg_fps or 30.0)
+    return float(r_fps or avg_fps or 30.0), len(timestamps)
 
 
 # -----------------------------------------------------------------------------
@@ -702,8 +702,7 @@ def run_smart_case(argv: Sequence[str] | None = None) -> int:
 
     # 3. Validate constant FPS / fail clear on VFR
     try:
-        validated_fps = validate_constant_fps(ffprobe_path, source_path)
-        source_frames = decoded_frame_count(ffprobe_path, source_path)
+        validated_fps, source_frames = validate_constant_fps(ffprobe_path, source_path)
     except Exception as exc:
         sys.stderr.write(f"Frame rate validation failed: {exc}\n")
         return 1

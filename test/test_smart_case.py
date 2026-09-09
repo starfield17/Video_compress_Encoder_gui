@@ -413,8 +413,9 @@ class TestCFRValidationAndVFRHandling(unittest.TestCase):
                                    MagicMock(returncode=0, stdout=json.dumps({"frames": [
                                        {"best_effort_timestamp_time": t} for t in (0, 0.033367, 0.066733)
                                    ]}), stderr="")]
-            fps = validate_constant_fps(Path("/bin/ffprobe"), Path("/fake/cfr_video.mp4"))
+            fps, frame_count = validate_constant_fps(Path("/bin/ffprobe"), Path("/fake/cfr_video.mp4"))
             self.assertAlmostEqual(fps, 29.970, places=2)
+            self.assertEqual(frame_count, 3)
 
 
 class TestFullFrameGroundTruth(unittest.TestCase):
