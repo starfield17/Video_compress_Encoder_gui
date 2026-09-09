@@ -102,6 +102,10 @@ A runner defect was caught during smoke validation: differing Matroska and MP4
 time bases initially yielded a spurious score near 59.3. CFR frame alignment
 restored approximately 90.58, matching the Smart measurement near 90.59. The
 runner includes regression checks for alignment and incomplete frame coverage.
+For sources longer than two minutes, validation uses sequential 30-second VMAF
+segments with one-second overlap. Overlap frames are removed before global mean
+and rolling worst-one-second pooling, bounding memory without hiding boundary
+intervals.
 
 Repository validation passed 542 tests, including the explicitly configured
 FFmpeg integration test, plus Ruff, Pyright, compileall and generated icon

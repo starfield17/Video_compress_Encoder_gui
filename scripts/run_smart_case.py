@@ -299,6 +299,58 @@ def compute_full_vmaf_metrics(
     return mean_vmaf, worst_1s, gate_score
 
 
+def compute_segmented_vmaf_metrics(
+    ffmpeg_path: Path, distorted_path: Path, reference_path: Path,
+    model_spec: VmafModelSpec, encode_metadata: VmafEncodeMetadata,
+    fps: float, expected_frames: int, workdir: Path,
+    *, segment_duration_sec: float = 30.0, overlap_sec: float = 1.0,
+) -> tuple[float, float, float]:
+    """Score long CFR inputs in bounded sequential segments and merge by frame."""
+    all_scores: list[float] = []
+    distorted_path = distorted_path.resolve()
+    reference_path = reference_path.resolve()
+    workdir = workdir.resolve()
+    segment_frames = max(1, round(segment_duration_sec * fps))
+    overlap_frames = max(0, round(overlap_sec * fps))
+    step = max(1, segment_frames - overlap_frames)
+    for start_frame in range(0, expected_frames, step):
+        count = min(segment_frames, expected_frames - start_frame)
+        start = start_frame / fps
+        duration = count / fps
+        log_path = workdir / f"seg-vmaf-{start_frame:09d}.json"
+        command = build_cpu_vmaf_command(
+            ffmpeg_path, distorted_path=distorted_path, reference_path=reference_path,
+            model_spec=model_spec, encode_metadata=encode_metadata,
+            log_name=str(log_path), n_threads=2, n_subsample=1,
+        )
+        # Apply the same trim to both inputs before the filter graph.
+        input_indices = [index for index, value in enumerate(command) if value == "-i"]
+        for input_index in reversed(input_indices):
+            command[input_index:input_index] = ["-ss", f"{start:.6f}", "-t", f"{duration:.6f}"]
+        command = align_cfr_command(command, fps)
+        result = subprocess.run(command, check=False, cwd=workdir, capture_output=True, text=True, **noninteractive_run_kwargs())
+        if result.returncode != 0:
+            raise RuntimeError(f"Segmented VMAF failed at frame {start_frame}: {result.stderr[-500:]}")
+        data = json.loads(log_path.read_text(encoding="utf-8"))
+        scores = [validate_vmaf_score(float(frame["metrics"]["vmaf"]), model_spec) for frame in data["frames"]]
+        if start_frame:
+            scores = scores[min(overlap_frames, len(scores)):]
+        all_scores.extend(scores)
+        if len(all_scores) >= expected_frames:
+            break
+    if len(all_scores) != expected_frames:
+        raise RuntimeError("Segmented VMAF did not cover the complete source")
+    mean = sum(all_scores) / len(all_scores)
+    window = max(1, round(fps))
+    rolling = sum(all_scores[:window])
+    lowest = rolling
+    for index in range(window, len(all_scores)):
+        rolling += all_scores[index] - all_scores[index-window]
+        lowest = min(lowest, rolling)
+    worst = lowest / window
+    return mean, worst, min(mean, worst + 4.0)
+
+
 # -----------------------------------------------------------------------------
 # 6. Structured Phase Log Parser & Cache Hit Counters
 # -----------------------------------------------------------------------------
@@ -869,40 +921,24 @@ def run_smart_case(argv: Sequence[str] | None = None) -> int:
         full_encode_output_bytes = full_encode_path.stat().st_size
         require_complete_encode(ffmpeg_path, full_encode_path, source_frames)
 
-        # Full-frame VMAF (n_subsample=1)
         vmaf_start = time.perf_counter()
-        vmaf_cmd = build_cpu_vmaf_command(
-            ffmpeg_path,
-            distorted_path=full_encode_path,
-            reference_path=source_path,
-            model_spec=model_spec,
-            encode_metadata=encode_metadata,
-            log_name=str(vmaf_json_path),
-            n_threads=min(2, MAX_VMAF_THREADS, vmaf_thread_budget()),
-            n_subsample=1,
-        )
-        vmaf_cmd = align_cfr_command(vmaf_cmd, validated_fps)
-        executed_commands.append(vmaf_cmd)
-        res_vmaf = subprocess.run(
-            vmaf_cmd,
-            check=False,
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            **noninteractive_run_kwargs(),
-        )
-        if res_vmaf.returncode != 0:
-            raise RuntimeError(
-                f"Full-frame VMAF failed (code {res_vmaf.returncode}):\n{res_vmaf.stderr[-500:]}"
+        if media_info.duration > 120.0:
+            mean_v, worst_1s, gate = compute_segmented_vmaf_metrics(
+                ffmpeg_path, full_encode_path, source_path, model_spec, encode_metadata,
+                validated_fps, source_frames, workdir,
             )
+        else:
+            vmaf_cmd = align_cfr_command(build_cpu_vmaf_command(
+                ffmpeg_path, distorted_path=full_encode_path, reference_path=source_path,
+                model_spec=model_spec, encode_metadata=encode_metadata,
+                log_name=str(vmaf_json_path), n_threads=2, n_subsample=1,
+            ), validated_fps)
+            executed_commands.append(vmaf_cmd)
+            res_vmaf = subprocess.run(vmaf_cmd, check=False, cwd=workdir, capture_output=True, text=True, **noninteractive_run_kwargs())
+            if res_vmaf.returncode != 0:
+                raise RuntimeError(f"Full-frame VMAF failed (code {res_vmaf.returncode}):\n{res_vmaf.stderr[-500:]}")
+            mean_v, worst_1s, gate = compute_full_vmaf_metrics(vmaf_json_path, model_spec, validated_fps, expected_frames=source_frames)
         full_vmaf_wall_seconds = time.perf_counter() - vmaf_start
-
-        mean_v, worst_1s, gate = compute_full_vmaf_metrics(
-            vmaf_json_path,
-            model_spec,
-            validated_fps,
-            expected_frames=source_frames,
-        )
         ground_truth_passed = (gate >= args.min_vmaf)
         vmaf_details = {
             "mean": mean_v,

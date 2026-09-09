@@ -26,6 +26,7 @@ from scripts.run_smart_case import (
     align_cfr_command,
     require_complete_encode,
     compute_full_vmaf_metrics,
+    compute_segmented_vmaf_metrics,
     parse_smart_log,
     run_oracle_search,
     validate_constant_fps,
@@ -419,6 +420,20 @@ class TestCFRValidationAndVFRHandling(unittest.TestCase):
 
 
 class TestFullFrameGroundTruth(unittest.TestCase):
+    def test_segmented_metric_merges_overlap_without_duplicate_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workdir = Path(td)
+            source = workdir / "source.mkv"
+            distorted = workdir / "distorted.mp4"
+            source.write_bytes(b"source")
+            distorted.write_bytes(b"distorted")
+            scores = [{"metrics": {"vmaf": 95.0}}] * 60
+            def fake_run(command: list[str], **kwargs: object) -> MagicMock:
+                log = Path(command[command.index("-filter_complex") + 1].split("log_path='")[1].split("'")[0])
+                log.write_text(json.dumps({"frames": scores}), encoding="utf-8")
+                return MagicMock(returncode=0, stderr="")
+            with patch("scripts.run_smart_case.subprocess.run", side_effect=fake_run):
+                self.assertEqual(compute_segmented_vmaf_metrics(Path("ffmpeg"), distorted, source, VMAF_STANDARD_MODEL, VmafEncodeMetadata(1920,1080,8), 30.0, 90, workdir, segment_duration_sec=2, overlap_sec=1), (95.0, 95.0, 95.0))
     def test_windows_completeness_probe_uses_sibling_executable(self) -> None:
         with patch("scripts.run_smart_case.subprocess.run", return_value=MagicMock(
             stdout=json.dumps({"streams": [{"nb_read_frames": "60"}]}),
