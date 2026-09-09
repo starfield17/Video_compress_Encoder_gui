@@ -170,7 +170,7 @@ class SmartCorpusGeneratorContractTest(unittest.TestCase):
             case = m["cases"][0]
             cmd = case["command"]
             self.assertEqual(cmd[0], sys.executable)
-            self.assertTrue(cmd[1].endswith("scripts/run_smart_case.py"))
+            self.assertEqual(Path(cmd[1]).parts[-2:], ("scripts", "run_smart_case.py"))
             self.assertIn("--source", cmd)
             self.assertIn("{source}", cmd)
             self.assertIn("--ffmpeg", cmd)
