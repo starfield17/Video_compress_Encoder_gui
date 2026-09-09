@@ -171,6 +171,8 @@ def validate_constant_fps(
         str(ffprobe_path),
         "-v",
         "error",
+        "-threads",
+        "4",
         "-select_streams",
         "v:0",
         "-show_entries",
@@ -224,7 +226,7 @@ def align_cfr_command(command: list[str], fps: float) -> list[str]:
 
 def decoded_frame_count(probe: Path, source: Path) -> int:
     result = subprocess.run(
-        [str(probe), "-v", "error", "-select_streams", "v:0", "-count_frames",
+        [str(probe), "-v", "error", "-threads", "4", "-select_streams", "v:0", "-count_frames",
          "-show_entries", "stream=nb_read_frames", "-of", "json", str(source)],
         capture_output=True, text=True, check=True, **noninteractive_run_kwargs(),
     )
